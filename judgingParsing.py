@@ -9,6 +9,8 @@ import xlwt
 from xlwt import Workbook 
 import arial10
 
+USING_ISU_COMPONENT_METHOD=False
+
 class FitSheetWrapper(object):
     """Try to fit columns to max size of any entry.
     To use, wrap this around a worksheet returned from the 
@@ -71,7 +73,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
             current_skater = None
             for line in lines:
                 # Match skater's name section
-                skater_match = re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z\(\)\-\s]+)?\s+([\d]{1,3}\.[\d\.]{2})\s*([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)$", line)
+                skater_match = re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z\&\(\)\-\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)$", line)
                 if skater_match:
                     skater_name = skater_match.group(2).strip()
                     technical_score = skater_match.group(5)
@@ -124,6 +126,8 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
         total_errors = count_total_errors_per_judge(judges, element_errors, pcs_errors)
 
         printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number)
+        print(f"Num Skaters: {len(skater_details)}")
+        print (list(elements_per_skater.keys()))
         return (event_name, total_errors, get_allowed_errors(len(skater_details)))
    
     
@@ -165,12 +169,19 @@ def findPCSDeviations(skater_scores, judges):
             avg = sum(allScores)/len(allScores)
             for judgeNumber in range(1,len(allScores)+1):
                 deviation = abs(avg-allScores[judgeNumber-1])
+                if (not USING_ISU_COMPONENT_METHOD and deviation > 1.5):
+                    errors.append({
+                    "Skater": skater,
+                    "Judge Number": judgeNumber,
+                    "Judge Name": judges[judgeNumber-1],
+                    "Judge Score": allScores[judgeNumber-1],
+                    "Deviation": deviation
+                    })
                 deviation_points[judgeNumber]= deviation_points[judgeNumber]+ deviation
 
         for judgeNumber in range(1,len(allScores)+1):
-            if (deviation_points[judgeNumber] > 4.5):
-                print (f"Deviation found for judge {judgeNumber} on skater {skater}")
-
+            if (USING_ISU_COMPONENT_METHOD and deviation_points[judgeNumber] > 4.5):
+                # Add errors here if using ISU method
                 errors.append({
                     "Skater": skater,
                     "Judge Number": judgeNumber,
@@ -240,24 +251,17 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
         sheet.write(current_row, 0, judges[i])
         sheet.write(current_row, 1, total_errors[i])
         current_row+=1
-    # # Convert extracted data to a DataFrame
-    # df = pd.DataFrame.from_records(errors)
-
-    # excel_path = f"{base_excel_path}{event_name.replace("/","")}.xls"
-    # workbook.save(excel_path) 
-    # # Save the DataFrame to an Excel file
-    # df.to_excel(excel_path, index=False)
-    #print(f"Judge scores successfully saved to {excel_path}")
+    
     print (f"Processed {event_name}")
+    
+   
 
+if __name__ == "__main__":
+    # Specify paths for the input PDF and output Excel file
+    pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/2.pdf"  # Update with the correct path
+    excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/" 
 
-
-# Specify paths for the input PDF and output Excel file
-pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/19.pdf"  # Update with the correct path
-excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/"
-
-# # # Extract judge scores
-# workbook = xlwt.Workbook()  
-# extract_judge_scores(workbook, pdf_path, excel_path, ["a", "a", "a", "a", "a", "a", "a", "b", "b"])
-# excel_path = f"{excel_path}DeviationsReport2.xls"
-# workbook.save(excel_path) 
+    workbook = xlwt.Workbook()  
+    extract_judge_scores(workbook, pdf_path, excel_path, ["Name1", "Name2", "Name3", "Name4", "Name5", "Name6", "Name7", "Name8", "Name9"], 2)
+    excel_path = f"{excel_path}DeviationsReport2.xls"
+    workbook.save(excel_path) 

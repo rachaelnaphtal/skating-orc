@@ -247,9 +247,9 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 # report_name = "Mids2425_ORC_Report"
 
 #Easterns/ Pairs Final 2425
-# pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
-# excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/"
-# base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
-# report_name = "Easterns_ORC_Report"
-# scrape(base_url, report_name)
-create_season_summary()
+pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
+excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/"
+base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
+report_name = "Easterns_ORC_Report"
+scrape(base_url, report_name)
+#create_season_summary()
