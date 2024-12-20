@@ -8,6 +8,7 @@ import xlwt
 from xlwt import Workbook 
 import pandas as pd
 import xlsxwriter
+import re
 
 async def generate_pdf(url, pdf_path):
     browser = await launch()
@@ -20,11 +21,11 @@ async def generate_pdf(url, pdf_path):
     await browser.close()
 
 
-def processEvent(url, eventName, judges, workbook, pdf_number):
+def processEvent(url, eventName, judges, workbook, pdf_number, event_regex):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     excel_path = excel_folder
     asyncio.get_event_loop().run_until_complete(generate_pdf(url, pdf_path))
-    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number)
+    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex)
     
 def get_page_contents(url):
     headers = {
@@ -42,7 +43,7 @@ def get_urls_and_names(page_contents):
     soup = BeautifulSoup(page_contents, 'html.parser')
     links = soup.find_all('a', href=True, string="Final")
     names = soup.find_all('td', class_='event tRow bRow')
-    return list(set(links)), names
+    return list(dict.fromkeys(links)), names
 #processEvent("https://ijs.usfigureskating.org/leaderboard/results/2024/34290/SEGM028.html")
 
 
@@ -59,15 +60,15 @@ def findJudgesNames(soup):
     return judges
 
 
-def findResultsDetailUrlAndJudgesNames(base_url, results_Page_link):
-    url = f"{base_url}/{results_Page_link}"
+def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
+    url = f"{base_url}/{results_page_link}"
     page_contents = get_page_contents(url)
     soup = BeautifulSoup(page_contents, 'html.parser')
     link = soup.find('a', href=True, string="Judge detail scores")
     judgesNames = findJudgesNames(soup)
     return (link["href"], judgesNames)
 
-def scrape(base_url, report_name):
+def scrape(base_url, report_name, event_regex):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = xlwt.Workbook()  
@@ -77,7 +78,9 @@ def scrape(base_url, report_name):
         judgeErrors = {}
         for i in range(len(links)):
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(base_url, links[i]["href"])
-            (event_name, total_errors, allowed_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i)
+            (event_name, total_errors, allowed_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex)
+            if total_errors == None:
+                continue
             for i in range(len(judgesNames)):
                 judge = judgesNames[i]
                 if judge not in judgeErrors:
@@ -123,7 +126,7 @@ def scrape(base_url, report_name):
 
            
             for event in judgeErrors[judge]:
-                if event == "Total Errors" or event == "Allowed Errors":
+                if event == "Total Errors" or event == "Allowed Errors" or not re.match(event_regex, event):
                     continue
                 sheet.write(current_row, current_col, event.replace("_", " "))
                 num_errors = judgeErrors[judge][event]["Errors"]
@@ -226,7 +229,7 @@ def print_summary_workbook(workbook, summary_dict, full_report_name):
         print_sheet_per_judge(writer, judge, summary_dict[judge])
     writer.close()
 
-def print_sheet_per_judge(writer, judge_name, judge_df):
+def print_sheet_per_judge(writer, judge_name : str, judge_df):
     judge_df.rename(columns={"Errors": "Anomalies", "Allowed Errors": "Allowed"})
     judge_df.to_excel(writer, sheet_name = judge_name)
     writer.sheets[judge_name].set_column(0, 0, 35)
@@ -246,10 +249,12 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 # base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 # report_name = "Mids2425_ORC_Report"
 
-#Easterns/ Pairs Final 2425
+# #Easterns/ Pairs Final 2425
 pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
-excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/"
+excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/ForLisa/"
 base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
-report_name = "Easterns_ORC_Report"
-scrape(base_url, report_name)
-#create_season_summary()
+report_name = "2024_Easterns_Singles"
+#scrape(base_url, report_name, ".?(Novice|Junior|Senior).?(Women|Men).?")
+#scrape(base_url, "2024_Pairs_Final", ".?(Novice|Junior|Senior).?(Pairs).?")
+scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34291', "2024_Pacific_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
+# create_season_summary()

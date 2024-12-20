@@ -35,17 +35,7 @@ class FitSheetWrapper(object):
     def __getattr__(self, attr):
         return getattr(self.sheet, attr)
 
-async def generate_pdf(url, pdf_path, judges):
-    browser = await launch()
-    page = await browser.newPage()
-    
-    await page.goto(url)
-    
-    await page.pdf({'path': pdf_path, 'format': 'A4'})
-    
-    await browser.close()
-
-def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number):
+def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex=""):
     # Initialize list for storing extracted data
     elements_per_skater = {}
     pcs_per_skater = {}
@@ -69,11 +59,24 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
                 event_name=lines[2].replace("/","").replace(" ", "_").replace("__", "_").replace("-", "_") 
                 event_name = event_name.split("/")[0]
                 event_name = event_name.split(":")[0]
+                if not re.match(event_regex, event_name):
+                    return (event_name, None, None)
 
             current_skater = None
-            for line in lines:
+            has_bonus = False
+
+            for i in range(len(lines)):
+                line = lines[i]
+                if line == "Bonus":
+                    has_bonus="True"
                 # Match skater's name section
-                skater_match = re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z\&\(\)\-\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)$", line)
+                skater_match = match_skater(line, has_bonus)
+
+                if current_skater is None and line == "# Executed":
+                    # The skater name was probably split across two lines
+                    possible_skater = f"{lines[i-2]}{lines[i-1]}"
+                    skater_match = match_skater(possible_skater, has_bonus)
+
                 if skater_match:
                     skater_name = skater_match.group(2).strip()
                     technical_score = skater_match.group(5)
@@ -82,7 +85,12 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
                         elements_per_skater[current_skater] = []
                         pcs_per_skater[current_skater] = []
                         skater_details[current_skater] = technical_score
+                    if int(skater_match.group(1)) != len(elements_per_skater.keys()):
+                        print(f"Missing skater in {event_name}. Next is {current_skater}")
                     continue
+
+                
+                    
 
                 # Match elements and judge scores
                 element_match = re.match(r"^(\d+)(\s)*([\w\+\.\*<>!]+(?:\s+\w+)?)\s+(?:([F*<!>q]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
@@ -107,6 +115,8 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
                         "Component": component,
                         "Scores": judges_scores
                     })
+                if current_skater == None and (pcs_match or element_match):
+                    print (f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found")
       
 
         for skater in elements_per_skater:
@@ -125,12 +135,19 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number)
         pcs_errors = findPCSDeviations(pcs_per_skater, judges)
         total_errors = count_total_errors_per_judge(judges, element_errors, pcs_errors)
 
+
         printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number)
-        print(f"Num Skaters: {len(skater_details)}")
-        print (list(elements_per_skater.keys()))
+        #print(f"Num Skaters: {len(skater_details)}")
+        #print (list(elements_per_skater.keys()))
         return (event_name, total_errors, get_allowed_errors(len(skater_details)))
    
-    
+def match_skater(line, has_bonus):
+    if has_bonus:
+        return re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})$", line)
+    else:
+        return re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})?\s?([\d]{1,3}\.[\d\.]{2})$", line)
+            
+
 def get_allowed_errors(num_skaters : int):
     if num_skaters <= 10:
         return 1
@@ -147,7 +164,7 @@ def findElementDeviations(skater_scores, judges):
             judgeNumber = 1
             for judgeNumber in range(1,len(allScores)+1):
                 deviation = abs(avg-allScores[judgeNumber-1])
-                if (deviation> 2):
+                if (deviation>= 2):
                     #print (f"Deviation found for judge {judgeNumber} on skater {skater}, element {element["Element"]}")
                     errors.append({
                         "Skater": skater,
@@ -169,7 +186,7 @@ def findPCSDeviations(skater_scores, judges):
             avg = sum(allScores)/len(allScores)
             for judgeNumber in range(1,len(allScores)+1):
                 deviation = abs(avg-allScores[judgeNumber-1])
-                if (not USING_ISU_COMPONENT_METHOD and deviation > 1.5):
+                if (not USING_ISU_COMPONENT_METHOD and deviation >= 1.5):
                     errors.append({
                     "Skater": skater,
                     "Judge Number": judgeNumber,
@@ -252,13 +269,13 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
         sheet.write(current_row, 1, total_errors[i])
         current_row+=1
     
-    print (f"Processed {event_name}")
+    #print (f"Processed {event_name}")
     
    
 
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
-    pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/2.pdf"  # Update with the correct path
+    pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Novice_Women.pdf"  # Update with the correct path
     excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/" 
 
     workbook = xlwt.Workbook()  
