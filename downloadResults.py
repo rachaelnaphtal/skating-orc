@@ -1,23 +1,20 @@
 import asyncio
 from pyppeteer import launch
 import judgingParsing 
-from judgingParsing import FitSheetWrapper
 import requests
 from bs4 import BeautifulSoup
-import xlwt 
-from xlwt import Workbook 
+from openpyxl.utils import get_column_letter
 import pandas as pd
-import xlsxwriter
 import re
+import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
 
 async def generate_pdf(url, pdf_path):
     browser = await launch()
     page = await browser.newPage()
-    
     await page.goto(url)
-    
     await page.pdf({'path': pdf_path, 'format': 'A4'})
-    
     await browser.close()
 
 
@@ -44,8 +41,6 @@ def get_urls_and_names(page_contents):
     links = soup.find_all('a', href=True, string="Final")
     names = soup.find_all('td', class_='event tRow bRow')
     return list(dict.fromkeys(links)), names
-#processEvent("https://ijs.usfigureskating.org/leaderboard/results/2024/34290/SEGM028.html")
-
 
 def findJudgesNames(soup):
     alltd = soup.find_all("td")
@@ -59,6 +54,158 @@ def findJudgesNames(soup):
             nextJudge = False
     return judges
 
+#event_name -> total_errors_per_judge, allowed_errors
+def make_competition_summary_page(workbook, report_name, event_details_dict, judge_errors):
+    sheet = workbook.create_sheet("Summary", 0)
+
+    # Styles
+    bold = Font(bold=True)
+    gray = PatternFill(fill_type='lightGray')
+    thin = Side(border_style="thin", color="000000")
+    thin_border = Border(top=thin, left=thin, right=thin, bottom=thin)
+    wrap_text=Alignment(wrap_text=True)
+    vertical_text = Alignment(textRotation=90)
+
+    #sheet.freeze_panes("D1")
+    sheet.cell(1, 1, value=report_name)
+    sheet.cell(1, 1).font=bold
+    sheet.cell(2, 1, value="Official's Review Summary")
+    sheet.cell(2, 1).font=bold
+    sheet.cell(6, 1, value="EVENT")
+    sheet.cell(6, 1).alignment = wrap_text
+    sheet.cell(6, 1).border = thin_border
+    sheet.cell(6, 2, value="STARTS")
+    sheet.cell(6, 2).alignment = wrap_text
+    sheet.cell(6, 2).border = thin_border
+    sheet.cell(6, 3, value="ALLOWED ERRORS")
+    sheet.cell(6, 3).alignment = wrap_text
+    sheet.cell(6, 3).border = thin_border
+    sheet.column_dimensions["A"].width =35
+
+    current_row = 9
+    events_in_order = sorted(event_details_dict.items())
+    for event in events_in_order:
+        sheet.cell(current_row, 1, value=event[0])
+        sheet.cell(current_row, 2, value=event[1]["Num Starts"])
+        sheet.cell(current_row, 3, value=event[1]["Allowed Errors"])
+        current_row+=1
+
+    current_row+=1
+    sheet.cell(current_row, 1, value="TOTALS")
+    sheet.cell(current_row, 1).font = bold
+
+    totals_row=current_row
+    for i in range(7, totals_row):
+        sheet.cell(i, 1).border = Border(right=thin)
+        sheet.cell(i, 2).border = Border(right=thin)
+        sheet.cell(i, 3).border= Border(right=thin)
+    sheet.cell(totals_row,1).border = thin_border
+    sheet.cell(totals_row,2).border = thin_border
+    sheet.cell(totals_row,3).border = thin_border
+
+    current_col = 4
+    for judge in dict(sorted(judge_errors.items())):
+        sheet.cell(6, current_col).value=judge
+        sheet.cell(6, current_col+1).alignment = Alignment(wrap_text=True, horizontal="center")
+        sheet.merge_cells(start_row=6, start_column=current_col, end_row=6, end_column=current_col+3)
+        sheet.cell(7, current_col, value="Number Anomalies")
+        sheet.cell(7, current_col+1, value="OAC Recognized Errors")
+        sheet.cell(7, current_col+2, value="Errors in Excess Pre-Review")
+        sheet.cell(7, current_col+3, value="Errors in Excess After Review")
+        for i in range(4):
+            sheet.cell(7, current_col+i).alignment = vertical_text
+        current_row = 9
+        for event in events_in_order:
+            if event[0] in judge_errors[judge]:
+                judge_number = judge_errors[judge][event[0]]["Judge Number"]
+                sheet_name = event[1]["Sheet Name"]
+                row=judge_number+event[1]["Summary Row Start"]-1
+                sheet.cell(current_row, current_col, value=judge_errors[judge][event[0]]["Errors"])
+                sheet.cell(current_row, current_col+1).value = f"={sheet_name}!C{row}"
+                sheet.cell(current_row, current_col+2, value=judge_errors[judge][event[0]]["In Excess"])
+                sheet.cell(current_row, current_col+2).font = Font(b=True, color="FF0000")
+                sheet.cell(current_row, current_col+3).value = f"=MAX({get_column_letter(current_col+1)}{current_row}-C{current_row}, 0)"
+                sheet.cell(current_row, current_col+3).font = Font(b=True, color="FF0000")
+                for i in range(4):
+                    sheet.cell(current_row, current_col+i).fill = PatternFill("solid", fgColor="CCE5FF")
+            current_row+=1
+        
+        for i in range(4, current_col+4):
+            column_letter = get_column_letter(i)
+            sheet.cell(totals_row, i).value = f"=SUM({column_letter}9:{column_letter}{totals_row-1})"
+        sheet.cell(totals_row, current_col+3).fill = PatternFill("solid", fgColor="66B2FF")
+        
+        # Add borders
+        sheet.cell(6, current_col).border = thin_border
+        sheet.cell(7, current_col).border = thin_border
+        for i in range(8, totals_row):
+            sheet.cell(i, current_col).border= Border(left=thin)
+            sheet.cell(i, current_col+3).border = Border(right=thin)
+        for i in range(4):
+            sheet.cell(6, current_col+i).border = thin_border
+            sheet.cell(7, current_col+i).border = thin_border
+            sheet.cell(totals_row, current_col+i).border = thin_border
+        
+        current_col+=4
+
+def make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex):
+    #Add summary sheet
+    sheet = workbook.create_sheet("Summary", 0)
+    
+    sheet.cell(1, 1, value="Summary")
+    current_col = 1
+    summary_row=6+ max([len(judge_errors[judge]) for judge in judge_errors])
+
+    # Add summary row for all anomalies
+    sheet.cell(2, current_col, value="Judge Name")
+    sheet.cell(2, current_col+1, value="# Anomalies")
+    sheet.cell(2, current_col+2, value="# ORC Errors")
+    sheet.cell(2, current_col+3, value="# In Excess Anomalies")
+    sheet.cell(2, current_col+4, value="# In Excess After ORC")
+    sheet.cell(2, current_col+5, value="# Events")
+    current_row = 3
+
+    for judge, value in sorted(df_dict.items(), key=lambda kv: kv[1]['Errors'].sum(), reverse=True):
+        sheet.cell(current_row, current_col, value=judge)
+        sheet.cell(current_row, current_col+1, value=int(df_dict[judge]["Errors"].sum()))
+        sheet.cell(current_row, current_col+3, value=int(df_dict[judge]["In Excess"].sum()))
+        sheet.cell(current_row, current_col+5, value=len(judge_errors[judge]))
+        current_row+=1
+    current_col+=7
+    for judge in dict(sorted(judge_errors.items())):
+        current_row = 2
+        sheet.cell(current_row, current_col, value=judge)
+        current_row+=1
+        sheet.cell(current_row, current_col, value="Event")
+        sheet.cell(current_row, current_col+1, value="Anomalies")
+        sheet.cell(current_row, current_col+2, value="ORC recognized")
+        sheet.cell(current_row, current_col+3, value="Allowed")
+        sheet.cell(current_row, current_col+4, value="In Excess (Pre Review)")
+        sheet.cell(current_row, current_col+5, value="In Excess (Post Review)")
+        current_row+=1
+        
+        for event in judge_errors[judge]:
+            if event == "Total Errors" or event == "Allowed Errors" or not re.match(event_regex, event):
+                continue
+            sheet.cell(current_row, current_col, event.replace("_", " "))
+            num_errors = judge_errors[judge][event]["Errors"]
+            sheet.cell(current_row, current_col+1, value=num_errors)
+
+            num_allowed = int(judge_errors[judge][event]["Allowed Errors"])
+            sheet.cell(current_row, current_col+3, value=num_allowed)
+
+            in_excess = int(judge_errors[judge][event]["In Excess"])
+            sheet.cell(current_row, current_col+4, value=in_excess)
+            current_row+=1
+
+        current_row+=1
+
+        sheet.cell(summary_row, current_col, value="Total")
+        sheet.cell(summary_row, current_col+1, value=int(df_dict[judge]["Errors"].sum()))
+        sheet.cell(summary_row, current_col+4, value=int(df_dict[judge]["In Excess"].sum()))
+        current_col+=5
+    judgingParsing.autofit_worksheet(sheet)
+
 
 def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     url = f"{base_url}/{results_page_link}"
@@ -71,92 +218,47 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
 def scrape(base_url, report_name, event_regex):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
-    workbook = xlwt.Workbook()  
+    workbook = openpyxl.Workbook()   
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
-        judgeErrors = {}
+        judge_errors = {}
+        event_details = {}
         for i in range(len(links)):
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(base_url, links[i]["href"])
-            (event_name, total_errors, allowed_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex)
+            (event_name, total_errors, num_starts, allowed_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex)
             if total_errors == None:
+                # This is an event to skip per the regex
                 continue
+            start_of_summary_rows = sum(total_errors)+11
+            event_details[event_name] = {"Num Starts": num_starts, "Allowed Errors": allowed_errors, "Sheet Name": judgingParsing.get_sheet_name(event_name, i), "Summary Row Start": start_of_summary_rows}
             for i in range(len(judgesNames)):
                 judge = judgesNames[i]
-                if judge not in judgeErrors:
-                    judgeErrors[judge] = {}
-                judgeErrors[judge][event_name] = {"Errors": total_errors[i], "Allowed Errors": allowed_errors,  "In Excess": max(total_errors[i]-allowed_errors, 0)}
+                if judge not in judge_errors:
+                    judge_errors[judge] = {}
+                judge_errors[judge][event_name] = {"Errors": total_errors[i], "Allowed Errors": allowed_errors,  "In Excess": max(total_errors[i]-allowed_errors, 0), "Judge Number": i+1}
         
-        sheet = FitSheetWrapper(workbook.add_sheet("Summary")) 
-        # Specifying style 
-        bold = xlwt.easyxf('font: bold 1') 
-        blue = xlwt.easyxf('pattern: pattern solid, fore_colour blue;')
-        sheet.write(0, 0, "Summary", bold)
-        current_col = 0
-        summary_row=5+ max([len(judgeErrors[judge]) for judge in judgeErrors])
+        #Sort sheets
+        del workbook['Sheet']
+        workbook._sheets.sort(key=lambda ws: ws.title)
 
-        # Add summary row for all anomalies
-        sheet.write(1, current_col, "Judge Name")
-        sheet.write(1, current_col+1, "# Anomalies")
-        sheet.write(1, current_col+2, "# In Excess")
-        sheet.write(1, current_col+3, "# Events")
-        current_row = 2
-
-       # print (judgeErrors)
         df_dict = {}
-        for judge in judgeErrors:
-            df_dict[judge] = pd.DataFrame.from_dict(judgeErrors[judge], orient='index')
-        for judge, value in sorted(df_dict.items(), key=lambda kv: kv[1]['Errors'].sum(), reverse=True):
-            sheet.write(current_row, current_col, judge)
-            sheet.write(current_row, current_col+1, int(df_dict[judge]["Errors"].sum()))
-            sheet.write(current_row, current_col+2, int(df_dict[judge]["In Excess"].sum()))
-            sheet.write(current_row, current_col+3, len(judgeErrors[judge]))
-            current_row+=1
-        current_col+=5
-        for judge in judgeErrors:
-            current_row = 1
-            sheet.write(current_row, current_col, judge, bold)
-            current_row+=1
-            sheet.write(current_row, current_col, "Event")
-            sheet.write(current_row, current_col+1, "Anomalies")
-            sheet.write(current_row, current_col+2, "ORC recognized")
-            sheet.write(current_row, current_col+3, "Allowed")
-            sheet.write(current_row, current_col+4, "In Excess")
-            current_row+=1
+        for judge in judge_errors:
+            df_dict[judge] = pd.DataFrame.from_dict(judge_errors[judge], orient='index')
 
-           
-            for event in judgeErrors[judge]:
-                if event == "Total Errors" or event == "Allowed Errors" or not re.match(event_regex, event):
-                    continue
-                sheet.write(current_row, current_col, event.replace("_", " "))
-                num_errors = judgeErrors[judge][event]["Errors"]
-                sheet.write(current_row, current_col+1, num_errors)
-
-                num_allowed = int(judgeErrors[judge][event]["Allowed Errors"])
-                sheet.write(current_row, current_col+3, num_allowed)
-
-                in_excess = int(judgeErrors[judge][event]["In Excess"])
-                sheet.write(current_row, current_col+4, in_excess)
-                current_row+=1
-
-            current_row+=1
-
-            sheet.write(summary_row, current_col, "Total", bold)
-            sheet.write(summary_row, current_col+1, int(df_dict[judge]["Errors"].sum()), bold)
-            sheet.write(summary_row, current_col+4, int(df_dict[judge]["In Excess"].sum()), bold)
-            current_col+=5
-        
+        make_competition_summary_page(workbook, report_name, event_details, judge_errors)
+        #make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex)
             
     else:
         print('Failed to get page contents.')
 
-    excel_path = f"{excel_folder}{report_name}.xls"
+    excel_path = f"{excel_folder}{report_name}.xlsx"
     workbook.save(excel_path) 
     print ("Finished " + report_name)
     return df_dict
 
 def create_season_summary(full_report_name="2425Summary"):
-    workbook = xlwt.Workbook()  
+    workbook = openpyxl.Workbook()   
     events = {
         "Dallas_Classic":"2024/33436",
         "Cactus_Classic":"2024/34414",
@@ -198,33 +300,33 @@ def create_season_summary(full_report_name="2425Summary"):
     print_summary_workbook(workbook, summary_dict, full_report_name)
                 
 def print_summary_workbook(workbook, summary_dict, full_report_name):
-    sheet = FitSheetWrapper(workbook.add_sheet("Summary")) 
+    sheet = workbook.create_sheet("Summary", 0)
     # Specifying style 
-    bold = xlwt.easyxf('font: bold 1') 
-    sheet.write(0, 0, "Summary", bold)
-    current_col = 0
+    #bold = xlwt.easyxf('font: bold 1') 
+    sheet.cell(1, 1, value="Summary")
+    current_col = 1
 
     # Add summary sheet for all anomalies
-    sheet.write(1, current_col, "Judge Name")
-    sheet.write(1, current_col+1, "# Anomalies")
-    sheet.write(1, current_col+2, "# In Excess")
-    sheet.write(1, current_col+3, "# Events")
-    sheet.write(1, current_col+4, "In Excess per event")
-    current_row = 2
+    sheet.cell(2, current_col, value="Judge Name")
+    sheet.cell(2, current_col+1, value="# Anomalies")
+    sheet.cell(2, current_col+2, value="# In Excess")
+    sheet.cell(2, current_col+3, value="# Events")
+    sheet.cell(2, current_col+4, value="In Excess per event")
+    current_row = 3
 
     for judge, value in sorted(summary_dict.items(), key=lambda kv: kv[1]['In Excess'].sum(), reverse=True):
-        sheet.write(current_row, current_col, judge)
-        sheet.write(current_row, current_col+1, int(value["Errors"].sum()))
-        sheet.write(current_row, current_col+2, int(value["In Excess"].sum()))
+        sheet.cell(current_row, current_col, value=judge)
+        sheet.cell(current_row, current_col+1, value=int(value["Errors"].sum()))
+        sheet.cell(current_row, current_col+2, value=int(value["In Excess"].sum()))
         num_events = len(value[value["Errors"] >= 0])
-        sheet.write(current_row, current_col+3, num_events)
-        sheet.write(current_row, current_col+4, float(value["In Excess"].sum())/float(num_events))
+        sheet.cell(current_row, current_col+3, value=num_events)
+        sheet.cell(current_row, current_col+4, value=float(value["In Excess"].sum())/float(num_events))
         current_row+=1
 
     excel_path = f"{excel_folder}{full_report_name}.xls"
     workbook.save(excel_path) 
     # Add sheets per judge
-    writer = pd.ExcelWriter(f"{excel_folder}{full_report_name}_perJudge.xlsx", engine = 'xlsxwriter')
+    writer = pd.ExcelWriter(f"{excel_folder}{full_report_name}_perJudge.xlsx", engine = 'openpyxl')
     for judge in sorted(summary_dict.keys()):
         print_sheet_per_judge(writer, judge, summary_dict[judge])
     writer.close()
@@ -232,11 +334,11 @@ def print_summary_workbook(workbook, summary_dict, full_report_name):
 def print_sheet_per_judge(writer, judge_name : str, judge_df):
     judge_df.rename(columns={"Errors": "Anomalies", "Allowed Errors": "Allowed"})
     judge_df.to_excel(writer, sheet_name = judge_name)
-    writer.sheets[judge_name].set_column(0, 0, 35)
-    writer.sheets[judge_name].set_column(1, 1, 12)
+    writer.sheets[judge_name].set_column(1, 1, 35)
     writer.sheets[judge_name].set_column(2, 2, 12)
     writer.sheets[judge_name].set_column(3, 3, 12)
-    writer.sheets[judge_name].set_column(4, 4, 30)
+    writer.sheets[judge_name].set_column(4, 4, 12)
+    writer.sheets[judge_name].set_column(5, 5, 30)
 
 pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/"  # Update with the correct path
 excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/"
@@ -256,5 +358,6 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
 report_name = "2024_Easterns_Singles"
 #scrape(base_url, report_name, ".?(Novice|Junior|Senior).?(Women|Men).?")
 #scrape(base_url, "2024_Pairs_Final", ".?(Novice|Junior|Senior).?(Pairs).?")
-scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34291', "2024_Pacific_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
+scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34290', "2024_Midwestern_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
+#scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34291', "2024_Pacific_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
 # create_season_summary()

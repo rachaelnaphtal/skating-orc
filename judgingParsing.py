@@ -1,3 +1,4 @@
+import openpyxl.worksheet
 import pdfplumber
 from pypdf import PdfReader
 import pandas as pd
@@ -5,35 +6,27 @@ import re
 
 import asyncio
 from pyppeteer import launch
-import xlwt 
-from xlwt import Workbook 
-import arial10
+
+import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
+from openpyxl.worksheet.datavalidation import DataValidation
 
 USING_ISU_COMPONENT_METHOD=False
 
-class FitSheetWrapper(object):
-    """Try to fit columns to max size of any entry.
-    To use, wrap this around a worksheet returned from the 
-    workbook's add_sheet method, like follows:
-
-        sheet = FitSheetWrapper(book.add_sheet(sheet_name))
-
-    The worksheet interface remains the same: this is a drop-in wrapper
-    for auto-sizing columns.
-    """
-    def __init__(self, sheet):
-        self.sheet = sheet
-        self.widths = dict()
-
-    def write(self, r, c, label='', *args, **kwargs):
-        self.sheet.write(r, c, label, *args, **kwargs)
-        width = int(arial10.fitwidth(label))
-        if width > self.widths.get(c, 0):
-            self.widths[c] = width
-            self.sheet.col(c).width = width
-
-    def __getattr__(self, attr):
-        return getattr(self.sheet, attr)
+def autofit_worksheet(worksheet):
+    max_length = 0
+    for col in worksheet.columns:
+     max_length = 0
+     column = col[0].column_letter # Get the column name
+     for cell in col:
+         try: # Necessary to avoid error on empty cells
+             if len(str(cell.value)) > max_length:
+                 max_length = len(str(cell.value))
+         except:
+             pass
+     adjusted_width = (max_length + 2) * 1.2
+     worksheet.column_dimensions[column].width = adjusted_width
 
 def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex=""):
     # Initialize list for storing extracted data
@@ -60,7 +53,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                 event_name = event_name.split("/")[0]
                 event_name = event_name.split(":")[0]
                 if not re.match(event_regex, event_name):
-                    return (event_name, None, None)
+                    return (event_name, None, None, None)
 
             current_skater = None
             has_bonus = False
@@ -139,7 +132,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
         printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number)
         #print(f"Num Skaters: {len(skater_details)}")
         #print (list(elements_per_skater.keys()))
-        return (event_name, total_errors, get_allowed_errors(len(skater_details)))
+        return (event_name, total_errors, len(skater_details), get_allowed_errors(len(skater_details)))
    
 def match_skater(line, has_bonus):
     if has_bonus:
@@ -163,8 +156,8 @@ def findElementDeviations(skater_scores, judges):
             avg = sum(allScores)/len(allScores)
             judgeNumber = 1
             for judgeNumber in range(1,len(allScores)+1):
-                deviation = abs(avg-allScores[judgeNumber-1])
-                if (deviation>= 2):
+                deviation = avg-allScores[judgeNumber-1]
+                if (abs(deviation)>= 2):
                     #print (f"Deviation found for judge {judgeNumber} on skater {skater}, element {element["Element"]}")
                     errors.append({
                         "Skater": skater,
@@ -185,8 +178,8 @@ def findPCSDeviations(skater_scores, judges):
             allScores = component["Scores"]
             avg = sum(allScores)/len(allScores)
             for judgeNumber in range(1,len(allScores)+1):
-                deviation = abs(avg-allScores[judgeNumber-1])
-                if (not USING_ISU_COMPONENT_METHOD and deviation >= 1.5):
+                deviation = avg-allScores[judgeNumber-1]
+                if (not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5):
                     errors.append({
                     "Skater": skater,
                     "Judge Number": judgeNumber,
@@ -218,57 +211,87 @@ def count_total_errors_per_judge(judges, element_errors, pcs_errors) -> list:
         errors_list[judgeNumber-1] = errors_list[judgeNumber-1]+ 1
     return errors_list
 
-def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number):
+def get_sheet_name(event_name, pdf_number):
     sheet_name = event_name
     with_el_match = re.match(r"(\d{1,3})_(\d{1,3}_)?(.*)", sheet_name)
     if with_el_match:
         sheet_name=with_el_match.group(3)
-    sheet_name = f"{sheet_name[0:min(len(sheet_name),26)]}{pdf_number}"
-    sheet = FitSheetWrapper(workbook.add_sheet(sheet_name)) 
-    # Specifying style 
-    bold = xlwt.easyxf('font: bold 1') 
-    sheet.write(0, 0, event_name, bold) 
-    # Headers
-    sheet.write(3, 0, "Judge")
-    sheet.write(3, 1, "Judge Score")
-    sheet.write(3, 2, "Deviation From Panel Average")
-    sheet.write(3, 3, "Skater(s)/Couple(s)")
-    #sheet.write(3, 4, "Element #")
-    sheet.write(3, 5, "Element Name")
-    sheet.write(3, 6, "ORC Comments")
-    sheet.write(3, 7, "ORC Error?")
-    sheet.write(4, 0, "A. RANGES OF GOE", bold)
+    if len(sheet_name)>=28:
+        sheet_name = f"{sheet_name[0:min(len(sheet_name),26)]}{pdf_number}"
+    return sheet_name
 
-    current_row = 5
+def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number):
+    sheet_name = get_sheet_name(event_name, pdf_number)
+
+    bold = Font(bold=True)
+    gray = PatternFill(fill_type='lightGray')
+    thin = Side(border_style="thin", color="000000")
+    thin_border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    sheet = workbook.create_sheet(sheet_name, 0)
+    sheet.cell(1, 1, value = event_name.replace("_", " ")).font = bold
+    yes_no = DataValidation(type="list", formula1='"YES,NO"', showDropDown=False, allow_blank=True)
+    yes_no.showInputMessage = True
+    yes_no.showErrorMessage = True
+    sheet.add_data_validation(yes_no)
+    # Headers
+    sheet.cell(4, 1,value = "Judge").font=bold
+    sheet.cell(4, 2,value = "Judge Score").font=bold
+    sheet.cell(4, 3,value = "Deviation From Panel Average").font=bold
+    sheet.cell(4, 4,value = "Skater(s)/Couple(s)").font=bold
+    sheet.cell(4, 5,value = "Element Name").font=bold
+    sheet.cell(4, 6,value = "ORC Comments").font=bold
+    sheet.cell(4, 7,value = "ORC Error?").font=bold
+    sheet.cell(5, 1,value = "A. RANGES OF GOE" ).font=bold
+
+    current_row = 6
     for error in element_errors:
-        sheet.write(current_row, 0, f"J{error["Judge Number"]}- {error["Judge Name"]}")
-        sheet.write(current_row, 1, error["Judge Score"])
-        sheet.write(current_row, 2, error["Deviation"])
-        sheet.write(current_row, 3, error["Skater"])
-        sheet.write(current_row, 5, error["Element"])
+        sheet.cell(current_row, 1, value = f"J{error["Judge Number"]}- {error["Judge Name"]}")
+        sheet.cell(current_row, 2, value = error["Judge Score"])
+        sheet.cell(current_row, 3, value = error["Deviation"])
+        sheet.cell(current_row, 4, value = error["Skater"])
+        sheet.cell(current_row, 5, value = error["Element"])
+        yes_no.add(sheet.cell(current_row, 7))
+        sheet.cell(current_row, 6).fill = gray
+        sheet.cell(current_row, 6).border = thin_border
+        sheet.cell(current_row, 7).fill = gray
+        sheet.cell(current_row, 7).border = thin_border
+        sheet.cell(current_row, 6).alignment = Alignment(wrap_text=True)
         current_row=current_row+1
+    
 
     current_row+=1
-    sheet.write(current_row, 0, "B. RANGES OF PROGRAM COMPONENTS", bold)
+    sheet.cell(current_row, 1).value = "B. RANGES OF PROGRAM COMPONENTS"
+    sheet.cell(current_row, 1).font = bold
     current_row+=1
     for error in pcs_errors:
-        sheet.write(current_row, 0, str(f"J{error["Judge Number"]}- {error["Judge Name"]}"))
-        sheet.write(current_row, 1, error["Judge Score"])
-        sheet.write(current_row, 2, str(error["Deviation"]))
-        sheet.write(current_row, 3, error["Skater"])
+        sheet.cell(current_row, 1, value =  str(f"J{error["Judge Number"]}- {error["Judge Name"]}"))
+        sheet.cell(current_row, 2, value = error["Judge Score"])
+        sheet.cell(current_row, 3, value = str(error["Deviation"]))
+        sheet.cell(current_row, 4, value = error["Skater"])
+        yes_no.add(sheet.cell(current_row, 7))
+        sheet.cell(current_row, 6).fill = gray
+        sheet.cell(current_row, 6).border = thin_border
+        sheet.cell(current_row, 7).fill = gray
+        sheet.cell(current_row, 6).alignment = Alignment(wrap_text=True)
         current_row=current_row+1
+    cell_end_errors_section = current_row
 
     current_row+=2
-    sheet.write(current_row, 0, "Judge", bold)
-    sheet.write(current_row, 1, "# of Anomalies", bold)
-    sheet.write(current_row, 2, "ORC Recognized", bold)
+    sheet.cell(current_row, 1, value ="Judge").font=bold
+    sheet.cell(current_row, 1).font= Font(bold=True)
+    sheet.cell(current_row, 2, value = "# of Anomalies").font=bold
+    sheet.cell(current_row, 3, value = "ORC Recognized Error").font=bold
     current_row+=1
 
     for i in range(len(judges)):
-        sheet.write(current_row, 0, judges[i])
-        sheet.write(current_row, 1, total_errors[i])
+        sheet.cell(current_row, 1, value=f"J{i+1}- {judges[i]}")
+        sheet.cell(current_row, 2, value =f"=COUNTIF(A$6:A${cell_end_errors_section},A{current_row})")
+        sheet.cell(current_row, 3, value =f"=COUNTIFS(A$6:A${cell_end_errors_section},A{current_row},G$6:G${cell_end_errors_section},\"YES\")")
         current_row+=1
-    
+
+    autofit_worksheet(sheet)
+    sheet.column_dimensions["F"].width =35
     #print (f"Processed {event_name}")
     
    
@@ -278,7 +301,7 @@ if __name__ == "__main__":
     pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Novice_Women.pdf"  # Update with the correct path
     excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/" 
 
-    workbook = xlwt.Workbook()  
+    workbook = openpyxl.Workbook()  
     extract_judge_scores(workbook, pdf_path, excel_path, ["Name1", "Name2", "Name3", "Name4", "Name5", "Name6", "Name7", "Name8", "Name9"], 2)
-    excel_path = f"{excel_path}DeviationsReport2.xls"
+    excel_path = f"{excel_path}DeviationsReport2.xlsx"
     workbook.save(excel_path) 
