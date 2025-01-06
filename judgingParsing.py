@@ -25,10 +25,10 @@ def autofit_worksheet(worksheet):
                  max_length = len(str(cell.value))
          except:
              pass
-     adjusted_width = (max_length + 2) * 1.2
+     adjusted_width = (max_length + 2) * 1.1
      worksheet.column_dimensions[column].width = adjusted_width
 
-def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex=""):
+def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex="", only_rule_errors=False):
     # Initialize list for storing extracted data
     elements_per_skater = {}
     pcs_per_skater = {}
@@ -53,7 +53,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                 event_name = event_name.split("/")[0]
                 event_name = event_name.split(":")[0]
                 if not re.match(event_regex, event_name):
-                    return (event_name, None, None, None)
+                    return (event_name, None, None, None, [])
 
             current_skater = None
             has_bonus = False
@@ -86,18 +86,25 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                     
 
                 # Match elements and judge scores
-                element_match = re.match(r"^(\d+)(\s)*([\w\+\.\*<>!]+(?:\s+\w+)?)\s+(?:([F*<!>q]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
+                element_match = re.match(r"^(1?\d)(\s)*([\w\+\.\*<>!]+(?:\w+)?)\s+(?:([F*<!>qnscuSCUex]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
                 pcs_match = re.match(r"^^\s*(Timing|Presentation|Skating\sSkills|Composition)\s+([\d\.]+)\s+((?:[\d\.]{4}\s*){3,9})([\d\.]+)", line)
                 if current_skater and element_match:
                    # element_number = int(element_match.group(1))
                     element_name = element_match.group(3)
+                    # Fix parsing issues for SEQ< or SEQ<<
+                    if element_name.endswith("SEQ<"):
+                        element_name = element_name[:-1]
+                    elif element_name.endswith("SEQ<<"):
+                        element_name = element_name[:len(element_name)-2]
                     judges_scores = list(map(float, element_match.group(8).split()))
                     total_score = float(element_match.group(10))
+                    notes = element_match.group(4)
                     #scores = list(map(int, element_match.group(2).split()))
                     elements_per_skater[current_skater].append({
                         "Element": element_name,
                         "Scores": judges_scores,
-                        "Value": total_score
+                        "Value": total_score,
+                        "Notes": notes
                     })
                 elif current_skater and pcs_match:
                     component = pcs_match.group(1)
@@ -113,6 +120,8 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
       
 
         for skater in elements_per_skater:
+            #print ([element["Element"] for element in elements_per_skater[skater]])
+            #print ([element["Notes"] for element in elements_per_skater[skater]])
             foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
             expected = float(skater_details[skater])
             if (foundElements != expected):
@@ -124,15 +133,22 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
             if (len(pcs) != 3):
                 print(f"Components missing for skater {skater} {pdf_path}")
         
-        element_errors = findElementDeviations(elements_per_skater, judges)
-        pcs_errors = findPCSDeviations(pcs_per_skater, judges)
-        total_errors = count_total_errors_per_judge(judges, element_errors, pcs_errors)
+        element_errors = []
+        element_deviations = []
+        pcs_errors=[]
+        if "Women" in event_name or "Men" in event_name or "Boys" in event_name or "Girls" in event_name:
+            element_errors = findSinglesElementErrors(elements_per_skater, judges, event_name)    
+        
+        if not only_rule_errors:
+            element_deviations = findElementDeviations(elements_per_skater, judges)
+            pcs_errors = findPCSDeviations(pcs_per_skater, judges)
+        total_errors = count_total_errors_per_judge(judges, element_errors, element_deviations, pcs_errors)
 
 
-        printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number)
+        printToExcel(workbook, base_excel_path, event_name, judges, element_errors, element_deviations, pcs_errors, total_errors, pdf_number)
         #print(f"Num Skaters: {len(skater_details)}")
         #print (list(elements_per_skater.keys()))
-        return (event_name, total_errors, len(skater_details), get_allowed_errors(len(skater_details)))
+        return (event_name, total_errors, len(skater_details), get_allowed_errors(len(skater_details)), element_errors)
    
 def match_skater(line, has_bonus):
     if has_bonus:
@@ -148,6 +164,67 @@ def get_allowed_errors(num_skaters : int):
         return 2
     return 3
 
+def findSinglesElementErrors(skater_scores, judges, event_name):
+    errors = []
+    for skater in skater_scores:
+        for element in skater_scores[skater]:
+            element_name = element["Element"]
+            notes = element["Notes"]
+            allScores = element["Scores"]
+            
+            judgeNumber = 1
+            for judgeNumber in range(1,len(allScores)+1):
+                # Must be -5 if  it is a short and there is a +COMBO or *
+                if "Short" in event_name and ("COMBO" in element_name or "*" in element_name) and allScores[judgeNumber-1] > -5:
+                    errors.append(makeRuleError(skater, element, judgeNumber, judges, allScores, "Short Program NAR"))
+                    continue
+                
+                max_goe = 5
+                number_downs = element_name.count("<<")
+                number_unders = element_name.count("<")-(number_downs*2)
+                number_attention = element_name.count("!")
+                # If contains certain errors cannot start above a 2
+                if notes is not None and ("F" in notes or "e" in notes) or "<<" in element_name or (number_unders+number_attention)>=2:
+                    max_goe = 2
+                # Falls must subtract 5
+                if notes is not None and "F" in notes:
+                    max_goe = max_goe-5
+                # e must subtract 2
+                if (notes is not None and "e" in notes):
+                    max_goe-=2
+                # << must subtract 3
+                max_goe-=3*number_downs
+                # Subtract 2 for <
+                max_goe-=2*number_unders
+                # Subtract 2 for q
+                if (notes is not None and "q" in notes):
+                    max_goe-=2*element_name.count("q")
+                # Subtract 1 for attention
+                max_goe-=1*number_attention
+
+                if allScores[judgeNumber-1] > max(max_goe, -5):
+                        errors.append(makeRuleError(skater, element, judgeNumber, judges, allScores, f"Max with errors is {max(max_goe, -5)}"))
+                
+    #if (len(errors) > 0):
+        #print(event_name, errors)
+    return errors
+
+def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
+    element_name = f"{element["Element"]} {element["Notes"]}"
+    if element["Notes"] is None:
+        element_name = element["Element"]
+    return {
+            "Skater": skater,
+            "Element": element_name,
+            "Judge Number": judgeNumber,
+            "Judge Name": judges[judgeNumber-1],
+            "Judge Score": allScores[judgeNumber-1],
+            "Panel Average":None,
+            "Deviation": "Rule Error",
+            "Description": description
+            }
+                        
+
 def findElementDeviations(skater_scores, judges):
     errors = []
     for skater in skater_scores:
@@ -156,7 +233,7 @@ def findElementDeviations(skater_scores, judges):
             avg = sum(allScores)/len(allScores)
             judgeNumber = 1
             for judgeNumber in range(1,len(allScores)+1):
-                deviation = avg-allScores[judgeNumber-1]
+                deviation = allScores[judgeNumber-1]-avg
                 if (abs(deviation)>= 2):
                     #print (f"Deviation found for judge {judgeNumber} on skater {skater}, element {element["Element"]}")
                     errors.append({
@@ -166,7 +243,8 @@ def findElementDeviations(skater_scores, judges):
                         "Judge Name": judges[judgeNumber-1],
                         "Judge Score": allScores[judgeNumber-1],
                         "Panel Average":avg,
-                        "Deviation": deviation
+                        "Deviation": deviation,
+                        "Type": "Deviation"
                         })
     return errors
 
@@ -178,14 +256,15 @@ def findPCSDeviations(skater_scores, judges):
             allScores = component["Scores"]
             avg = sum(allScores)/len(allScores)
             for judgeNumber in range(1,len(allScores)+1):
-                deviation = avg-allScores[judgeNumber-1]
+                deviation = allScores[judgeNumber-1]-avg
                 if (not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5):
                     errors.append({
                     "Skater": skater,
                     "Judge Number": judgeNumber,
                     "Judge Name": judges[judgeNumber-1],
                     "Judge Score": allScores[judgeNumber-1],
-                    "Deviation": deviation
+                    "Deviation": deviation,
+                    "Type": "Deviation"
                     })
                 deviation_points[judgeNumber]= deviation_points[judgeNumber]+ deviation
 
@@ -201,12 +280,15 @@ def findPCSDeviations(skater_scores, judges):
                     })
     return errors
 
-def count_total_errors_per_judge(judges, element_errors, pcs_errors) -> list:
+def count_total_errors_per_judge(judges, element_errors, element_deviations, pcs_deviations) -> list:
     errors_list = [0]*len(judges)
     for error in element_errors:
         judgeNumber = error["Judge Number"]
         errors_list[judgeNumber-1] = errors_list[judgeNumber-1]+ 1
-    for error in pcs_errors:
+    for error in element_deviations:
+        judgeNumber = error["Judge Number"]
+        errors_list[judgeNumber-1] = errors_list[judgeNumber-1]+ 1
+    for error in pcs_deviations:
         judgeNumber = error["Judge Number"]
         errors_list[judgeNumber-1] = errors_list[judgeNumber-1]+ 1
     return errors_list
@@ -214,17 +296,18 @@ def count_total_errors_per_judge(judges, element_errors, pcs_errors) -> list:
 def get_sheet_name(event_name, pdf_number):
     sheet_name = event_name
     with_el_match = re.match(r"(\d{1,3})_(\d{1,3}_)?(.*)", sheet_name)
+    sheet_name = sheet_name.replace("(", "").replace(")", "").replace("&", "")
     if with_el_match:
         sheet_name=with_el_match.group(3)
     if len(sheet_name)>=28:
         sheet_name = f"{sheet_name[0:min(len(sheet_name),26)]}{pdf_number}"
     return sheet_name
 
-def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, pcs_errors, total_errors, pdf_number):
+def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, element_deviations, pcs_deviations, total_errors, pdf_number):
     sheet_name = get_sheet_name(event_name, pdf_number)
 
     bold = Font(bold=True)
-    gray = PatternFill(fill_type='lightGray')
+    gray = PatternFill("solid", fgColor="C0C0C0")
     thin = Side(border_style="thin", color="000000")
     thin_border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
@@ -233,7 +316,8 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
     yes_no = DataValidation(type="list", formula1='"YES,NO"', showDropDown=False, allow_blank=True)
     yes_no.showInputMessage = True
     yes_no.showErrorMessage = True
-    sheet.add_data_validation(yes_no)
+    if len(element_deviations) + len(element_errors) + len(pcs_deviations) > 0:
+        sheet.add_data_validation(yes_no)
     # Headers
     sheet.cell(4, 1,value = "Judge").font=bold
     sheet.cell(4, 2,value = "Judge Score").font=bold
@@ -246,6 +330,21 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
 
     current_row = 6
     for error in element_errors:
+        sheet.cell(current_row, 1, value = f"J{error["Judge Number"]}- {error["Judge Name"]}")
+        sheet.cell(current_row, 2, value = error["Judge Score"])
+        sheet.cell(current_row, 3, value = "Rule Error")
+        sheet.cell(current_row, 4, value = error["Skater"])
+        sheet.cell(current_row, 5, value = error["Element"])
+        sheet.cell(current_row, 7).value="YES"
+        yes_no.add(sheet.cell(current_row, 7))
+        sheet.cell(current_row, 6).fill = gray
+        sheet.cell(current_row, 6).border = thin_border
+        sheet.cell(current_row, 7).fill = gray
+        sheet.cell(current_row, 7).border = thin_border
+        sheet.cell(current_row, 6).alignment = Alignment(wrap_text=True)
+        current_row=current_row+1
+    
+    for error in element_deviations:
         sheet.cell(current_row, 1, value = f"J{error["Judge Number"]}- {error["Judge Name"]}")
         sheet.cell(current_row, 2, value = error["Judge Score"])
         sheet.cell(current_row, 3, value = error["Deviation"])
@@ -264,7 +363,7 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
     sheet.cell(current_row, 1).value = "B. RANGES OF PROGRAM COMPONENTS"
     sheet.cell(current_row, 1).font = bold
     current_row+=1
-    for error in pcs_errors:
+    for error in pcs_deviations:
         sheet.cell(current_row, 1, value =  str(f"J{error["Judge Number"]}- {error["Judge Name"]}"))
         sheet.cell(current_row, 2, value = error["Judge Score"])
         sheet.cell(current_row, 3, value = str(error["Deviation"]))
@@ -272,8 +371,10 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
         yes_no.add(sheet.cell(current_row, 7))
         sheet.cell(current_row, 6).fill = gray
         sheet.cell(current_row, 6).border = thin_border
-        sheet.cell(current_row, 7).fill = gray
         sheet.cell(current_row, 6).alignment = Alignment(wrap_text=True)
+        sheet.cell(current_row, 7).fill = gray
+        sheet.cell(current_row, 7).border = thin_border
+        
         current_row=current_row+1
     cell_end_errors_section = current_row
 

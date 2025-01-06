@@ -1,14 +1,24 @@
 import asyncio
 from pyppeteer import launch
 import judgingParsing 
+from judgingParsing import autofit_worksheet
 import requests
 from bs4 import BeautifulSoup
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import re
 import openpyxl
+import time
+import pdfkit
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
+
+def convert_url_to_pdf(url, pdf_path):
+    try:
+        pdfkit.from_url(url, pdf_path)
+        #print(f"PDF generated and saved at {pdf_path}")
+    except Exception as e:
+        print(f"PDF generation failed: {e}")
 
 async def generate_pdf(url, pdf_path):
     browser = await launch()
@@ -18,11 +28,12 @@ async def generate_pdf(url, pdf_path):
     await browser.close()
 
 
-def processEvent(url, eventName, judges, workbook, pdf_number, event_regex):
+def processEvent(url, eventName, judges, workbook, pdf_number, event_regex, only_rule_errors=False):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     excel_path = excel_folder
-    asyncio.get_event_loop().run_until_complete(generate_pdf(url, pdf_path))
-    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex)
+    asyncio.run(generate_pdf(url, pdf_path))
+    #convert_url_to_pdf(url, pdf_path)
+    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex, only_rule_errors)
     
 def get_page_contents(url):
     headers = {
@@ -55,12 +66,12 @@ def findJudgesNames(soup):
     return judges
 
 #event_name -> total_errors_per_judge, allowed_errors
-def make_competition_summary_page(workbook, report_name, event_details_dict, judge_errors):
+def make_competition_summary_page(workbook, report_name, event_details_dict, judge_errors, only_rule_errors=False):
     sheet = workbook.create_sheet("Summary", 0)
 
     # Styles
     bold = Font(bold=True)
-    gray = PatternFill(fill_type='lightGray')
+    gray = PatternFill("solid", fgColor="C0C0C0")
     thin = Side(border_style="thin", color="000000")
     thin_border = Border(top=thin, left=thin, right=thin, bottom=thin)
     wrap_text=Alignment(wrap_text=True)
@@ -121,7 +132,8 @@ def make_competition_summary_page(workbook, report_name, event_details_dict, jud
                 sheet_name = event[1]["Sheet Name"]
                 row=judge_number+event[1]["Summary Row Start"]-1
                 sheet.cell(current_row, current_col, value=judge_errors[judge][event[0]]["Errors"])
-                sheet.cell(current_row, current_col+1).value = f"={sheet_name}!C{row}"
+                sheet.cell(current_row, current_col+1).value = f"='{sheet_name}'!C{row}"
+                #print (f"row:{current_row}, col:{current_col+1} value:{sheet.cell(current_row, current_col+1).value}")
                 sheet.cell(current_row, current_col+2, value=judge_errors[judge][event[0]]["In Excess"])
                 sheet.cell(current_row, current_col+2).font = Font(b=True, color="FF0000")
                 sheet.cell(current_row, current_col+3).value = f"=MAX({get_column_letter(current_col+1)}{current_row}-C{current_row}, 0)"
@@ -215,7 +227,7 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     judgesNames = findJudgesNames(soup)
     return (link["href"], judgesNames)
 
-def scrape(base_url, report_name, event_regex):
+def scrape(base_url, report_name, event_regex="", only_rule_errors=False):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = openpyxl.Workbook()   
@@ -224,9 +236,10 @@ def scrape(base_url, report_name, event_regex):
         links, names = get_urls_and_names(page_contents)
         judge_errors = {}
         event_details = {}
+        detailed_rule_errors = []
         for i in range(len(links)):
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(base_url, links[i]["href"])
-            (event_name, total_errors, num_starts, allowed_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex)
+            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex, only_rule_errors)
             if total_errors == None:
                 # This is an event to skip per the regex
                 continue
@@ -237,6 +250,11 @@ def scrape(base_url, report_name, event_regex):
                 if judge not in judge_errors:
                     judge_errors[judge] = {}
                 judge_errors[judge][event_name] = {"Errors": total_errors[i], "Allowed Errors": allowed_errors,  "In Excess": max(total_errors[i]-allowed_errors, 0), "Judge Number": i+1}
+            
+            for rule_error in rule_errors:
+                rule_error["Competition"] = report_name
+                rule_error["Event"] = event_name
+                detailed_rule_errors.append(rule_error)
         
         #Sort sheets
         del workbook['Sheet']
@@ -245,6 +263,8 @@ def scrape(base_url, report_name, event_regex):
         df_dict = {}
         for judge in judge_errors:
             df_dict[judge] = pd.DataFrame.from_dict(judge_errors[judge], orient='index')
+        
+        errors_dict_to_return = pd.DataFrame.from_dict(detailed_rule_errors)
 
         make_competition_summary_page(workbook, report_name, event_details, judge_errors)
         #make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex)
@@ -255,9 +275,10 @@ def scrape(base_url, report_name, event_regex):
     excel_path = f"{excel_folder}{report_name}.xlsx"
     workbook.save(excel_path) 
     print ("Finished " + report_name)
-    return df_dict
+    return df_dict, errors_dict_to_return
 
-def create_season_summary(full_report_name="2425Summary"):
+def create_season_summary(full_report_name="2425Summary", only_rule_errors=False):
+    start = time.time()
     workbook = openpyxl.Workbook()   
     events = {
         "Dallas_Classic":"2024/33436",
@@ -288,16 +309,25 @@ def create_season_summary(full_report_name="2425Summary"):
         "Easterns_PairsFinal2425": "2024/34289",
     }
     summary_dict = {}
+    all_rules_errors = []
 
+    event_regex = ""
+    if only_rule_errors:
+        event_regex=".*Women|Men|Boys|Girls.*"
     for event_name in events:
-        result = scrape(f"https://ijs.usfigureskating.org/leaderboard/results/{events[event_name]}", f"{event_name}")
+        start_event = time.time()
+        result, rule_errors = scrape(f"https://ijs.usfigureskating.org/leaderboard/results/{events[event_name]}", f"{event_name}", event_regex, only_rule_errors=only_rule_errors)
+        all_rules_errors.append(rule_errors)
         for judge in result:
             result[judge]["Competition"] = event_name
             if judge not in summary_dict:
                 summary_dict[judge] = result[judge]
             else:
                 summary_dict[judge] = pd.concat([summary_dict[judge], result[judge]], axis=0)
+        print(f"{time.time()-start_event} seconds for {event_name}")
     print_summary_workbook(workbook, summary_dict, full_report_name)
+    print_rule_error_summary_workbook(pd.concat(all_rules_errors, ignore_index=False), full_report_name)
+    print(f"{time.time()-start} seconds elapsed total")
                 
 def print_summary_workbook(workbook, summary_dict, full_report_name):
     sheet = workbook.create_sheet("Summary", 0)
@@ -334,11 +364,29 @@ def print_summary_workbook(workbook, summary_dict, full_report_name):
 def print_sheet_per_judge(writer, judge_name : str, judge_df):
     judge_df.rename(columns={"Errors": "Anomalies", "Allowed Errors": "Allowed"})
     judge_df.to_excel(writer, sheet_name = judge_name)
-    writer.sheets[judge_name].set_column(1, 1, 35)
-    writer.sheets[judge_name].set_column(2, 2, 12)
-    writer.sheets[judge_name].set_column(3, 3, 12)
-    writer.sheets[judge_name].set_column(4, 4, 12)
-    writer.sheets[judge_name].set_column(5, 5, 30)
+    writer.sheets[judge_name].column_dimensions['A'].width = 35
+    writer.sheets[judge_name].column_dimensions['B'].width = 12
+    writer.sheets[judge_name].column_dimensions['C'].width = 12
+    writer.sheets[judge_name].column_dimensions['D'].width = 12
+    writer.sheets[judge_name].column_dimensions['E'].width = 30
+
+def print_rule_error_summary_workbook(rule_errors, full_report_name): 
+    writer = pd.ExcelWriter(f"{excel_folder}{full_report_name}_RuleErrors.xlsx", engine = 'openpyxl')
+
+    grouped_df = rule_errors.groupby('Judge Name').size()
+    grouped_df = grouped_df.sort_values(ascending=False)
+    grouped_df.to_excel(writer, sheet_name="Summary")
+    autofit_worksheet(writer.sheets["Summary"])
+
+    rule_errors.to_excel(writer, sheet_name="All Errors")
+    autofit_worksheet(writer.sheets["All Errors"])
+
+    # Add sheets per judge
+    for judge in sorted(rule_errors["Judge Name"].unique()):
+        judge_df = rule_errors[rule_errors["Judge Name"] == judge]
+        judge_df.to_excel(writer, sheet_name=judge)
+        autofit_worksheet(writer.sheets[judge])
+    writer.close()
 
 pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/"  # Update with the correct path
 excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/"
@@ -355,9 +403,10 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
 excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/ForLisa/"
 base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
-report_name = "2024_Easterns_Singles"
-#scrape(base_url, report_name, ".?(Novice|Junior|Senior).?(Women|Men).?")
-#scrape(base_url, "2024_Pairs_Final", ".?(Novice|Junior|Senior).?(Pairs).?")
-scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34290', "2024_Midwestern_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
-#scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34291', "2024_Pacific_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
-# create_season_summary()
+# report_name = "2024_Easterns_Singles_only_errors"
+#scrape(base_url, report_name, ".?(Novice|Junior|Senior).?(Women|Men).?", only_rule_errors=True)
+#scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
+# scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34290', "2024_Midwestern_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
+scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
+scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30895', "2022_Golden_West", "")
+#create_season_summary()
