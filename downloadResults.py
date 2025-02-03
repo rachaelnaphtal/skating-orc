@@ -399,14 +399,22 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 # base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 # report_name = "Mids2425_ORC_Report"
 
-# #Easterns/ Pairs Final 2425
-pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
-excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/ForLisa/"
-base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
-# report_name = "2024_Easterns_Singles_only_errors"
-#scrape(base_url, report_name, ".?(Novice|Junior|Senior).?(Women|Men).?", only_rule_errors=True)
-#scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
-# scrape('https://ijs.usfigureskating.org/leaderboard/results//2024/34290', "2024_Midwestern_Singles", ".*(Novice|Junior|Senior).?(Women|Men).*")
-scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
-scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30895', "2022_Golden_West", "")
-#create_season_summary()
+if __name__ == "__main__":
+
+    # #Easterns/ Pairs Final 2425
+    pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
+    excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Official/"
+    base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
+    #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25")
+    #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_SP", event_regex=".*(Women|Men|Pairs).*")
+    #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_Dance", event_regex=".*(Dance).*")
+    # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
+    # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
+    scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25_all")
+    scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
+    
+    #scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
+    #scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/34290', "2024_Dance_Final", ".*(Novice|Junior|Senior).?(Dance).*")
+    #scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
+    #scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30895', "2022_Golden_West", "")
+    #create_season_summary()

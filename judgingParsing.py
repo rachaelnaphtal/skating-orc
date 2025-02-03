@@ -4,8 +4,10 @@ from pypdf import PdfReader
 import pandas as pd
 import re
 
+
 import asyncio
 from pyppeteer import launch
+import time
 
 import openpyxl
 from openpyxl import Workbook
@@ -28,7 +30,7 @@ def autofit_worksheet(worksheet):
      adjusted_width = (max_length + 2) * 1.1
      worksheet.column_dimensions[column].width = adjusted_width
 
-def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex="", only_rule_errors=False):
+def parse_scores(pdf_path, event_regex=""):
     # Initialize list for storing extracted data
     elements_per_skater = {}
     pcs_per_skater = {}
@@ -37,6 +39,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
 
     # Open the PDF file
     with PdfReader(pdf_path) as pdf:
+        start = time.time()
     #with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
@@ -53,7 +56,7 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                 event_name = event_name.split("/")[0]
                 event_name = event_name.split(":")[0]
                 if not re.match(event_regex, event_name):
-                    return (event_name, None, None, None, [])
+                    return (None, None, None, event_name)
 
             current_skater = None
             has_bonus = False
@@ -82,12 +85,9 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                         print(f"Missing skater in {event_name}. Next is {current_skater}")
                     continue
 
-                
-                    
-
                 # Match elements and judge scores
                 element_match = re.match(r"^(1?\d)(\s)*([\w\+\.\*<>!]+(?:\w+)?)\s+(?:([F*<!>qnscuSCUex]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
-                pcs_match = re.match(r"^^\s*(Timing|Presentation|Skating\sSkills|Composition)\s+([\d\.]+)\s+((?:[\d\.]{4}\s*){3,9})([\d\.]+)", line)
+                pcs_match = re.match(r"^\s*(Timing|Presentation|Skating\sSkills|Composition|Artistic\sAppeal)\s+([\d\.]+)\s+((?:[\d]{1,2}\.[\d]{2}\s*){3,9})([\d\.]+)", line)
                 if current_skater and element_match:
                    # element_number = int(element_match.group(1))
                     element_name = element_match.group(3)
@@ -99,26 +99,38 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
                     judges_scores = list(map(float, element_match.group(8).split()))
                     total_score = float(element_match.group(10))
                     notes = element_match.group(4)
+                    element_number = int(element_match.group(1))
                     #scores = list(map(int, element_match.group(2).split()))
                     elements_per_skater[current_skater].append({
                         "Element": element_name,
                         "Scores": judges_scores,
                         "Value": total_score,
-                        "Notes": notes
+                        "Notes": notes,
+                        "Number": element_number
                     })
                 elif current_skater and pcs_match:
                     component = pcs_match.group(1)
                     no_spaces = pcs_match.group(3).replace(" ","")
-                    scores = [no_spaces[i:i+4] for i in range(0, len(no_spaces), 4)]
+                    scores = []
+                    current_score = ""
+                    i = 0
+                    while i< len(no_spaces):
+                        if no_spaces[i] == ".":
+                            current_score+=no_spaces[i:i+3]
+                            i+=3
+                            scores.append(current_score)
+                            current_score = ""
+                        else:
+                            current_score+=no_spaces[i]
+                            i+=1
                     judges_scores = list(map(float, scores))
                     pcs_per_skater[current_skater].append({
                         "Component": component,
                         "Scores": judges_scores
                     })
                 if current_skater == None and (pcs_match or element_match):
-                    print (f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found")
+                    print (f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}")
       
-
         for skater in elements_per_skater:
             #print ([element["Element"] for element in elements_per_skater[skater]])
             #print ([element["Notes"] for element in elements_per_skater[skater]])
@@ -133,28 +145,38 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
             if (len(pcs) != 3):
                 print(f"Components missing for skater {skater} {pdf_path}")
         
-        element_errors = []
-        element_deviations = []
-        pcs_errors=[]
-        if "Women" in event_name or "Men" in event_name or "Boys" in event_name or "Girls" in event_name:
-            element_errors = findSinglesElementErrors(elements_per_skater, judges, event_name)    
-        
-        if not only_rule_errors:
-            element_deviations = findElementDeviations(elements_per_skater, judges)
-            pcs_errors = findPCSDeviations(pcs_per_skater, judges)
-        total_errors = count_total_errors_per_judge(judges, element_errors, element_deviations, pcs_errors)
+    return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
 
-        printToExcel(workbook, base_excel_path, event_name, judges, element_errors, element_deviations, pcs_errors, total_errors, pdf_number)
-        #print(f"Num Skaters: {len(skater_details)}")
-        #print (list(elements_per_skater.keys()))
-        return (event_name, total_errors, len(skater_details), get_allowed_errors(len(skater_details)), element_errors)
+def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex="", only_rule_errors=False):
+    
+    (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(pdf_path, event_regex)
+    if not re.match(event_regex, event_name):
+        return (event_name, None, None, None, [])
+
+    element_errors = []
+    element_deviations = []
+    pcs_errors=[]
+    if "Women" in event_name or "Men" in event_name or "Boys" in event_name or "Girls" in event_name:
+        element_errors = findSinglesElementErrors(elements_per_skater, judges, event_name)    
+    elif "Pairs" in event_name:
+        element_errors= findPairsElementErrors(elements_per_skater, judges, event_name)
+    
+    if not only_rule_errors:
+        element_deviations = findElementDeviations(elements_per_skater, judges)
+        pcs_errors = findPCSDeviations(pcs_per_skater, judges)
+    total_errors = count_total_errors_per_judge(judges, element_errors, element_deviations, pcs_errors)
+
+    printToExcel(workbook, event_name, judges, element_errors, element_deviations, pcs_errors, pdf_number)
+    #print(f"Num Skaters: {len(skater_details)}")
+    #print (list(elements_per_skater.keys()))
+    return (event_name, total_errors, len(skater_details), get_allowed_errors(len(skater_details)), element_errors)
    
 def match_skater(line, has_bonus):
     if has_bonus:
-        return re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})$", line)
+        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})$", line)
     else:
-        return re.match(r"^(\d+)\s+([A-Za-z\(\)\/\-\s]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})?\s?([\d]{1,3}\.[\d\.]{2})$", line)
+        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})?\s?([\d]{1,3}\.[\d\.]{2})$", line)
             
 
 def get_allowed_errors(num_skaters : int):
@@ -208,6 +230,9 @@ def findSinglesElementErrors(skater_scores, judges, event_name):
     #if (len(errors) > 0):
         #print(event_name, errors)
     return errors
+
+def findPairsElementErrors(skater_scores, judges, event_name):
+    return findSinglesElementErrors(skater_scores, judges, event_name)
 
 def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
     element_name = f"{element["Element"]} {element["Notes"]}"
@@ -264,6 +289,7 @@ def findPCSDeviations(skater_scores, judges):
                     "Judge Name": judges[judgeNumber-1],
                     "Judge Score": allScores[judgeNumber-1],
                     "Deviation": deviation,
+                    "Component": component["Component"],
                     "Type": "Deviation"
                     })
                 deviation_points[judgeNumber]= deviation_points[judgeNumber]+ deviation
@@ -303,7 +329,7 @@ def get_sheet_name(event_name, pdf_number):
         sheet_name = f"{sheet_name[0:min(len(sheet_name),26)]}{pdf_number}"
     return sheet_name
 
-def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, element_deviations, pcs_deviations, total_errors, pdf_number):
+def printToExcel(workbook, event_name, judges, element_errors, element_deviations, pcs_deviations, pdf_number):
     sheet_name = get_sheet_name(event_name, pdf_number)
 
     bold = Font(bold=True)
@@ -332,7 +358,7 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
     for error in element_errors:
         sheet.cell(current_row, 1, value = f"J{error["Judge Number"]}- {error["Judge Name"]}")
         sheet.cell(current_row, 2, value = error["Judge Score"])
-        sheet.cell(current_row, 3, value = "Rule Error")
+        sheet.cell(current_row, 3, value = error["Description"])
         sheet.cell(current_row, 4, value = error["Skater"])
         sheet.cell(current_row, 5, value = error["Element"])
         sheet.cell(current_row, 7).value="YES"
@@ -368,6 +394,7 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
         sheet.cell(current_row, 2, value = error["Judge Score"])
         sheet.cell(current_row, 3, value = str(error["Deviation"]))
         sheet.cell(current_row, 4, value = error["Skater"])
+        sheet.cell(current_row, 5, value = error["Component"])
         yes_no.add(sheet.cell(current_row, 7))
         sheet.cell(current_row, 6).fill = gray
         sheet.cell(current_row, 6).border = thin_border
@@ -395,12 +422,11 @@ def printToExcel(workbook, base_excel_path, event_name, judges, element_errors, 
     sheet.column_dimensions["F"].width =35
     #print (f"Processed {event_name}")
     
-   
-
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
     pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Novice_Women.pdf"  # Update with the correct path
     excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/" 
+    tj_pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/TrialJudges/JMFS.xlsx"
 
     workbook = openpyxl.Workbook()  
     extract_judge_scores(workbook, pdf_path, excel_path, ["Name1", "Name2", "Name3", "Name4", "Name5", "Name6", "Name7", "Name8", "Name9"], 2)
