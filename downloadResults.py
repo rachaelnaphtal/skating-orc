@@ -21,16 +21,15 @@ def convert_url_to_pdf(url, pdf_path):
         print(f"PDF generation failed: {e}")
 
 async def generate_pdf(url, pdf_path):
-    browser = await launch()
+    browser = await launch({'autoClose': False, 'handleSIGINT':False, 'handleSIGTERM':False, 'handleSIGHUP':False})
     page = await browser.newPage()
     await page.goto(url)
     await page.pdf({'path': pdf_path, 'format': 'A4'})
     await browser.close()
 
 
-def processEvent(url, eventName, judges, workbook, pdf_number, event_regex, only_rule_errors=False):
+def processEvent(url, eventName, judges, workbook, pdf_number, event_regex, pdf_folder, excel_path, only_rule_errors=False):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
-    excel_path = excel_folder
     asyncio.run(generate_pdf(url, pdf_path))
     #convert_url_to_pdf(url, pdf_path)
     return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex, only_rule_errors)
@@ -227,7 +226,7 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     judgesNames = findJudgesNames(soup)
     return (link["href"], judgesNames)
 
-def scrape(base_url, report_name, event_regex="", only_rule_errors=False):
+def scrape(base_url, report_name, excel_folder="", pdf_folder="", event_regex="", only_rule_errors=False):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = openpyxl.Workbook()   
@@ -239,7 +238,7 @@ def scrape(base_url, report_name, event_regex="", only_rule_errors=False):
         detailed_rule_errors = []
         for i in range(len(links)):
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(base_url, links[i]["href"])
-            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex, only_rule_errors)
+            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex,  pdf_folder, excel_folder, only_rule_errors=only_rule_errors)
             if total_errors == None:
                 # This is an event to skip per the regex
                 continue
@@ -388,9 +387,9 @@ def print_rule_error_summary_workbook(rule_errors, full_report_name):
         autofit_worksheet(writer.sheets[judge])
     writer.close()
 
-pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/"  # Update with the correct path
-excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/"
-base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
+# pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/Results/"  # Update with the correct path
+# excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/2425/"
+# base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 #report_name = "Mids2024_ORC_Report"
 
 # #Mids 2425
@@ -402,8 +401,8 @@ base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34290'
 if __name__ == "__main__":
 
     # #Easterns/ Pairs Final 2425
-    pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Results/"  # Update with the correct path
-    excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis/Official/"
+    pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/"  # Update with the correct path
+    excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis_Results/Official/"
     base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
     #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25")
     #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_SP", event_regex=".*(Women|Men|Pairs).*")
