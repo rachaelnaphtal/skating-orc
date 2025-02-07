@@ -13,6 +13,20 @@ import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
 from openpyxl.worksheet.datavalidation import DataValidation
+from google.cloud import storage
+import gcsfs
+from io import BytesIO
+
+def read_file_from_gcp(file_name):
+    # The ID of your GCS bucket
+    bucket_name = "skating_orc_reports"
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_name)
+
+    with blob.open("rb") as f:
+        return BytesIO(f.read())
 
 USING_ISU_COMPONENT_METHOD=False
 
@@ -30,127 +44,132 @@ def autofit_worksheet(worksheet):
      adjusted_width = (max_length + 2) * 1.1
      worksheet.column_dimensions[column].width = adjusted_width
 
-def parse_scores(pdf_path, event_regex=""):
+def parse_scores(pdf_path, event_regex="", use_gcp=False):
+    if use_gcp:
+        pdf_bytes = read_file_from_gcp(pdf_path)
+        with PdfReader(pdf_bytes) as pdf:
+            return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
+    else:
+        with PdfReader(pdf_path) as pdf:
+            return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
+
+def process_scores(pdf, event_regex="", use_gcp=False):
     # Initialize list for storing extracted data
     elements_per_skater = {}
     pcs_per_skater = {}
     skater_details = {}
     event_name=""
+    start = time.time()
+    for page in pdf.pages:
+        text = page.extract_text()
+        if not text:
+            return
 
-    # Open the PDF file
-    with PdfReader(pdf_path) as pdf:
-        start = time.time()
-    #with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
-                return
-    
-        #if "JUDGES DETAILS PER SKATER" in text:
-            text = text.replace("\xa0", "")
-            
-            # Split text into lines
-            lines = text.split("\n")
-            if event_name == "":
-                event_name=lines[2].replace("/","").replace(" ", "_").replace("__", "_").replace("-", "_") 
-                event_name = event_name.split("/")[0]
-                event_name = event_name.split(":")[0]
-                if not re.match(event_regex, event_name):
-                    return (None, None, None, event_name)
-
-            current_skater = None
-            has_bonus = False
-
-            for i in range(len(lines)):
-                line = lines[i]
-                if line == "Bonus":
-                    has_bonus="True"
-                # Match skater's name section
-                skater_match = match_skater(line, has_bonus)
-
-                if current_skater is None and line == "# Executed":
-                    # The skater name was probably split across two lines
-                    possible_skater = f"{lines[i-2]}{lines[i-1]}"
-                    skater_match = match_skater(possible_skater, has_bonus)
-
-                if skater_match:
-                    skater_name = skater_match.group(2).strip()
-                    technical_score = skater_match.group(5)
-                    current_skater = skater_name
-                    if current_skater not in elements_per_skater:
-                        elements_per_skater[current_skater] = []
-                        pcs_per_skater[current_skater] = []
-                        skater_details[current_skater] = technical_score
-                    if int(skater_match.group(1)) != len(elements_per_skater.keys()):
-                        print(f"Missing skater in {event_name}. Next is {current_skater}")
-                    continue
-
-                # Match elements and judge scores
-                element_match = re.match(r"^(1?\d)(\s)*([\w\+\.\*<>!]+(?:\w+)?)\s+(?:([F*<!>qnscuSCUex]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
-                pcs_match = re.match(r"^\s*(Timing|Presentation|Skating\sSkills|Composition|Artistic\sAppeal)\s+([\d\.]+)\s+((?:[\d]{1,2}\.[\d]{2}\s*){3,9})([\d\.]+)", line)
-                if current_skater and element_match:
-                   # element_number = int(element_match.group(1))
-                    element_name = element_match.group(3)
-                    # Fix parsing issues for SEQ< or SEQ<<
-                    if element_name.endswith("SEQ<"):
-                        element_name = element_name[:-1]
-                    elif element_name.endswith("SEQ<<"):
-                        element_name = element_name[:len(element_name)-2]
-                    judges_scores = list(map(float, element_match.group(8).split()))
-                    total_score = float(element_match.group(10))
-                    notes = element_match.group(4)
-                    element_number = int(element_match.group(1))
-                    #scores = list(map(int, element_match.group(2).split()))
-                    elements_per_skater[current_skater].append({
-                        "Element": element_name,
-                        "Scores": judges_scores,
-                        "Value": total_score,
-                        "Notes": notes,
-                        "Number": element_number
-                    })
-                elif current_skater and pcs_match:
-                    component = pcs_match.group(1)
-                    no_spaces = pcs_match.group(3).replace(" ","")
-                    scores = []
-                    current_score = ""
-                    i = 0
-                    while i< len(no_spaces):
-                        if no_spaces[i] == ".":
-                            current_score+=no_spaces[i:i+3]
-                            i+=3
-                            scores.append(current_score)
-                            current_score = ""
-                        else:
-                            current_score+=no_spaces[i]
-                            i+=1
-                    judges_scores = list(map(float, scores))
-                    pcs_per_skater[current_skater].append({
-                        "Component": component,
-                        "Scores": judges_scores
-                    })
-                if current_skater == None and (pcs_match or element_match):
-                    print (f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}")
-      
-        for skater in elements_per_skater:
-            #print ([element["Element"] for element in elements_per_skater[skater]])
-            #print ([element["Notes"] for element in elements_per_skater[skater]])
-            foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
-            expected = float(skater_details[skater])
-            if (foundElements != expected):
-                print (f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}")
-                #print (f"Elements for {skater}: {[f"{x["Element"]} ({x["Value"]})" for x in skater_scores[skater]]}")
-            #else:
-                #print (f"Elements for skater {skater} do match.")
-            pcs = pcs_per_skater[skater]
-            if (len(pcs) != 3):
-                print(f"Components missing for skater {skater} {pdf_path}")
+    #if "JUDGES DETAILS PER SKATER" in text:
+        text = text.replace("\xa0", "")
         
+        # Split text into lines
+        lines = text.split("\n")
+        if event_name == "":
+            event_name=lines[2].replace("/","").replace(" ", "_").replace("__", "_").replace("-", "_") 
+            event_name = event_name.split("/")[0]
+            event_name = event_name.split(":")[0]
+            if not re.match(event_regex, event_name):
+                return (None, None, None, event_name)
+
+        current_skater = None
+        has_bonus = False
+
+        for i in range(len(lines)):
+            line = lines[i]
+            if line == "Bonus":
+                has_bonus="True"
+            # Match skater's name section
+            skater_match = match_skater(line, has_bonus)
+
+            if current_skater is None and line == "# Executed":
+                # The skater name was probably split across two lines
+                possible_skater = f"{lines[i-2]}{lines[i-1]}"
+                skater_match = match_skater(possible_skater, has_bonus)
+
+            if skater_match:
+                skater_name = skater_match.group(2).strip()
+                technical_score = skater_match.group(5)
+                current_skater = skater_name
+                if current_skater not in elements_per_skater:
+                    elements_per_skater[current_skater] = []
+                    pcs_per_skater[current_skater] = []
+                    skater_details[current_skater] = technical_score
+                if int(skater_match.group(1)) != len(elements_per_skater.keys()):
+                    print(f"Missing skater in {event_name}. Next is {current_skater}")
+                continue
+
+            # Match elements and judge scores
+            element_match = re.match(r"^(1?\d)(\s)*([\w\+\.\*<>!]+(?:\w+)?)\s+(?:([F*<!>qnscuSCUex]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)", line)
+            pcs_match = re.match(r"^\s*(Timing|Presentation|Skating\sSkills|Composition|Artistic\sAppeal)\s+([\d\.]+)\s+((?:[\d]{1,2}\.[\d]{2}\s*){3,9})([\d\.]+)", line)
+            if current_skater and element_match:
+                # element_number = int(element_match.group(1))
+                element_name = element_match.group(3)
+                # Fix parsing issues for SEQ< or SEQ<<
+                if element_name.endswith("SEQ<"):
+                    element_name = element_name[:-1]
+                elif element_name.endswith("SEQ<<"):
+                    element_name = element_name[:len(element_name)-2]
+                judges_scores = list(map(float, element_match.group(8).split()))
+                total_score = float(element_match.group(10))
+                notes = element_match.group(4)
+                element_number = int(element_match.group(1))
+                #scores = list(map(int, element_match.group(2).split()))
+                elements_per_skater[current_skater].append({
+                    "Element": element_name,
+                    "Scores": judges_scores,
+                    "Value": total_score,
+                    "Notes": notes,
+                    "Number": element_number
+                })
+            elif current_skater and pcs_match:
+                component = pcs_match.group(1)
+                no_spaces = pcs_match.group(3).replace(" ","")
+                scores = []
+                current_score = ""
+                i = 0
+                while i< len(no_spaces):
+                    if no_spaces[i] == ".":
+                        current_score+=no_spaces[i:i+3]
+                        i+=3
+                        scores.append(current_score)
+                        current_score = ""
+                    else:
+                        current_score+=no_spaces[i]
+                        i+=1
+                judges_scores = list(map(float, scores))
+                pcs_per_skater[current_skater].append({
+                    "Component": component,
+                    "Scores": judges_scores
+                })
+            if current_skater == None and (pcs_match or element_match):
+                print (f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}")
+    
+    for skater in elements_per_skater:
+        #print ([element["Element"] for element in elements_per_skater[skater]])
+        #print ([element["Notes"] for element in elements_per_skater[skater]])
+        foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
+        expected = float(skater_details[skater])
+        if (foundElements != expected):
+            print (f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}")
+            #print (f"Elements for {skater}: {[f"{x["Element"]} ({x["Value"]})" for x in skater_scores[skater]]}")
+        #else:
+            #print (f"Elements for skater {skater} do match.")
+        pcs = pcs_per_skater[skater]
+        if (len(pcs) != 3):
+            print(f"Components missing for skater {skater} {pdf_path}")
+    
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
 
-def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex="", only_rule_errors=False):
+def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number, event_regex="", only_rule_errors=False, use_gcp=False):
     
-    (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(pdf_path, event_regex)
+    (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(pdf_path, event_regex, use_gcp=use_gcp)
     if not re.match(event_regex, event_name):
         return (event_name, None, None, None, [])
 

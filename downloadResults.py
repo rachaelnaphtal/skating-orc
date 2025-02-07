@@ -12,6 +12,33 @@ import time
 import pdfkit
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
+from google.cloud import storage
+import os
+import gcsfs
+from io import BytesIO
+
+os.environ["GCLOUD_PROJECT"] = "skating-orc"
+
+def save_gcp_workbook(workbook, file_name):
+    # Save the workbook to bytes
+    virtual_workbook = BytesIO()
+    workbook.save(virtual_workbook)
+
+    # Get the bytes
+    workbook_bytes = virtual_workbook.getvalue()
+    write_file_to_gcp(workbook_bytes, file_name)
+
+def write_file_to_gcp(bytes, file_name):
+    """Write and read a blob from GCS using file-like IO"""
+    # The ID of your GCS bucket
+    bucket_name = "skating_orc_reports"
+
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_name)
+
+    with blob.open("wb") as f:
+        f.write(bytes)
 
 def convert_url_to_pdf(url, pdf_path):
     try:
@@ -20,19 +47,24 @@ def convert_url_to_pdf(url, pdf_path):
     except Exception as e:
         print(f"PDF generation failed: {e}")
 
-async def generate_pdf(url, pdf_path):
+async def generate_pdf(url, pdf_path, use_gcp=False):
     browser = await launch({'autoClose': False, 'handleSIGINT':False, 'handleSIGTERM':False, 'handleSIGHUP':False})
     page = await browser.newPage()
     await page.goto(url)
-    await page.pdf({'path': pdf_path, 'format': 'A4'})
+    pdf_data = await  page.pdf({ 'format': 'A4'})
+    if use_gcp:
+        write_file_to_gcp(pdf_data, pdf_path)
+    else:
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_data)
     await browser.close()
 
 
-def processEvent(url, eventName, judges, workbook, pdf_number, event_regex, pdf_folder, excel_path, only_rule_errors=False):
+def processEvent(url, eventName, judges, workbook, pdf_number, event_regex, pdf_folder, excel_path, only_rule_errors=False, use_gcp=False):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
-    asyncio.run(generate_pdf(url, pdf_path))
+    asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
     #convert_url_to_pdf(url, pdf_path)
-    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex, only_rule_errors)
+    return judgingParsing.extract_judge_scores(workbook, pdf_path, excel_path, judges, pdf_number, event_regex, only_rule_errors, use_gcp=use_gcp)
     
 def get_page_contents(url):
     headers = {
@@ -65,7 +97,7 @@ def findJudgesNames(soup):
     return judges
 
 #event_name -> total_errors_per_judge, allowed_errors
-def make_competition_summary_page(workbook, report_name, event_details_dict, judge_errors, only_rule_errors=False):
+def make_competition_summary_page(workbook, report_name, event_details_dict, judge_errors, only_rule_errors=False, use_gcp=False):
     sheet = workbook.create_sheet("Summary", 0)
 
     # Styles
@@ -226,7 +258,7 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     judgesNames = findJudgesNames(soup)
     return (link["href"], judgesNames)
 
-def scrape(base_url, report_name, excel_folder="", pdf_folder="", event_regex="", only_rule_errors=False):
+def scrape(base_url, report_name, excel_folder="", pdf_folder="", event_regex="", only_rule_errors=False, use_gcp=False):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = openpyxl.Workbook()   
@@ -238,7 +270,7 @@ def scrape(base_url, report_name, excel_folder="", pdf_folder="", event_regex=""
         detailed_rule_errors = []
         for i in range(len(links)):
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(base_url, links[i]["href"])
-            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex,  pdf_folder, excel_folder, only_rule_errors=only_rule_errors)
+            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = processEvent(f"{base_url}/{resultsLink}", i, judgesNames, workbook, i, event_regex,  pdf_folder, excel_folder, only_rule_errors=only_rule_errors, use_gcp=use_gcp)
             if total_errors == None:
                 # This is an event to skip per the regex
                 continue
@@ -272,7 +304,10 @@ def scrape(base_url, report_name, excel_folder="", pdf_folder="", event_regex=""
         print('Failed to get page contents.')
 
     excel_path = f"{excel_folder}{report_name}.xlsx"
-    workbook.save(excel_path) 
+    if (use_gcp):
+        save_gcp_workbook(workbook, excel_path)
+    else:
+        workbook.save(excel_path) 
     print ("Finished " + report_name)
     return df_dict, errors_dict_to_return
 
