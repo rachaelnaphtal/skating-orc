@@ -10,6 +10,7 @@ from google.cloud import storage
 import os
 import gcsfs
 from io import BytesIO
+import re
 
 # GCP_RESULTS_FILES_PATH="gs://skating_orc_reports/Generated/"
 GCP_RESULTS_FILES_PATH="skating_orc_reports/gs://skating_orc_reports/Generated/"
@@ -38,24 +39,58 @@ def make_gui():
          key='report_type'
         )
     
-    if report_type == "Competition ORC Report":
-        report_name = st.text_input("Report Name", value="" , key='report_name')
-        url_numbers = st.text_input("Numbers at the end of results URL.", help="For example, if the URL is Competition Results Number URL (ending in the number). For example: https://ijs.usfigureskating.org/leaderboard/results/2025/34240 then enter 2025/34240", key='url_numbers')
-        event_regex = st.text_input("Event Regex.", value="", help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.", key='event_regex')
-        st.button("Generate Report", on_click=generate_full_competition_report)
+        if report_type == "Competition ORC Report":
+            createCompetitionReportLayout()
+        if report_type == "Full Season Report":
+            createFullSeasonReportLayout()
+
+
+def createCompetitionReportLayout():
+    with st.form("options_form", border=False):
+        report_name = st.text_input("Report Name (aka the name of the output file)", value="" , key='report_name')
+        url = st.text_input("Results URL for competition (for example:https://ijs.usfigureskating.org/leaderboard/results/2025/34240/index.asp).", 
+                                            key='url')
+        st.text_input("Event Regex. (Optional)", value="", help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.", key='event_regex')
+        st.checkbox("Include errors only?", help="Whether to only include rule errors.", key='only_include_errors')
+        submitted = st.form_submit_button("Generate Report")
+        if submitted:
+            validations=[validateExists(report_name, "Report Name"),validate_url(url)]
+            if all(v[0] for v in validations):
+                generate_full_competition_report()
+            else:
+                        # Show all validation errors
+                for valid, message in validations:
+                    if not valid:
+                        st.error(message)
+
+def createFullSeasonReportLayout():
+    report_name = st.text_input("Report Name (aka the name of the output file)", value="" , key='report_name')
+
+def validateExists(name, field_name):
+    if not name:
+        return False, f"{field_name} is required"
+    return True, ""
+
+def validate_url(name, field_name="URL"):
+    if not name:
+        return False, f"{field_name} is required"
+    if not re.match(r'.*[0-9]{4}\/[0-9]{5}\/index.asp$', name):
+        return False, f"{field_name} should end with the format 1111/11111/index.asp"
+    return True, ""
 
 def generate_full_competition_report():
     print(st.session_state['report_type'])
-    url = f"https://ijs.usfigureskating.org/leaderboard/results/{st.session_state['url_numbers']}"
+    url = st.session_state['url_numbers'].replace("/index.asp","")
     report_name_value = st.session_state['report_name']
     event_regex = st.session_state['event_regex']
+    only_include_errors = st.session_state['only_include_errors']
     folder_name = LOCAL_RESULTS_FILES_PATH
     if USE_GCP:
         folder_name = GCP_RESULTS_FILES_PATH
     if event_regex != '':
-        downloadResults.scrape(url, report_name_value, event_regex=event_regex, excel_folder=folder_name, pdf_folder=f"{folder_name}PDFs/", use_gcp=USE_GCP)
+        downloadResults.scrape(url, report_name_value, event_regex=event_regex, excel_folder=folder_name, pdf_folder=f"{folder_name}PDFs/", use_gcp=USE_GCP, only_rule_errors=only_include_errors)
     else:
-        downloadResults.scrape(url, report_name_value, excel_folder=folder_name, pdf_folder=f"{folder_name}PDFs/", use_gcp=USE_GCP)
+        downloadResults.scrape(url, report_name_value, excel_folder=folder_name, pdf_folder=f"{folder_name}PDFs/", use_gcp=USE_GCP, only_rule_errors=only_include_errors)
     
     
     if USE_GCP:
