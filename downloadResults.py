@@ -16,6 +16,8 @@ from google.cloud import storage
 import os
 import gcsfs
 from io import BytesIO
+import streamlit as st
+from st_files_connection import FilesConnection
 
 os.environ["GCLOUD_PROJECT"] = "skating-orc"
 
@@ -29,16 +31,19 @@ def save_gcp_workbook(workbook, file_name):
     write_file_to_gcp(workbook_bytes, file_name)
 
 def write_file_to_gcp(bytes, file_name):
-    """Write and read a blob from GCS using file-like IO"""
-    # The ID of your GCS bucket
-    bucket_name = "skating_orc_reports"
+    conn = st.connection('gcs', type=FilesConnection)
+    with conn.open(file_name, mode="wb", ttl=600) as file:
+        bytes= file.write(bytes)
+    # """Write and read a blob from GCS using file-like IO"""
+    # # The ID of your GCS bucket
+    # bucket_name = "skating_orc_reports"
 
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
+    # storage_client = storage.Client()
+    # bucket = storage_client.bucket(bucket_name)
+    # blob = bucket.blob(file_name)
 
-    with blob.open("wb") as f:
-        f.write(bytes)
+    # with blob.open("wb") as f:
+    #     f.write(bytes)
 
 def convert_url_to_pdf(url, pdf_path):
     try:

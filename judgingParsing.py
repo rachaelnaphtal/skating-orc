@@ -16,17 +16,22 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from io import BytesIO
+import streamlit as st
+from st_files_connection import FilesConnection
 
 def read_file_from_gcp(file_name):
-    # The ID of your GCS bucket
-    bucket_name = "skating_orc_reports"
+    conn = st.connection('gcs', type=FilesConnection)
+    with conn.open(file_name, mode="rb", ttl=600) as file:
+        return BytesIO(file.read())
+    # # The ID of your GCS bucket
+    # bucket_name = "skating_orc_reports"
 
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
+    # storage_client = storage.Client()
+    # bucket = storage_client.bucket(bucket_name)
+    # blob = bucket.blob(file_name)
 
-    with blob.open("rb") as f:
-        return BytesIO(f.read())
+    # with blob.open("rb") as f:
+    #     return BytesIO(f.read())
 
 USING_ISU_COMPONENT_METHOD=False
 

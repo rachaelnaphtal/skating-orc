@@ -18,19 +18,8 @@ os.environ["GCLOUD_PROJECT"] = "skating-orc"
 USE_GCP=True
 
 def add_download_link_gcp(report_name, extension="xlsx"):
-    """Write and read a blob from GCS using file-like IO"""
-    # The ID of your GCS bucket
-    bucket_name = "skating_orc_reports"
     full_file_name = f"{GCP_RESULTS_FILES_PATH}{report_name}.{extension}"
-    # full_file_name= "skating_orc_reports/Generated/Novice_Men_Processed.xlsx"
-    print(full_file_name)
 
-    # storage_client = storage.Client()
-    # bucket = storage_client.bucket(bucket_name)
-    # blob = bucket.blob(full_file_name)
-
-    # Download the blob into memory as bytes
-    # contents = blob.download_as_bytes()
     conn = st.connection('gcs', type=FilesConnection)
     with conn.open(full_file_name, mode="rb", ttl=600) as file:
         bytes= file.read()
@@ -43,7 +32,6 @@ def add_download_link_gcp(report_name, extension="xlsx"):
 
 def make_gui():
     st.title("Judging Analysis Report Generation")
-    add_download_link_gcp("0", extension="pdf")
     report_type = st.selectbox(
         "Which type of report do you want?",
         ("Competition ORC Report", "Full Season Report", "Trial Judge Report"), index=None, 
@@ -71,7 +59,8 @@ def generate_full_competition_report():
     
     
     if USE_GCP:
-        add_download_link_gcp(report_name_value)
+        print(f"Download coming for {report_name_value}")
+        add_download_link_gcp(report_name_value, extension="xlsx")
     else:
         full_report_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}.xlsx"
         with open(full_report_path, "rb") as file:
