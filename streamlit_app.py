@@ -61,14 +61,14 @@ def createCompetitionReportLayout():
     This creates a report to analyze the deviations found in a competition. It is meant to then be used by review captains to decide on which deviations are errors for a given competition.
     There are a couple of options:
 
-    -  **Include only some events**: Do this via an event regex. For example, enter '.*(Novice|Junior|Senior).*(Women|Men|Pairs).*' to just include the Novice and higher Singles/Pairs events at a competiiton.
+    -  **Include only some events**: Do this via an event regex. For example, enter '.\*(Novice|Junior|Senior).\*(Women|Men|Pairs).\*' to just include the Novice and higher Singles/Pairs events at a competiiton.
     -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
                     ''')
     with st.form("options_form", border=False):
         st.text_input("Report Name (aka the name of the output file)", value="" , key='report_name')
         st.text_input("Results URL for competition (for example:https://ijs.usfigureskating.org/leaderboard/results/2025/34240/index.asp).", 
                                             key='url')
-        st.text_input("Event Regex. (Optional)", value="", help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.", key='event_regex')
+        st.text_input("Event Regex. (Optional)", value="", help="For example, '.\*(Novice|Junior|Senior).\*' will only consider results for Novice, Junior and Senior events.", key='event_regex')
         st.checkbox("Include errors only?", help="Whether to only include rule errors.", key='only_include_errors')
         st.form_submit_button("Generate Report", on_click=generate_full_competition_report)
 
