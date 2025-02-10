@@ -55,6 +55,15 @@ def make_gui():
 ## Layouts for different options
 
 def createCompetitionReportLayout():
+    with st.expander("See more details"):
+        st.markdown('''
+                    ### Competition ORC Report
+    This creates a report to analyze the deviations found in a competition. It is meant to then be used by review captains to decide on which deviations are errors for a given competition.
+    There are a couple of options:
+
+    -  **Include only some events**: Do this via an event regex. For example, enter '.*(Novice|Junior|Senior).*(Women|Men|Pairs).*' to just include the Novice and higher Singles/Pairs events at a competiiton.
+    -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
+                    ''')
     with st.form("options_form", border=False):
         st.text_input("Report Name (aka the name of the output file)", value="" , key='report_name')
         st.text_input("Results URL for competition (for example:https://ijs.usfigureskating.org/leaderboard/results/2025/34240/index.asp).", 
@@ -69,11 +78,13 @@ def createFullSeasonReportLayout():
 
 def createTrialJudgeReportLayout():
     with st.expander("See more details"):
-        st.markdown('''### Trial Judging Report
+        st.markdown('''
+                    ### Trial Judging Report
     This report creates reports like the Competition ORC reports but for trial judges. For each event you want compared, you will need to upload two things:
 
     -  The pdf of the results. These should be named with the event abbreviation (for example: "JMFS.pdf").
-    -  The Excel trial judge sheet from the event. These need to be named with the event abbreviation and _analysis (ex: "JMFS_analysis.xlsx"). It is important that all skater/team names be exactly as written online. This may require changing them on the event sheet if they are not.''')
+    -  The Excel trial judge sheet from the event. These need to be named with the event abbreviation and _analysis (ex: "JMFS_analysis.xlsx"). It is important that all skater/team names be exactly as written online. This may require changing them on the event sheet if they are not.
+                    ''')
     with st.form("options_form", border=False):
         report_name = st.text_input("Report Name (aka the name of the output file)", value="" , key='report_name')
         event_files = st.file_uploader("Upload trial judge files", type=['xlsx','pdf'], accept_multiple_files=True, key='trial_files')
