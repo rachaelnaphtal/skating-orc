@@ -13,37 +13,8 @@ import pdfkit
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font, Color
 from google.cloud import storage
-import os
-import gcsfs
-from io import BytesIO
-import streamlit as st
-from st_files_connection import FilesConnection
-
-os.environ["GCLOUD_PROJECT"] = "skating-orc"
-
-def save_gcp_workbook(workbook, file_name):
-    # Save the workbook to bytes
-    virtual_workbook = BytesIO()
-    workbook.save(virtual_workbook)
-
-    # Get the bytes
-    workbook_bytes = virtual_workbook.getvalue()
-    write_file_to_gcp(workbook_bytes, file_name)
-
-def write_file_to_gcp(bytes, file_name):
-    conn = st.connection('gcs', type=FilesConnection)
-    with conn.open(file_name, mode="wb", ttl=600) as file:
-        bytes= file.write(bytes)
-    # """Write and read a blob from GCS using file-like IO"""
-    # # The ID of your GCS bucket
-    # bucket_name = "skating_orc_reports"
-
-    # storage_client = storage.Client()
-    # bucket = storage_client.bucket(bucket_name)
-    # blob = bucket.blob(file_name)
-
-    # with blob.open("wb") as f:
-    #     f.write(bytes)
+from gcp_interactions_helper import write_file_to_gcp
+from gcp_interactions_helper import save_gcp_workbook
 
 def convert_url_to_pdf(url, pdf_path):
     try:
@@ -441,16 +412,16 @@ def print_rule_error_summary_workbook(rule_errors, full_report_name):
 if __name__ == "__main__":
 
     # #Easterns/ Pairs Final 2425
-    pdf_folder = "/Users/rnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/"  # Update with the correct path
-    excel_folder = "/Users/rnaphtal/Documents/JudgingAnalysis_Results/Official/"
+    pdf_folder = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/"  # Update with the correct path
+    excel_folder = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Official/"
     base_url = 'https://ijs.usfigureskating.org/leaderboard/results/2024/34289'
     #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25")
     #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_SP", event_regex=".*(Women|Men|Pairs).*")
     #scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_Dance", event_regex=".*(Dance).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
-    scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25_all")
-    scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
+    scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25_all", excel_folder=excel_folder, pdf_folder=pdf_folder)
+    # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
     
     #scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
     #scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/34290', "2024_Dance_Final", ".*(Novice|Junior|Senior).?(Dance).*")

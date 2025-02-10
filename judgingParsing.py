@@ -15,23 +15,7 @@ from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Fo
 from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
-from io import BytesIO
-import streamlit as st
-from st_files_connection import FilesConnection
-
-def read_file_from_gcp(file_name):
-    conn = st.connection('gcs', type=FilesConnection)
-    with conn.open(file_name, mode="rb", ttl=600) as file:
-        return BytesIO(file.read())
-    # # The ID of your GCS bucket
-    # bucket_name = "skating_orc_reports"
-
-    # storage_client = storage.Client()
-    # bucket = storage_client.bucket(bucket_name)
-    # blob = bucket.blob(file_name)
-
-    # with blob.open("rb") as f:
-    #     return BytesIO(f.read())
+from gcp_interactions_helper import read_file_from_gcp
 
 USING_ISU_COMPONENT_METHOD=False
 
