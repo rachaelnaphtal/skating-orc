@@ -21,6 +21,24 @@ import downloadResults
 from downloadResults import make_competition_summary_page
 from gcp_interactions_helper import read_file_from_gcp
 
+def get_judges_name_from_sheet(tj_sheet_path, use_gcp=False):
+    if use_gcp:
+        workbook = openpyxl.load_workbook(read_file_from_gcp(tj_sheet_path), data_only=True)
+    else:
+        workbook = openpyxl.load_workbook(tj_sheet_path, data_only=True) 
+    judges=[]
+    for sheet in workbook:
+        if not sheet.title == "1":
+            continue
+        found_end = False
+        judge_number = 0
+        while not found_end:
+            judge_name = sheet.cell(row = 4+judge_number, column = 2).value
+            if judge_name == "" or judge_name is None:
+                return judges
+            judges.append(judge_name)
+            judge_number+=1
+
 def processTrialJudgeSheet(pdf_path, num_judges=7, use_gcp=False, judge_names=[]):
     if use_gcp:
         workbook = openpyxl.load_workbook(read_file_from_gcp(pdf_path), data_only=True)
@@ -34,6 +52,7 @@ def processTrialJudgeSheet(pdf_path, num_judges=7, use_gcp=False, judge_names=[]
         skater_name = sheet.cell(row= 2, column=2,).value
         if skater_name is None or skater_name ==0:
             continue
+        skater_name = skater_name.replace("ﬁ", "fi")
         tj_scores[skater_name] = {}
         pcs_scores[skater_name] = {}
         for judge_number in range(num_judges):
@@ -62,7 +81,7 @@ def analyzeTrialJudges(tj_pdf_path, workbook, pdf_path, base_excel_path,judges, 
     element_errors = []
     for skater in tj_scores:
         if skater not in elements_per_skater:
-            raise Exception(f"Missing skater {skater} in {event_name}. Was the name spelled correctly on the uploaded sheet?")
+            raise Exception(f"Skater {skater} in {event_name} was found in xlsx but not pdf. Was the name spelled correctly on the uploaded sheet? Found skaters on pdf: {elements_per_skater.keys()}")
         for element_details in elements_per_skater[skater]:
             allScores = element_details["Scores"]
             avg = sum(allScores)/len(allScores)
@@ -87,15 +106,12 @@ def analyzeTrialJudges(tj_pdf_path, workbook, pdf_path, base_excel_path,judges, 
                         "Deviation": deviation,
                         "Type": "Deviation"
                         })
-                    print("Found deviation")
                 judgeNumber+=1
     pcs_errors = add_pcs_errors(pcs_per_skater, pcs_scores, tj_filter)
     printToExcel(workbook, event_name, judges, [], element_errors, pcs_errors,  pdf_number)
-    #workbook, event_name, judges, element_errors, element_deviations, pcs_errors, pdf_number
     total_errors = judgingParsing.count_total_errors_per_judge(judges, [], element_errors, pcs_errors)
     num_starts = len(elements_per_skater)
     allowed_errors = judgingParsing.get_allowed_errors(num_starts)
-    # print(f"Processed {event_name}")
     return event_name, total_errors, num_starts, allowed_errors
 
 def add_pcs_errors(pcs_per_skater, tj_pcs_scores, tj_filter):
@@ -182,8 +198,8 @@ if __name__ == "__main__":
     events = ["JMSP", "JMFS"]
     
     judgesNames = ["Melanya Berggren", "Katie Beriau", "Scott Brody", "Waverly Huston", "Rhea Sy-Benedict", "William Tran", "Mary-E Wightman"]
-    processPapers(use_gcp=True, events=events, excel_path=excel_path, tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames)
-
+    # processPapers(use_gcp=True, events=events, excel_path=excel_path, tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames)
+    print (get_judges_name_from_sheet(f"{tj_pdf_base_path}JMFS_analysis.xlsx", use_gcp=True))
     # for judge in judgesNames:
         # processPapers(events=events, excel_path=f"{tj_pdf_base_path}ORC_Anomaly_Summary_Analysis_{judge}.xlsx", tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames, tj_filter=[judge])
 

@@ -82,7 +82,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 skater_match = match_skater(possible_skater, has_bonus)
 
             if skater_match:
-                skater_name = skater_match.group(2).strip()
+                skater_name = skater_match.group(2).strip().replace("ﬁ", "fi")
                 technical_score = skater_match.group(5)
                 current_skater = skater_name
                 if current_skater not in elements_per_skater:
@@ -182,9 +182,9 @@ def extract_judge_scores(workbook, pdf_path, base_excel_path,judges, pdf_number,
    
 def match_skater(line, has_bonus):
     if has_bonus:
-        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})$", line)
+        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+[A-Za-z!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})$", line)
     else:
-        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})?\s?([\d]{1,3}\.[\d\.]{2})$", line)
+        return re.match(r"^(\d+)\s+([A-Za-z1-9!\.\(\)\/\-\s'ﬁ]+[A-Za-z!\.\(\)\/\-\s'ﬁ]+),?([A-Za-z1-9\&\(\)\-\.\s]+[A-Za-z\&\(\)\-\.\s]+)?\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})\s?([\d]{1,3}\.[\d\.]{2})?\s?([\d]{1,3}\.[\d\.]{2})$", line)
             
 
 def get_allowed_errors(num_skaters : int):
