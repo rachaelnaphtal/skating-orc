@@ -144,12 +144,13 @@ def validate_competition_report_input():
     url = st.session_state['url']
     validations=[validate_exists(report_name, "Report Name"),validate_url(url)]
     if all(v[0] for v in validations):
-        generate_full_competition_report()
+        return True
     else:
         # Show all validation errors
         for valid, message in validations:
             if not valid:
                 st.error(message)
+        return False
 
 def validate_trial_judges_input():
     report_name = st.session_state['report_name']
