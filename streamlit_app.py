@@ -169,7 +169,7 @@ def validate_trial_judges_input():
 
 ## Functions to generate reports    
 def generate_full_competition_report():
-    if not validate_trial_judges_input():
+    if not validate_competition_report_input():
         return
     print(st.session_state['report_type'])
     url = st.session_state['url'].replace("/index.asp","")
