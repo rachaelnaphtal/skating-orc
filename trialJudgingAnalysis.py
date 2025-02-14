@@ -71,9 +71,7 @@ def process_trial_judge_sheet(pdf_path, num_judges=7, use_gcp=False, judge_names
             if judge_name not in judge_names:
                 err = f"Judge '{judge_name}' found in sheet but is not listed in names {judge_names}"
                 st.error(err)
-                raise Exception(
-                    err
-                )
+                raise Exception(err)
             judge_scores = []
             for i in range(13):
                 score = sheet.cell(row=4 + judge_number, column=2 + i).value
@@ -108,9 +106,7 @@ def analyze_trial_judges(
         if skater not in elements_per_skater:
             err = f"Skater {skater} in {event_name} was found in xlsx but not pdf. Was the name spelled correctly on the uploaded sheet? Found skaters on pdf: {elements_per_skater.keys()}"
             st.error(err)
-            raise Exception(
-                err
-            )
+            raise Exception(err)
         for element_details in elements_per_skater[skater]:
             allScores = element_details["Scores"]
             avg = sum(allScores) / len(allScores)
@@ -128,16 +124,12 @@ def analyze_trial_judges(
                 if len(tj_scores[skater][judge]) - 1 < element_details["Number"]:
                     err = f"Score length error on {skater} and judge {judge} in event {event_name}. Are they missing a GOE?"
                     st.error(err)
-                    raise Exception(
-                        err
-                    )
+                    raise Exception(err)
                 goe = tj_scores[skater][judge][element_details["Number"]]
                 if not isinstance(goe, int):
-                    err = f"GOE of {goe} is not an integer. Skater: {skater}, Judge: {judge}, Event: {event_name}, Element: {element_details["Number"]}"
+                    err = f"GOE of {goe} is not an integer. Skater: {skater}, Judge: {judge}, Event: {event_name}, Element: {element_details['Number']}"
                     st.error(err)
-                    raise Exception(
-                        err
-                    )
+                    raise Exception(err)
                 deviation = goe - avg
                 deviation_totals[judge] += abs(deviation)
                 if abs(deviation) >= 2:
@@ -238,17 +230,15 @@ def add_pcs_errors(pcs_per_skater, tj_pcs_scores, tj_filter, event_name):
                     get_component_number(pcs_mark["Component"])
                 ]
                 if not (isinstance(tj_score, float) or isinstance(tj_score, int)):
-                    try: 
+                    try:
                         if "." in tj_score:
                             tj_score = float(tj_score)
                         else:
                             tj_score = int(tj_score)
                     except:
-                        err = f"PCS score {tj_score} found that isn't a number. Skater: {skater}, Judge:{judge}, Event:{event_name} Component: {pcs_mark["Component"]} Scores:{tj_pcs_scores[skater][judge]}"
+                        err = f"PCS score {tj_score} found that isn't a number. Skater: {skater}, Judge:{judge}, Event:{event_name} Component: {pcs_mark['Component']} Scores:{tj_pcs_scores[skater][judge]}"
                         st.error(err)
-                        raise Exception(
-                            err
-                        )
+                        raise Exception(err)
                 deviation = tj_score - avg
                 all_pcs.append(
                     {
@@ -300,7 +290,6 @@ def categorizeElement(element):
         return "Pivoting Block"
     if element[-1] == "B":
         element = element[:-1]
-    
 
     synchro_dict = {
         "Pa": "Pair Element",
@@ -308,9 +297,9 @@ def categorizeElement(element):
         "ME": "Moves Element",
         "TwE": "Twizzle Element",
         "AL": "Artistic",
-        "AC" : "Artistic",
+        "AC": "Artistic",
         "AW": "Artistic",
-        "AB" : "Artistic",
+        "AB": "Artistic",
         "L": "Linear/Rotating",
         "C": "Linear/Rotating",
         "B": "Linear/Rotating",
@@ -600,7 +589,7 @@ def process_papers(
     judges_names=[],
     tj_filter=[],
     use_gcp=False,
-    include_additional_analysis=False
+    include_additional_analysis=False,
 ):
     workbook = openpyxl.Workbook()
 
@@ -688,10 +677,14 @@ def process_papers(
 
 
 def format_out_of_range_sheets(worksheet):
-    color_scale_rule = ColorScaleRule(start_type='min', start_color='FFFFFF', # White
-                                #  mid_type='percentile', mid_value=50, mid_color='7FFFD4', 
-                                 end_type='max', end_color='FF0000') # Red
-    worksheet.conditional_formatting.add('F2:H200', color_scale_rule)
+    color_scale_rule = ColorScaleRule(
+        start_type="min",
+        start_color="FFFFFF",  # White
+        #  mid_type='percentile', mid_value=50, mid_color='7FFFD4',
+        end_type="max",
+        end_color="FF0000",
+    )  # Red
+    worksheet.conditional_formatting.add("F2:H200", color_scale_rule)
     for cell in worksheet["F"]:
         cell.number_format = "0%"
     for cell in worksheet["G"]:
@@ -713,7 +706,7 @@ if __name__ == "__main__":
     # tj_pdf_base_path = "skating_orc_reports/gs://skating_orc_reports/Generated/Nats/"
 
     workbook = openpyxl.Workbook()
-    events= ["NPFS", "JMFS", "JMSP", "JPSP", "JPFS", "SWSP", "SPSP", "SWFS", "SMSP"]
+    events = ["NPFS", "JMFS", "JMSP", "JPSP", "JPFS", "SWSP", "SPSP", "SWFS", "SMSP"]
     # events = ["JMSP"]
 
     judgesNames = [
@@ -758,12 +751,19 @@ if __name__ == "__main__":
     )
 
     events = ["12FS", "12SP", "ATFS", "ITFS", "JTFS", "JTSP", "JvTFS", "NTFS", "STSP"]
-    judgesNames = ['Sherri Cleveland', 'Felicia Haining-Miller', 'Megan Jackson', 'Stephanie Pusch', 'Elise Requadt', 'April Zak']
+    judgesNames = [
+        "Sherri Cleveland",
+        "Felicia Haining-Miller",
+        "Megan Jackson",
+        "Stephanie Pusch",
+        "Elise Requadt",
+        "April Zak",
+    ]
     process_papers(
         use_gcp=False,
         events=events,
         excel_path=excel_path,
         tj_pdf_base_path=tj_pdf_base_path,
         judges_names=judgesNames,
-        include_additional_analysis=True
+        include_additional_analysis=True,
     )

@@ -24,6 +24,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from gcp_interactions_helper import read_file_from_gcp
+import streamlit as st
 
 USING_ISU_COMPONENT_METHOD = False
 
@@ -108,6 +109,9 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     skater_details[current_skater] = technical_score
                 if int(skater_match.group(1)) != len(elements_per_skater.keys()):
                     print(f"Missing skater in {event_name}. Next is {current_skater}")
+                    st.error(
+                        f"Missing skater in {event_name}. Next is {current_skater}"
+                    )
                 continue
 
             # Match elements and judge scores
@@ -164,21 +168,22 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 print(
                     f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
                 )
+                st.error(
+                    f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
+                )
 
     for skater in elements_per_skater:
-        # print ([element["Element"] for element in elements_per_skater[skater]])
-        # print ([element["Notes"] for element in elements_per_skater[skater]])
         foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
         expected = float(skater_details[skater])
         if foundElements != expected:
             print(
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
             )
-            # print (f"Elements for {skater}: {[f"{x["Element"]} ({x["Value"]})" for x in skater_scores[skater]]}")
-        # else:
-        # print (f"Elements for skater {skater} do match.")
+            st.error(
+                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
+            )
         pcs = pcs_per_skater[skater]
-        if len(pcs) != 3:
+        if len(pcs) < 3:
             print(f"Components missing for skater {skater} {pdf_path}")
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)

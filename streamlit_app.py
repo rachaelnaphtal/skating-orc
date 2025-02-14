@@ -293,7 +293,12 @@ def generate_trial_judge_report():
     st.success(f"Found trial judge names {tj_names}")
     excel_path = f"{base_file_path}{report_name_for_directory}.xlsx"
     process_papers(
-        event_names, excel_path, base_file_path, judges_names=tj_names, use_gcp=USE_GCP, include_additional_analysis=True
+        event_names,
+        excel_path,
+        base_file_path,
+        judges_names=tj_names,
+        use_gcp=USE_GCP,
+        include_additional_analysis=True,
     )
     add_download_link_gcp(
         report_name_for_directory,
