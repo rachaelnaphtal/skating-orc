@@ -14,6 +14,15 @@ from gcp_interactions_helper import read_file_from_gcp
 from io import BytesIO
 import gcp_interactions_helper
 import streamlit as st
+from openpyxl.styles import (
+    PatternFill,
+    Border,
+    Side,
+    Alignment,
+    Protection,
+    Font,
+    Color,
+)
 
 state_options = [
     "In Range",
@@ -333,6 +342,42 @@ def categorizeElement(element):
     return element
 
 
+def make_analysis_cover_sheet(workbook):
+    sheet = workbook.create_sheet("Overview")
+
+    sheet.column_dimensions['A'].width = 25
+    sheet.column_dimensions['B'].width = 150
+    sheet.row_dimensions[3].height = 40
+    sheet.row_dimensions[15].height = 40
+
+    bold = Font(bold=True)
+
+    sheet.cell(1, 1, value="Overview").font = Font(bold=True, size=18)
+    sheet.merge_cells('A3:B4')
+    sheet.cell(3, 1, value="This workbook contains additional analysis of the trial judging data, specifically related to deviations. \n The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.")
+    sheet.cell(3,1).alignment = Alignment(wrap_text=True)
+    # sheet.cell(5, 1, value="The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.")
+    
+    sheet.cell(7, 1, value="Definitions:").font = bold
+    sheet.cell(8, 1, value="Within 1/ Within .5:").font = bold
+    sheet.cell(9, 1, value="Out of Range:").font = bold
+    sheet.cell(10, 1, value="Thrown out:").font = bold
+    sheet.cell(11, 1, value="Low vs High:").font = bold
+
+    sheet.cell(8, 2, value="The number of GOE/PCS that are outside the range of the panel +/-1 on each side. For example, if the minimum score on the panel is 1 then any scores under 0 count as two low on that sheet. For PCS it is for within +/- .5 of the panel.")
+    sheet.cell(9, 2, value="The number of scores that are outside the range of the official judging panel.")
+    sheet.cell(10, 2, value="The number of scores that would be the extremes of the panel or are outside the range of the panel. For example, if the high score on the panel is +2 then all trial judge scores that are +2 or higher would be counted. Note: if the full panel scores the same thing and the trial judge does as well then it will not count as thrown out.")
+    sheet.cell(11, 2, value="Low refers to the trial judge being lower than the panel. The total is the sum of low and high.")
+    sheet.cell(8,2).alignment = Alignment(wrap_text=True)
+    sheet.cell(9,2).alignment = Alignment(wrap_text=True)
+    sheet.cell(10,2).alignment = Alignment(wrap_text=True)
+    sheet.cell(11,2).alignment = Alignment(wrap_text=True)
+
+    sheet.merge_cells('A15:B15')
+    sheet.cell(14, 1, value="Average GOE Deviations").font = bold
+    sheet.cell(15, 1, value="This calculates the average amount that the trial judge GOE deviates from the mean score. It is calculated by summing the absolute values of the trial judge GOE vs mean score from the judging panel for that element and dividing by the number of elements.")
+    sheet.cell(15,1).alignment = Alignment(wrap_text=True)
+
 def make_extra_analysis_sheet(
     excel_path, all_element_df, all_pcs_df, average_deviations, use_gcp=False
 ):
@@ -343,6 +388,7 @@ def make_extra_analysis_sheet(
         excel_buffer = extra_info_path
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         # Add cover sheet
+        make_analysis_cover_sheet(writer.book)
 
         # Analyze elements
         all_el_df = (
@@ -574,7 +620,8 @@ def make_extra_analysis_sheet(
         average_deviation_df.to_excel(writer, sheet_name="Average GOE deviations")
 
         for sheet in writer.sheets:
-            judgingParsing.autofit_worksheet(writer.sheets[sheet])
+            if sheet !="Overview":
+                judgingParsing.autofit_worksheet(writer.sheets[sheet])
 
     if use_gcp:
         gcp_interactions_helper.write_file_to_gcp(

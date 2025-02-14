@@ -109,9 +109,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     skater_details[current_skater] = technical_score
                 if int(skater_match.group(1)) != len(elements_per_skater.keys()):
                     print(f"Missing skater in {event_name}. Next is {current_skater}")
-                    st.error(
-                        f"Missing skater in {event_name}. Next is {current_skater}"
-                    )
+                    st.error(f"Missing skater in {event_name}. Next is {current_skater}")
                 continue
 
             # Match elements and judge scores
@@ -168,9 +166,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 print(
                     f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
                 )
-                st.error(
-                    f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
-                )
+                st.error(f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}")
 
     for skater in elements_per_skater:
         foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
@@ -179,12 +175,11 @@ def process_scores(pdf, event_regex="", use_gcp=False):
             print(
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
             )
-            st.error(
-                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
-            )
+            st.error(f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}")
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
             print(f"Components missing for skater {skater} {pdf_path}")
+            st.error(f"Components missing for skater {skater} {pdf_path}")
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
@@ -236,8 +231,6 @@ def extract_judge_scores(
         pcs_errors,
         pdf_number,
     )
-    # print(f"Num Skaters: {len(skater_details)}")
-    # print (list(elements_per_skater.keys()))
     return (
         event_name,
         total_errors,
@@ -336,8 +329,6 @@ def findSinglesElementErrors(skater_scores, judges, event_name):
                         )
                     )
 
-    # if (len(errors) > 0):
-    # print(event_name, errors)
     return errors
 
 
