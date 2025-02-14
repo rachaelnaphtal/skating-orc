@@ -13,6 +13,7 @@ from downloadResults import make_competition_summary_page
 from gcp_interactions_helper import read_file_from_gcp
 from io import BytesIO
 import gcp_interactions_helper
+import streamlit as st
 
 state_options = [
     "In Range",
@@ -68,14 +69,14 @@ def process_trial_judge_sheet(pdf_path, num_judges=7, use_gcp=False, judge_names
         for judge_number in range(num_judges):
             judge_name = sheet.cell(row=4 + judge_number, column=2).value
             if judge_name not in judge_names:
+                err = f"Judge '{judge_name}' found in sheet but is not listed in names {judge_names}"
+                st.error(err)
                 raise Exception(
-                    f"Judge '{judge_name}' found in sheet but is not listed in names {judge_names}"
+                    err
                 )
             judge_scores = []
             for i in range(13):
                 score = sheet.cell(row=4 + judge_number, column=2 + i).value
-                if score == "#REF":
-                    raise Exception("Unexpected score")
                 if score is None:
                     break
                 judge_scores.append(score)
@@ -105,8 +106,10 @@ def analyze_trial_judges(
     all_elements = []
     for skater in tj_scores:
         if skater not in elements_per_skater:
+            err = f"Skater {skater} in {event_name} was found in xlsx but not pdf. Was the name spelled correctly on the uploaded sheet? Found skaters on pdf: {elements_per_skater.keys()}"
+            st.error(err)
             raise Exception(
-                f"Skater {skater} in {event_name} was found in xlsx but not pdf. Was the name spelled correctly on the uploaded sheet? Found skaters on pdf: {elements_per_skater.keys()}"
+                err
             )
         for element_details in elements_per_skater[skater]:
             allScores = element_details["Scores"]
@@ -123,10 +126,18 @@ def analyze_trial_judges(
                     judge_number += 1
                     continue
                 if len(tj_scores[skater][judge]) - 1 < element_details["Number"]:
-                    raise Exception(f"Score length error on {skater} and judge {judge} in event {event_name}. Are they missing a GOE?")
+                    err = f"Score length error on {skater} and judge {judge} in event {event_name}. Are they missing a GOE?"
+                    st.error(err)
+                    raise Exception(
+                        err
+                    )
                 goe = tj_scores[skater][judge][element_details["Number"]]
                 if not isinstance(goe, int):
-                    raise Exception(f"GOE of {goe} is not an integer. Skater: {skater}, Judge: {judge}, Event: {event_name}, Element: {element_details["Number"]}")
+                    err = f"GOE of {goe} is not an integer. Skater: {skater}, Judge: {judge}, Event: {event_name}, Element: {element_details["Number"]}"
+                    st.error(err)
+                    raise Exception(
+                        err
+                    )
                 deviation = goe - avg
                 deviation_totals[judge] += abs(deviation)
                 if abs(deviation) >= 2:
@@ -233,7 +244,11 @@ def add_pcs_errors(pcs_per_skater, tj_pcs_scores, tj_filter, event_name):
                         else:
                             tj_score = int(tj_score)
                     except:
-                        raise Exception(f"PCS score {tj_score} found that isn't a number. Skater: {skater}, Judge:{judge}, Event:{event_name} Component: {pcs_mark["Component"]} Scores:{tj_pcs_scores[skater][judge]}")
+                        err = f"PCS score {tj_score} found that isn't a number. Skater: {skater}, Judge:{judge}, Event:{event_name} Component: {pcs_mark["Component"]} Scores:{tj_pcs_scores[skater][judge]}"
+                        st.error(err)
+                        raise Exception(
+                            err
+                        )
                 deviation = tj_score - avg
                 all_pcs.append(
                     {
