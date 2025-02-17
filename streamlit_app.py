@@ -299,6 +299,7 @@ def generate_trial_judge_report():
         judges_names=tj_names,
         use_gcp=USE_GCP,
         include_additional_analysis=True,
+        sheet_per_trial_judge=st.session_state["report_per_tj"]
     )
     add_download_link_gcp(
         report_name_for_directory,
@@ -316,14 +317,6 @@ def generate_trial_judge_report():
         for judge in tj_names:
             tj_report_name = f"{report_name_for_directory}_{judge.replace(' ', '_')}"
             excel_path = f"{base_file_path}{tj_report_name}.xlsx"
-            process_papers(
-                event_names,
-                excel_path,
-                base_file_path,
-                judges_names=tj_names,
-                use_gcp=USE_GCP,
-                tj_filter=[judge],
-            )
             add_download_link_gcp(
                 tj_report_name,
                 "Trial Judge Report",

@@ -97,7 +97,7 @@ def process_trial_judge_sheet(pdf_path, num_judges=7, use_gcp=False, judge_names
 
 
 def analyze_trial_judges(
-    tj_xlsx_path, workbook, pdf_path, judges, pdf_number, tj_filter, use_gcp=False
+    tj_xlsx_path, workbook, pdf_path, judges, pdf_number, tj_filter, use_gcp=False, per_trial_judge_workbook_dict={}
 ):
     if len(tj_filter) == 0:
         tj_filter = judges
@@ -179,6 +179,23 @@ def analyze_trial_judges(
     printToExcel(
         workbook, event_name, judges, [], element_errors, pcs_errors, pdf_number
     )
+    
+    #Add sheets to each trial judge sheet if requested
+    for trial_judge in per_trial_judge_workbook_dict:
+        filtered_element_errors = []
+        for error in element_errors:
+            if error["Judge Name"] == trial_judge:
+                filtered_element_errors.append(error)
+        
+        filtered_pcs_errors = []
+        for error in pcs_errors:
+            if error["Judge Name"] == trial_judge:
+                filtered_pcs_errors.append(error)
+
+        printToExcel(
+        per_trial_judge_workbook_dict[trial_judge], event_name, judges, [], filtered_element_errors, filtered_pcs_errors, pdf_number
+        )
+
     total_errors = judgingParsing.count_total_errors_per_judge(
         judges, [], element_errors, pcs_errors
     )
@@ -356,7 +373,6 @@ def make_analysis_cover_sheet(workbook):
     sheet.merge_cells('A3:B4')
     sheet.cell(3, 1, value="This workbook contains additional analysis of the trial judging data, specifically related to deviations. \n The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.")
     sheet.cell(3,1).alignment = Alignment(wrap_text=True)
-    # sheet.cell(5, 1, value="The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.")
     
     sheet.cell(7, 1, value="Definitions:").font = bold
     sheet.cell(8, 1, value="Within 1/ Within .5:").font = bold
@@ -637,8 +653,13 @@ def process_papers(
     tj_filter=[],
     use_gcp=False,
     include_additional_analysis=False,
+    sheet_per_trial_judge=False
 ):
     workbook = openpyxl.Workbook()
+    workbook_per_tj_dict={}
+    if sheet_per_trial_judge:
+        for trial_judge in judges_names:
+            workbook_per_tj_dict[trial_judge] = openpyxl.Workbook()
 
     print(f"processing for {events} and judges {judges_names}")
     judge_errors = {}
@@ -667,6 +688,7 @@ def process_papers(
             2,
             tj_filter,
             use_gcp=use_gcp,
+            per_trial_judge_workbook_dict=workbook_per_tj_dict
         )
 
         # Summary statistics
@@ -705,13 +727,24 @@ def process_papers(
     # Sort sheets
     del workbook["Sheet"]
     workbook._sheets.sort(key=lambda ws: ws.title)
+    for trial_judge in workbook_per_tj_dict:
+        tj_workbook = workbook_per_tj_dict[trial_judge]
+        workbook_per_tj_dict[trial_judge]._sheets.sort(key=lambda ws: ws.title)
+        filtered_judge_errors ={trial_judge: judge_errors[trial_judge]}
+        make_competition_summary_page(tj_workbook, "Trial Judge", event_details, filtered_judge_errors)
 
-    make_competition_summary_page(workbook, "TrialJudge", event_details, judge_errors)
+    make_competition_summary_page(workbook, "Trial Judge", event_details, judge_errors)
 
     if use_gcp:
-        downloadResults.save_gcp_workbook(workbook, excel_path)
+        gcp_interactions_helper.save_gcp_workbook(workbook, excel_path)
+        for trial_judge in workbook_per_tj_dict:
+            path_to_use = excel_path.replace(".xlsx", f"_{trial_judge.replace(" ", "_")}.xlsx")
+            gcp_interactions_helper.save_gcp_workbook(workbook_per_tj_dict[trial_judge], path_to_use)
     else:
         workbook.save(excel_path)
+        for trial_judge in workbook_per_tj_dict:
+            path_to_use = excel_path.replace(".xlsx", f"_{trial_judge.replace(" ", "_")}.xlsx")
+            workbook_per_tj_dict[trial_judge].save(path_to_use)
 
     if include_additional_analysis:
         make_extra_analysis_sheet(
@@ -813,4 +846,5 @@ if __name__ == "__main__":
         tj_pdf_base_path=tj_pdf_base_path,
         judges_names=judgesNames,
         include_additional_analysis=True,
+        sheet_per_trial_judge=True
     )
