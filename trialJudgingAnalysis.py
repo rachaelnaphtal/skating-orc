@@ -3,17 +3,18 @@ from pypdf import PdfReader
 import pandas as pd
 import re
 import openpyxl
-from openpyxl.formatting.rule import ColorScaleRule
+
 
 import judgingParsing
 from judgingParsing import parse_scores
 from judgingParsing import printToExcel
-import downloadResults
 from downloadResults import make_competition_summary_page
 from gcp_interactions_helper import read_file_from_gcp
 from io import BytesIO
 import gcp_interactions_helper
 import streamlit as st
+from sharedJudgingAnalysis import categorizeElement
+from sharedJudgingAnalysis import format_out_of_range_sheets
 from openpyxl.styles import (
     PatternFill,
     Border,
@@ -97,7 +98,14 @@ def process_trial_judge_sheet(pdf_path, num_judges=7, use_gcp=False, judge_names
 
 
 def analyze_trial_judges(
-    tj_xlsx_path, workbook, pdf_path, judges, pdf_number, tj_filter, use_gcp=False, per_trial_judge_workbook_dict={}
+    tj_xlsx_path,
+    workbook,
+    pdf_path,
+    judges,
+    pdf_number,
+    tj_filter,
+    use_gcp=False,
+    per_trial_judge_workbook_dict={},
 ):
     if len(tj_filter) == 0:
         tj_filter = judges
@@ -179,21 +187,27 @@ def analyze_trial_judges(
     printToExcel(
         workbook, event_name, judges, [], element_errors, pcs_errors, pdf_number
     )
-    
-    #Add sheets to each trial judge sheet if requested
+
+    # Add sheets to each trial judge sheet if requested
     for trial_judge in per_trial_judge_workbook_dict:
         filtered_element_errors = []
         for error in element_errors:
             if error["Judge Name"] == trial_judge:
                 filtered_element_errors.append(error)
-        
+
         filtered_pcs_errors = []
         for error in pcs_errors:
             if error["Judge Name"] == trial_judge:
                 filtered_pcs_errors.append(error)
 
         printToExcel(
-        per_trial_judge_workbook_dict[trial_judge], event_name, judges, [], filtered_element_errors, filtered_pcs_errors, pdf_number
+            per_trial_judge_workbook_dict[trial_judge],
+            event_name,
+            judges,
+            [],
+            filtered_element_errors,
+            filtered_pcs_errors,
+            pdf_number,
         )
 
     total_errors = judgingParsing.count_total_errors_per_judge(
@@ -305,94 +319,65 @@ def get_component_number(name):
         return 1
 
 
-# Return type of element
-def categorizeElement(element):
-    element = element.replace("<", "")
-    if element[-1] == "V":
-        element = element[:-1]
-    if element[-1].isdigit():
-        element = element[:-1]
-    if element == "PB":
-        return "Pivoting Block"
-    if element[-1] == "B":
-        element = element[:-1]
-
-    synchro_dict = {
-        "Pa": "Pair Element",
-        "TrE": "Travelling Element",
-        "ME": "Moves Element",
-        "TwE": "Twizzle Element",
-        "AL": "Artistic",
-        "AC": "Artistic",
-        "AW": "Artistic",
-        "AB": "Artistic",
-        "L": "Linear/Rotating",
-        "C": "Linear/Rotating",
-        "B": "Linear/Rotating",
-        "W": "Linear/Rotating",
-        "Cr": "Creative",
-        "GL": "Group Lift",
-    }
-
-    if element in ["FiDs", "FoDS", "BiDs", "BoDs"]:
-        return "Death Spiral"
-    elif element.endswith("Tw"):
-        return "Twist"
-    elif element in ["PSp", "PCoSp"]:
-        return "Pairs Spin"
-    elif element in ["StSq" or "ChSq"]:
-        return element
-    elif element.endswith("Li"):
-        return "Lift"
-    elif element.endswith("Sp"):
-        return "Spin"
-    elif element.endswith("Th"):
-        return "Lift"
-    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F"]:
-        return "Jump"
-    elif element.endswith("+pi") or element == "I":
-        return "Intersection"
-    elif element.startswith("NHE"):
-        return "No Hold Element"
-    elif element in synchro_dict:
-        return synchro_dict[element]
-    return element
-
-
 def make_analysis_cover_sheet(workbook):
     sheet = workbook.create_sheet("Overview")
 
-    sheet.column_dimensions['A'].width = 25
-    sheet.column_dimensions['B'].width = 150
+    sheet.column_dimensions["A"].width = 25
+    sheet.column_dimensions["B"].width = 150
     sheet.row_dimensions[3].height = 40
     sheet.row_dimensions[15].height = 40
 
     bold = Font(bold=True)
 
     sheet.cell(1, 1, value="Overview").font = Font(bold=True, size=18)
-    sheet.merge_cells('A3:B4')
-    sheet.cell(3, 1, value="This workbook contains additional analysis of the trial judging data, specifically related to deviations. \n The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.")
-    sheet.cell(3,1).alignment = Alignment(wrap_text=True)
-    
+    sheet.merge_cells("A3:B4")
+    sheet.cell(
+        3,
+        1,
+        value="This workbook contains additional analysis of the trial judging data, specifically related to deviations. \n The first six sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. In general, higher numbers are worse. The first six columns show the absolute numbers and the final three show the percentages of the total.",
+    )
+    sheet.cell(3, 1).alignment = Alignment(wrap_text=True)
+
     sheet.cell(7, 1, value="Definitions:").font = bold
     sheet.cell(8, 1, value="Within 1/ Within .5:").font = bold
     sheet.cell(9, 1, value="Out of Range:").font = bold
     sheet.cell(10, 1, value="Thrown out:").font = bold
     sheet.cell(11, 1, value="Low vs High:").font = bold
 
-    sheet.cell(8, 2, value="The number of GOE/PCS that are outside the range of the panel +/-1 on each side. For example, if the minimum score on the panel is 1 then any scores under 0 count as two low on that sheet. For PCS it is for within +/- .5 of the panel.")
-    sheet.cell(9, 2, value="The number of scores that are outside the range of the official judging panel.")
-    sheet.cell(10, 2, value="The number of scores that would be the extremes of the panel or are outside the range of the panel. For example, if the high score on the panel is +2 then all trial judge scores that are +2 or higher would be counted. Note: if the full panel scores the same thing and the trial judge does as well then it will not count as thrown out.")
-    sheet.cell(11, 2, value="Low refers to the trial judge being lower than the panel. The total is the sum of low and high.")
-    sheet.cell(8,2).alignment = Alignment(wrap_text=True)
-    sheet.cell(9,2).alignment = Alignment(wrap_text=True)
-    sheet.cell(10,2).alignment = Alignment(wrap_text=True)
-    sheet.cell(11,2).alignment = Alignment(wrap_text=True)
+    sheet.cell(
+        8,
+        2,
+        value="The number of GOE/PCS that are outside the range of the panel +/-1 on each side. For example, if the minimum score on the panel is 1 then any scores under 0 count as two low on that sheet. For PCS it is for within +/- .5 of the panel.",
+    )
+    sheet.cell(
+        9,
+        2,
+        value="The number of scores that are outside the range of the official judging panel.",
+    )
+    sheet.cell(
+        10,
+        2,
+        value="The number of scores that would be the extremes of the panel or are outside the range of the panel. For example, if the high score on the panel is +2 then all trial judge scores that are +2 or higher would be counted. Note: if the full panel scores the same thing and the trial judge does as well then it will not count as thrown out.",
+    )
+    sheet.cell(
+        11,
+        2,
+        value="Low refers to the trial judge being lower than the panel. The total is the sum of low and high.",
+    )
+    sheet.cell(8, 2).alignment = Alignment(wrap_text=True)
+    sheet.cell(9, 2).alignment = Alignment(wrap_text=True)
+    sheet.cell(10, 2).alignment = Alignment(wrap_text=True)
+    sheet.cell(11, 2).alignment = Alignment(wrap_text=True)
 
-    sheet.merge_cells('A15:B15')
+    sheet.merge_cells("A15:B15")
     sheet.cell(14, 1, value="Average GOE Deviations").font = bold
-    sheet.cell(15, 1, value="This calculates the average amount that the trial judge GOE deviates from the mean score. It is calculated by summing the absolute values of the trial judge GOE vs mean score from the judging panel for that element and dividing by the number of elements.")
-    sheet.cell(15,1).alignment = Alignment(wrap_text=True)
+    sheet.cell(
+        15,
+        1,
+        value="This calculates the average amount that the trial judge GOE deviates from the mean score. It is calculated by summing the absolute values of the trial judge GOE vs mean score from the judging panel for that element and dividing by the number of elements.",
+    )
+    sheet.cell(15, 1).alignment = Alignment(wrap_text=True)
+
 
 def make_extra_analysis_sheet(
     excel_path, all_element_df, all_pcs_df, average_deviations, use_gcp=False
@@ -636,7 +621,7 @@ def make_extra_analysis_sheet(
         average_deviation_df.to_excel(writer, sheet_name="Average GOE deviations")
 
         for sheet in writer.sheets:
-            if sheet !="Overview":
+            if sheet != "Overview":
                 judgingParsing.autofit_worksheet(writer.sheets[sheet])
 
     if use_gcp:
@@ -653,10 +638,10 @@ def process_papers(
     tj_filter=[],
     use_gcp=False,
     include_additional_analysis=False,
-    sheet_per_trial_judge=False
+    sheet_per_trial_judge=False,
 ):
     workbook = openpyxl.Workbook()
-    workbook_per_tj_dict={}
+    workbook_per_tj_dict = {}
     if sheet_per_trial_judge:
         for trial_judge in judges_names:
             workbook_per_tj_dict[trial_judge] = openpyxl.Workbook()
@@ -688,7 +673,7 @@ def process_papers(
             2,
             tj_filter,
             use_gcp=use_gcp,
-            per_trial_judge_workbook_dict=workbook_per_tj_dict
+            per_trial_judge_workbook_dict=workbook_per_tj_dict,
         )
 
         # Summary statistics
@@ -730,20 +715,28 @@ def process_papers(
     for trial_judge in workbook_per_tj_dict:
         tj_workbook = workbook_per_tj_dict[trial_judge]
         workbook_per_tj_dict[trial_judge]._sheets.sort(key=lambda ws: ws.title)
-        filtered_judge_errors ={trial_judge: judge_errors[trial_judge]}
-        make_competition_summary_page(tj_workbook, "Trial Judge", event_details, filtered_judge_errors)
+        filtered_judge_errors = {trial_judge: judge_errors[trial_judge]}
+        make_competition_summary_page(
+            tj_workbook, "Trial Judge", event_details, filtered_judge_errors
+        )
 
     make_competition_summary_page(workbook, "Trial Judge", event_details, judge_errors)
 
     if use_gcp:
         gcp_interactions_helper.save_gcp_workbook(workbook, excel_path)
         for trial_judge in workbook_per_tj_dict:
-            path_to_use = excel_path.replace(".xlsx", f"_{trial_judge.replace(" ", "_")}.xlsx")
-            gcp_interactions_helper.save_gcp_workbook(workbook_per_tj_dict[trial_judge], path_to_use)
+            path_to_use = excel_path.replace(
+                ".xlsx", f"_{trial_judge.replace(' ', '_')}.xlsx"
+            )
+            gcp_interactions_helper.save_gcp_workbook(
+                workbook_per_tj_dict[trial_judge], path_to_use
+            )
     else:
         workbook.save(excel_path)
         for trial_judge in workbook_per_tj_dict:
-            path_to_use = excel_path.replace(".xlsx", f"_{trial_judge.replace(" ", "_")}.xlsx")
+            path_to_use = excel_path.replace(
+                ".xlsx", f"_{trial_judge.replace(' ', '_')}.xlsx"
+            )
             workbook_per_tj_dict[trial_judge].save(path_to_use)
 
     if include_additional_analysis:
@@ -754,23 +747,6 @@ def process_papers(
             agg_average_deviations,
             use_gcp=use_gcp,
         )
-
-
-def format_out_of_range_sheets(worksheet):
-    color_scale_rule = ColorScaleRule(
-        start_type="min",
-        start_color="FFFFFF",  # White
-        #  mid_type='percentile', mid_value=50, mid_color='7FFFD4',
-        end_type="max",
-        end_color="FF0000",
-    )  # Red
-    worksheet.conditional_formatting.add("F2:H200", color_scale_rule)
-    for cell in worksheet["F"]:
-        cell.number_format = "0%"
-    for cell in worksheet["G"]:
-        cell.number_format = "0%"
-    for cell in worksheet["H"]:
-        cell.number_format = "0%"
 
 
 if __name__ == "__main__":
@@ -846,5 +822,5 @@ if __name__ == "__main__":
         tj_pdf_base_path=tj_pdf_base_path,
         judges_names=judgesNames,
         include_additional_analysis=True,
-        sheet_per_trial_judge=True
+        sheet_per_trial_judge=True,
     )

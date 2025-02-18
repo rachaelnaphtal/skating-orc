@@ -5,7 +5,7 @@ import pandas as pd
 import re
 
 
-import asyncio
+from sharedJudgingAnalysis import categorizeElement
 from pyppeteer import launch
 import time
 
@@ -109,7 +109,9 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     skater_details[current_skater] = technical_score
                 if int(skater_match.group(1)) != len(elements_per_skater.keys()):
                     print(f"Missing skater in {event_name}. Next is {current_skater}")
-                    st.error(f"Missing skater in {event_name}. Next is {current_skater}")
+                    st.error(
+                        f"Missing skater in {event_name}. Next is {current_skater}"
+                    )
                 continue
 
             # Match elements and judge scores
@@ -166,7 +168,9 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 print(
                     f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
                 )
-                st.error(f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}")
+                st.error(
+                    f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
+                )
 
     for skater in elements_per_skater:
         foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
@@ -175,13 +179,91 @@ def process_scores(pdf, event_regex="", use_gcp=False):
             print(
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
             )
-            st.error(f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}")
+            st.error(
+                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
+            )
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
             print(f"Components missing for skater {skater} {pdf_path}")
             st.error(f"Components missing for skater {skater} {pdf_path}")
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
+
+
+def create_all_element_dict(judges, elements_per_skater, event_name):
+    all_elements = []
+    for skater in elements_per_skater:
+        for element in elements_per_skater[skater]:
+            all_scores = element["Scores"]
+            avg = sum(all_scores) / len(all_scores)
+            judgeNumber = 1
+            for judge in judges:
+                judge_score = all_scores[judgeNumber - 1]
+                deviation = judge_score - avg
+                thrown_out = is_score_thrown_out(judge_score, all_scores)
+                high = judge_score > avg
+                element_name_no_level = element["Element"]
+                if element_name_no_level[-1].isdigit():
+                    element_name_no_level = element_name_no_level[:-1]
+
+                all_elements.append(
+                    {
+                        "Skater": skater,
+                        "Event": event_name,
+                        "Element": element["Element"],
+                        "Element Type": categorizeElement(element_name_no_level),
+                        "Panel Average": avg,
+                        "Judge Name": judge,
+                        "Judge Number": judgeNumber,
+                        "Score": judge_score,
+                        "Deviation": deviation,
+                        "Thrown out": thrown_out,
+                        "High": high,
+                    }
+                )
+                judgeNumber += 1
+    return all_elements
+
+
+def create_all_pcs_dict(judges, pcs_per_skater, event_name):
+    all_pcs = []
+    for skater in pcs_per_skater:
+        for pcs_mark in pcs_per_skater[skater]:
+            all_scores = pcs_mark["Scores"]
+            avg = sum(all_scores) / len(all_scores)
+            judgeNumber = 1
+            for judge in judges:
+                judge_score = all_scores[judgeNumber - 1]
+                deviation = judge_score - avg
+                thrown_out = is_score_thrown_out(judge_score, all_scores)
+                high = judge_score > avg
+                all_pcs.append(
+                    {
+                        "Skater": skater,
+                        "Event": event_name,
+                        "Component": pcs_mark["Component"],
+                        "Panel Average": avg,
+                        "Judge Name": judge,
+                        "Judge Number": judgeNumber,
+                        "Score": judge_score,
+                        "Deviation": deviation,
+                        "Thrown out": thrown_out,
+                        "High": high,
+                    }
+                )
+                judgeNumber += 1
+    return all_pcs
+
+
+def is_score_thrown_out(score, all_scores):
+    max_panel = max(all_scores)
+    min_panel = min(all_scores)
+
+    # It should not count if at least 3 judges agree.
+    count_same = sum([1 for s in all_scores if s == score])
+    if count_same >= 3:
+        return False
+    return score == min_panel or score == max_panel
 
 
 def extract_judge_scores(
@@ -193,12 +275,13 @@ def extract_judge_scores(
     event_regex="",
     only_rule_errors=False,
     use_gcp=False,
+    create_thrown_out_analysis=False,
 ):
     (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
         pdf_path, event_regex, use_gcp=use_gcp
     )
     if not re.match(event_regex, event_name):
-        return (event_name, None, None, None, [])
+        return (event_name, None, None, None, [], [], [])
 
     element_errors = []
     element_deviations = []
@@ -231,12 +314,22 @@ def extract_judge_scores(
         pcs_errors,
         pdf_number,
     )
+
+    all_element_dict = {}
+    all_pcs_dict = {}
+    if create_thrown_out_analysis:
+        all_element_dict = create_all_element_dict(
+            judges, elements_per_skater, event_name
+        )
+        all_pcs_dict = create_all_pcs_dict(judges, pcs_per_skater, event_name)
     return (
         event_name,
         total_errors,
         len(skater_details),
         get_allowed_errors(len(skater_details)),
         element_errors,
+        all_element_dict,
+        all_pcs_dict,
     )
 
 

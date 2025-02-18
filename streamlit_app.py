@@ -1,19 +1,14 @@
 import streamlit as st
-import asyncio
 from io import BytesIO
 
 import downloadResults
-import openpyxl
 from openpyxl import load_workbook
 from st_files_connection import FilesConnection
 from google.cloud import storage
 import os
-import gcsfs
-from io import BytesIO
 import re
 import trialJudgingAnalysis
 from trialJudgingAnalysis import process_papers
-import gcp_interactions_helper
 from gcp_interactions_helper import write_file_to_gcp
 
 # GCP_RESULTS_FILES_PATH="gs://skating_orc_reports/Generated/"
@@ -91,6 +86,11 @@ def createCompetitionReportLayout():
             "Include errors only?",
             help="Whether to only include rule errors.",
             key="only_include_errors",
+        )
+        st.checkbox(
+            "Add extra analysis sheet?",
+            help="Whether to also generate an analysis sheet for percentage of scores in range.",
+            key="generate_analysis_sheet",
         )
         st.form_submit_button(
             "Generate Report", on_click=generate_full_competition_report
@@ -230,6 +230,7 @@ def generate_full_competition_report():
     event_regex = st.session_state["event_regex"]
     only_include_errors = st.session_state["only_include_errors"]
     folder_name = LOCAL_RESULTS_FILES_PATH
+    generate_analysis_sheet = st.session_state["generate_analysis_sheet"]
     if USE_GCP:
         folder_name = GCP_RESULTS_FILES_PATH
     if event_regex != "":
@@ -241,6 +242,7 @@ def generate_full_competition_report():
             pdf_folder=f"{folder_name}PDFs/",
             use_gcp=USE_GCP,
             only_rule_errors=only_include_errors,
+            add_additional_analysis=generate_analysis_sheet,
         )
     else:
         downloadResults.scrape(
@@ -250,6 +252,7 @@ def generate_full_competition_report():
             pdf_folder=f"{folder_name}PDFs/",
             use_gcp=USE_GCP,
             only_rule_errors=only_include_errors,
+            add_additional_analysis=generate_analysis_sheet,
         )
 
     if USE_GCP:
@@ -257,6 +260,13 @@ def generate_full_competition_report():
         add_download_link_gcp(
             report_name_value, "Competition ORC Report", extension="xlsx"
         )
+        if generate_analysis_sheet:
+            add_download_link_gcp(
+                f"{report_name_value}_Additional_Analysis",
+                "Competition ORC Report",
+                extension="xlsx",
+            )
+
     else:
         full_report_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}.xlsx"
         with open(full_report_path, "rb") as file:
@@ -266,6 +276,15 @@ def generate_full_competition_report():
                 file_name=f"{report_name_value}.xlsx",
                 mime="application/vnd.ms-excel",
             )
+        if generate_analysis_sheet:
+            analysis_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}_Additional_Analysis.xlsx"
+            with open(analysis_path, "rb") as file:
+                st.download_button(
+                    label=f"Download Competition Summary Report- {report_name_value} Additional Analysis",
+                    data=file,
+                    file_name=f"{report_name_value}_Additional_Analysis.xlsx",
+                    mime="application/vnd.ms-excel",
+                )
 
 
 def generate_trial_judge_report():
@@ -299,7 +318,7 @@ def generate_trial_judge_report():
         judges_names=tj_names,
         use_gcp=USE_GCP,
         include_additional_analysis=True,
-        sheet_per_trial_judge=st.session_state["report_per_tj"]
+        sheet_per_trial_judge=st.session_state["report_per_tj"],
     )
     add_download_link_gcp(
         report_name_for_directory,

@@ -1,7 +1,10 @@
 import asyncio
+from io import BytesIO
 from pyppeteer import launch
+import gcp_interactions_helper
 import judgingParsing
 from judgingParsing import autofit_worksheet
+from sharedJudgingAnalysis import format_out_of_range_sheets
 import requests
 from bs4 import BeautifulSoup
 from openpyxl.utils import get_column_letter
@@ -64,6 +67,7 @@ def processEvent(
     excel_path,
     only_rule_errors=False,
     use_gcp=False,
+    create_thrown_out_analysis=False,
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
@@ -77,6 +81,7 @@ def processEvent(
         event_regex,
         only_rule_errors,
         use_gcp=use_gcp,
+        create_thrown_out_analysis=create_thrown_out_analysis,
     )
 
 
@@ -332,10 +337,13 @@ def scrape(
     event_regex="",
     only_rule_errors=False,
     use_gcp=False,
+    add_additional_analysis=False,
 ):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = openpyxl.Workbook()
+    agg_all_element_df = None
+    agg_all_pcs_df = None
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
@@ -346,19 +354,26 @@ def scrape(
             (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(
                 base_url, links[i]["href"]
             )
-            (event_name, total_errors, num_starts, allowed_errors, rule_errors) = (
-                processEvent(
-                    f"{base_url}/{resultsLink}",
-                    i,
-                    judgesNames,
-                    workbook,
-                    i,
-                    event_regex,
-                    pdf_folder,
-                    excel_folder,
-                    only_rule_errors=only_rule_errors,
-                    use_gcp=use_gcp,
-                )
+            (
+                event_name,
+                total_errors,
+                num_starts,
+                allowed_errors,
+                rule_errors,
+                all_element_dict,
+                all_pcs_dict,
+            ) = processEvent(
+                f"{base_url}/{resultsLink}",
+                i,
+                judgesNames,
+                workbook,
+                i,
+                event_regex,
+                pdf_folder,
+                excel_folder,
+                only_rule_errors=only_rule_errors,
+                use_gcp=use_gcp,
+                create_thrown_out_analysis=add_additional_analysis,
             )
             if total_errors == None:
                 # This is an event to skip per the regex
@@ -386,6 +401,19 @@ def scrape(
                 rule_error["Event"] = event_name
                 detailed_rule_errors.append(rule_error)
 
+            # Processing of additional info
+            all_pcs_df = pd.DataFrame.from_dict(all_pcs_dict)
+            all_element_df = pd.DataFrame.from_dict(all_element_dict)
+            if agg_all_pcs_df is None:
+                agg_all_pcs_df = all_pcs_df
+            else:
+                agg_all_pcs_df = pd.concat([agg_all_pcs_df, all_pcs_df])
+
+            if agg_all_element_df is None:
+                agg_all_element_df = all_element_df
+            else:
+                agg_all_element_df = pd.concat([agg_all_element_df, all_element_df])
+
         # Sort sheets
         del workbook["Sheet"]
         workbook._sheets.sort(key=lambda ws: ws.title)
@@ -399,7 +427,6 @@ def scrape(
         make_competition_summary_page(
             workbook, report_name, event_details, judge_errors
         )
-        # make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex)
 
     else:
         print("Failed to get page contents.")
@@ -409,8 +436,129 @@ def scrape(
         save_gcp_workbook(workbook, excel_path)
     else:
         workbook.save(excel_path)
+
+    if add_additional_analysis:
+        create_additional_analysis_sheet(
+            agg_all_element_df, agg_all_pcs_df, excel_folder, report_name, use_gcp=use_gcp
+        )
     print("Finished " + report_name)
     return df_dict, errors_dict_to_return
+
+
+def create_summary_element_df(df, grouping_name):
+    # Filter only thrown-out elements
+    df_thrown_out = df[df["Thrown out"] == True]
+
+    # Group by Judge Name and Element Type
+    summary = (
+        df_thrown_out.groupby(["Judge Name", grouping_name])
+        .agg(
+            Num_Low=("High", lambda x: (x == False).sum()),
+            Num_High=("High", lambda x: (x == True).sum()),
+        )
+        .reset_index()
+    )
+
+    # Get the total number of judged elements per Judge Name & Element Type
+    total_judged = (
+        df.groupby(["Judge Name", grouping_name])
+        .size()
+        .reset_index(name="Total # Judged")
+    )
+
+    # Merge with thrown-out data
+    summary = summary.merge(total_judged, on=["Judge Name", grouping_name], how="left")
+
+    # Calculate percentages
+    summary["% Low"] = summary["Num_Low"] / summary["Total # Judged"]
+    summary["% High"] = summary["Num_High"] / summary["Total # Judged"]
+    summary["% Out"] = (summary["Num_Low"] + summary["Num_High"]) / summary[
+        "Total # Judged"
+    ]
+
+    # Rename columns to match your desired format
+    summary.rename(columns={"Num_Low": "# Low", "Num_High": "# High"}, inplace=True)
+    return summary
+
+def make_analysis_cover_sheet(workbook):
+    sheet = workbook.create_sheet("Overview")
+
+    sheet.column_dimensions["A"].width = 25
+    sheet.column_dimensions["B"].width = 150
+    sheet.row_dimensions[3].height = 40
+    sheet.row_dimensions[15].height = 40
+
+    bold = Font(bold=True)
+
+    sheet.cell(1, 1, value="Overview").font = Font(bold=True, size=18)
+    sheet.merge_cells("A3:B4")
+    sheet.cell(
+        3,
+        1,
+        value="This workbook contains additional analysis of the judging data, specifically related to deviations. \n The first two sheets show the percentage of GOEs or PCS of each type that are extremes related to the judging panel. The first six columns show the absolute numbers and the final three show the percentages of the total.",
+    )
+    sheet.cell(3, 1).alignment = Alignment(wrap_text=True)
+
+    sheet.cell(7, 1, value="Definitions:").font = bold
+    sheet.cell(8, 1, value="Thrown out:").font = bold
+    sheet.cell(9, 1, value="Low vs High:").font = bold
+
+    sheet.cell(
+        8,
+        2,
+        value="The number of scores that are the extremes of the panel. If at least three judges give the same score, it does not count as thrown out.",
+    )
+    sheet.cell(
+        9,
+        2,
+        value="Low refers to the judge being lower than the average of the panel. The total is the sum of low and high.",
+    )
+    sheet.cell(8, 2).alignment = Alignment(wrap_text=True)
+    sheet.cell(9, 2).alignment = Alignment(wrap_text=True)
+
+    sheet.merge_cells("A12:B12")
+    sheet.cell(
+        12,
+        1,
+        value="The later sheets show the distinct scores given before processing. Feel free to filter to dig into specifics more.",
+    )
+
+
+def create_additional_analysis_sheet(
+    all_element_df, all_pcs_df, excel_folder, report_name, use_gcp=False
+):
+    excel_path = f"{excel_folder}{report_name}_Additional_Analysis.xlsx"
+    excel_buffer = BytesIO()
+    if not use_gcp:
+        excel_buffer = excel_path
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        make_analysis_cover_sheet(writer.book)
+        # Analyze elements
+        summary_goe_df = create_summary_element_df(all_element_df, "Element Type")
+        summary_goe_df.to_excel(
+            writer, sheet_name="GOE Thrown out", float_format="%.2f", index=False
+        )
+        format_out_of_range_sheets(writer.sheets["GOE Thrown out"])
+
+        summary_pcs_df = create_summary_element_df(all_pcs_df, "Component")
+        summary_pcs_df.to_excel(
+            writer, sheet_name="PCS Thrown out", float_format="%.2f", index=False
+        )
+        format_out_of_range_sheets(writer.sheets["PCS Thrown out"])
+
+        all_element_df.to_excel(writer, sheet_name="All Elements", index=False)
+        writer.sheets["All Elements"].auto_filter.ref = writer.sheets[
+            "All Elements"
+        ].dimensions
+        all_pcs_df.to_excel(writer, sheet_name="All PCS", index=False)
+        writer.sheets["All PCS"].auto_filter.ref = writer.sheets["All PCS"].dimensions
+
+        for sheet in writer.sheets:
+            if sheet != "Overview":
+                judgingParsing.autofit_worksheet(writer.sheets[sheet])
+
+    if use_gcp:
+        gcp_interactions_helper.write_file_to_gcp(excel_buffer.getvalue(), excel_path)
 
 
 def create_season_summary(full_report_name="2425Summary", only_rule_errors=False):
@@ -568,10 +716,12 @@ if __name__ == "__main__":
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     scrape(
-        "https://ijs.usfigureskating.org/leaderboard/results/2025/34240",
-        "Midwestern_Synchro_25_all",
+        "https://ijs.usfigureskating.org/leaderboard/results/2025/34241",
+        "Pacific_Coast_Synchro_25",
         excel_folder=excel_folder,
         pdf_folder=pdf_folder,
+        # event_regex=".*(Dance).*",
+        add_additional_analysis=True,
     )
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
 
