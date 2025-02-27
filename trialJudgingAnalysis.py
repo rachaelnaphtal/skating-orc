@@ -525,7 +525,7 @@ def make_extra_analysis_sheet(
             + all_pcs_df["Low- out of range"]
             + all_pcs_df["Low- thrown out"]
         )
-        all_pcs_df["Low- thrown out"] = (
+        all_pcs_df["High- thrown out"] = (
             all_pcs_df["High- out of range with allowance"]
             + all_pcs_df["High- out of range"]
             + all_pcs_df["High- thrown out"]
@@ -534,7 +534,7 @@ def make_extra_analysis_sheet(
             all_pcs_df["Low- out of range with allowance"]
             + all_pcs_df["Low- out of range"]
         )
-        all_pcs_df["Low- out of range"] = (
+        all_pcs_df["High- out of range"] = (
             all_pcs_df["High- out of range with allowance"]
             + all_pcs_df["High- out of range"]
         )
