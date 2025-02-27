@@ -11,3 +11,5 @@ Requests==2.32.3
 gcsfs
 st-files-connection
 google-cloud-storage
+psycopg2-binary
+sqlalchemy

@@ -99,7 +99,7 @@ def format_out_of_range_sheets(worksheet):
         end_type="max",
         end_color="FF0000",
     )  # Red
-    worksheet.conditional_formatting.add("F2:H200", color_scale_rule)
+    worksheet.conditional_formatting.add("F2:H2000", color_scale_rule)
     for cell in worksheet["F"]:
         cell.number_format = "0%"
     for cell in worksheet["G"]:

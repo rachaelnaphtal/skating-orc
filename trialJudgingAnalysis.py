@@ -399,7 +399,7 @@ def make_extra_analysis_sheet(
         )
         for state in state_options:
             if not state in all_el_df:
-                all_pcs_df[state] = 0
+                all_el_df[state] = 0
         all_el_df["Total # Elements"] = (
             all_el_df["High- out of range"]
             + all_el_df["High- thrown out"]
@@ -801,19 +801,15 @@ if __name__ == "__main__":
     # processPapers(events=events, excel_path=f"{tj_pdf_base_path}ORC_Anomaly_Summary_Analysis_Melanya.xlsx", tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames, tj_filter=["Melanya Berggren"])
     # processPapers(events=events, excel_path=f"{tj_pdf_base_path}ORC_Anomaly_Summary_Analysis_Scott.xlsx", tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames, tj_filter=["Scott Brody"])
 
-    excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2024_SYS/ORC_Anomaly_Summary_Analysis.xlsx"
+    excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/ORC_Anomaly_Summary_Analysis.xlsx"
     tj_pdf_base_path = (
-        "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2024_SYS/"
+        "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/"
     )
 
-    events = ["12FS", "12SP", "ATFS", "ITFS", "JTFS", "JTSP", "JvTFS", "NTFS", "STSP"]
+    # events = ["12FS", "12SP", "ATFS", "ITFS", "JTFS", "JTSP", "JvTFS", "NTFS", "STSP"]
+    events=["JRTSP"]
     judgesNames = [
-        "Sherri Cleveland",
-        "Felicia Haining-Miller",
-        "Megan Jackson",
-        "Stephanie Pusch",
-        "Elise Requadt",
-        "April Zak",
+        'Melissa Christensen', 'Felicia Haining-Miller', 'Megan Jackson', 'Christine Magill', 'Lori Osborne', 'Elise Requadt', 'Rebecca Ye'
     ]
     process_papers(
         use_gcp=False,
