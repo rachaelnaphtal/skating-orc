@@ -716,12 +716,12 @@ if __name__ == "__main__":
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     scrape(
-        "https://ijs.usfigureskating.org/leaderboard/results/2025/34241",
+        "https://ijs.usfigureskating.org/leaderboard/results/2025/35899",
         "Pacific_Coast_Synchro_25",
         excel_folder=excel_folder,
         pdf_folder=pdf_folder,
         # event_regex=".*(Dance).*",
-        add_additional_analysis=True,
+        add_additional_analysis=False,
     )
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
 

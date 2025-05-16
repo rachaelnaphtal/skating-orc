@@ -184,8 +184,8 @@ def process_scores(pdf, event_regex="", use_gcp=False):
             )
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
-            print(f"Components missing for skater {skater} {pdf_path}")
-            st.error(f"Components missing for skater {skater} {pdf_path}")
+            print(f"Components missing for skater {skater} {event_name}")
+            st.error(f"Components missing for skater {skater} {event_name}")
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
@@ -659,9 +659,9 @@ def printToExcel(
 
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
-    pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/Novice_Women.pdf"  # Update with the correct path
-    excel_path = "/Users/rnaphtal/Documents/JudgingAnalysis/Easterns/"
-    tj_pdf_path = "/Users/rnaphtal/Documents/JudgingAnalysis/TrialJudges/JMFS.xlsx"
+    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/four_continents_men.pdf"  # Update with the correct path
+    excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/"
+    tj_pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/FC.xlsx"
 
     workbook = openpyxl.Workbook()
     extract_judge_scores(

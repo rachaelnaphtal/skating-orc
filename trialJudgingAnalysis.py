@@ -380,10 +380,14 @@ def make_analysis_cover_sheet(workbook):
 
 
 def make_extra_analysis_sheet(
-    excel_path, all_element_df, all_pcs_df, average_deviations, use_gcp=False
+    excel_path, all_element_df, all_pcs_df, average_deviations, use_gcp=False, judge_filter=""
 ):
     # Make additional analysis document
-    extra_info_path = excel_path.replace(".xlsx", "_AdditionalAnalysis.xlsx")
+    if judge_filter == "":
+        extra_info_path = excel_path.replace(".xlsx", "_OutOfRangeAnalysis.xlsx")
+    else:
+        extra_info_path = excel_path.replace(".xlsx", f"_{judge_filter}_OutOfRangeAnalysis.xlsx")
+
     excel_buffer = BytesIO()
     if not use_gcp:
         excel_buffer = extra_info_path
@@ -392,6 +396,8 @@ def make_extra_analysis_sheet(
         make_analysis_cover_sheet(writer.book)
 
         # Analyze elements
+        if judge_filter != "":
+            all_element_df = all_element_df[all_element_df["Judge Name"] == judge_filter]
         all_el_df = (
             all_element_df.groupby(["Judge Name", "Element Type", "Type"])
             .size()
@@ -502,6 +508,8 @@ def make_extra_analysis_sheet(
         format_out_of_range_sheets(writer.sheets["GOE-Thrown out"])
 
         ## PCS
+        if judge_filter != "":
+            all_pcs_df = all_pcs_df[all_pcs_df["Judge Name"] == judge_filter]
         all_pcs_df = (
             all_pcs_df.groupby(["Judge Name", "Component", "Type"])
             .size()
@@ -618,6 +626,8 @@ def make_extra_analysis_sheet(
         format_out_of_range_sheets(writer.sheets["PCS-Thrown out"])
 
         average_deviation_df = pd.DataFrame.from_records(average_deviations)
+        if judge_filter != "":
+            average_deviation_df=average_deviation_df[judge_filter]
         average_deviation_df.to_excel(writer, sheet_name="Average GOE deviations")
 
         for sheet in writer.sheets:
@@ -639,6 +649,7 @@ def process_papers(
     use_gcp=False,
     include_additional_analysis=False,
     sheet_per_trial_judge=False,
+    analysis_sheet_per_trial_judge=False
 ):
     workbook = openpyxl.Workbook()
     workbook_per_tj_dict = {}
@@ -747,6 +758,16 @@ def process_papers(
             agg_average_deviations,
             use_gcp=use_gcp,
         )
+        if analysis_sheet_per_trial_judge:
+            for trial_judge in judges_names:
+                make_extra_analysis_sheet(
+                excel_path,
+                agg_all_element_df,
+                agg_all_pcs_df,
+                agg_average_deviations,
+                use_gcp=use_gcp,
+                judge_filter=trial_judge
+                )
 
 
 if __name__ == "__main__":
@@ -801,22 +822,25 @@ if __name__ == "__main__":
     # processPapers(events=events, excel_path=f"{tj_pdf_base_path}ORC_Anomaly_Summary_Analysis_Melanya.xlsx", tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames, tj_filter=["Melanya Berggren"])
     # processPapers(events=events, excel_path=f"{tj_pdf_base_path}ORC_Anomaly_Summary_Analysis_Scott.xlsx", tj_pdf_base_path=tj_pdf_base_path, judges_names=judgesNames, tj_filter=["Scott Brody"])
 
-    excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/ORC_Anomaly_Summary_Analysis.xlsx"
+    # excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/Reports/ORC_Anomaly_Summary_Analysis.xlsx"
     tj_pdf_base_path = (
         "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/"
     )
 
     # events = ["12FS", "12SP", "ATFS", "ITFS", "JTFS", "JTSP", "JvTFS", "NTFS", "STSP"]
-    events=["JRTSP"]
+    events=["JRTSP", "ADTFS", "COTFS", "JRTFS", "JVTFS", "SRTSP"]
     judgesNames = [
         'Melissa Christensen', 'Felicia Haining-Miller', 'Megan Jackson', 'Christine Magill', 'Lori Osborne', 'Elise Requadt', 'Rebecca Ye'
     ]
-    process_papers(
-        use_gcp=False,
-        events=events,
-        excel_path=excel_path,
-        tj_pdf_base_path=tj_pdf_base_path,
-        judges_names=judgesNames,
-        include_additional_analysis=True,
-        sheet_per_trial_judge=True,
-    )
+    for event in events:
+        excel_path = f"/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/TrialJudges/2025_SYS/Reports/{event}.xlsx"
+        process_papers(
+            use_gcp=False,
+            events=[event],
+            excel_path=excel_path,
+            tj_pdf_base_path=tj_pdf_base_path,
+            judges_names=judgesNames,
+            include_additional_analysis=True,
+            sheet_per_trial_judge=False,
+            analysis_sheet_per_trial_judge=True
+        )
