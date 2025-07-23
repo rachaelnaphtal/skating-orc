@@ -24,6 +24,7 @@ if 'current_page' not in st.session_state:
 @st.cache_resource
 def get_analytics():
     connection_test = test_connection()
+    print("Rachael connection" + connection_test)
     if connection_test is not True:
         st.error(f"Database connection failed: {connection_test[1]}")
         st.stop()
@@ -33,6 +34,7 @@ def get_analytics():
 
 analytics = get_analytics()
 
+print("Rachael 7")
 # Main title
 st.title("⛸️ Figure Skating Judge Performance Analytics")
 

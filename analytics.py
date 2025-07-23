@@ -90,6 +90,7 @@ class JudgeAnalytics:
             'anomaly': abs(float(r.deviation)) > 1.5
         } for r in results])
         
+        print("Rachael 1")
         return df
     
     def get_judge_element_stats(self, judge_id, year_filter=None, competition_ids=None, discipline_type_ids=None):
@@ -118,7 +119,7 @@ class JudgeAnalytics:
          .join(Skater, SkaterSegment.skater_id == Skater.id)\
          .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)\
          .filter(Judge.id == judge_id)
-        
+        print("Rachael 2")
         # Apply filters
         if year_filter:
             query = query.filter(Competition.year == year_filter)
@@ -173,6 +174,7 @@ class JudgeAnalytics:
          .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)\
          .filter(Judge.id.in_(judge_ids))
         
+        print("Rachael 3")
         # Apply filters
         if year_filter:
             query = query.filter(Competition.year == year_filter)
@@ -199,7 +201,7 @@ class JudgeAnalytics:
             'discipline_name': r.discipline_name or 'Unknown',
             'anomaly': abs(float(r.deviation)) > 1.5
         } for r in results])
-        
+        print("Rachael 4")
         return df
     
     def get_multi_judge_element_comparison(self, judge_ids, year_filter=None, competition_ids=None, discipline_type_ids=None):
