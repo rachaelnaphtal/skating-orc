@@ -13,6 +13,7 @@ import re
 import openpyxl
 import time
 import pdfkit
+import database_loader
 from openpyxl import Workbook
 from openpyxl.styles import (
     PatternFill,
@@ -338,12 +339,17 @@ def scrape(
     only_rule_errors=False,
     use_gcp=False,
     add_additional_analysis=False,
+    write_to_database=False, 
+    year='2425'
 ):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
     workbook = openpyxl.Workbook()
     agg_all_element_df = None
     agg_all_pcs_df = None
+
+    if write_to_database:
+        competition_id = database_loader.insert_competition(report_name, base_url, year)
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
@@ -373,7 +379,7 @@ def scrape(
                 excel_folder,
                 only_rule_errors=only_rule_errors,
                 use_gcp=use_gcp,
-                create_thrown_out_analysis=add_additional_analysis,
+                create_thrown_out_analysis=add_additional_analysis or write_to_database,
             )
             if total_errors == None:
                 # This is an event to skip per the regex
@@ -413,6 +419,12 @@ def scrape(
                 agg_all_element_df = all_element_df
             else:
                 agg_all_element_df = pd.concat([agg_all_element_df, all_element_df])
+
+            # write to database
+            if write_to_database:
+                segment_id = database_loader.insert_segment(event_name, competition_id)
+                database_loader.insert_element_scores(judgesNames, all_element_dict, segment_id, rule_errors)
+                database_loader.insert_pcs_scores(judgesNames, all_pcs_dict, segment_id)
 
         # Sort sheets
         del workbook["Sheet"]
@@ -561,35 +573,40 @@ def create_additional_analysis_sheet(
         gcp_interactions_helper.write_file_to_gcp(excel_buffer.getvalue(), excel_path)
 
 
-def create_season_summary(full_report_name="2425Summary", only_rule_errors=False):
+def create_season_summary(pdf_folder = "", excel_folder = "", full_report_name="2425Summary", only_rule_errors=False):
     start = time.time()
     workbook = openpyxl.Workbook()
     events = {
+        "Eastern_Synchro_Sectionals": "2025/34239",
+        "Midwest_Synchro_Sectionals": "2025/34240",
+        "Pacific_Coast_Synchro_Sectionals": "2025/34241",
         "Dallas_Classic": "2024/33436",
         "Cactus_Classic": "2024/34414",
         "Peach_Open": "2024/33518",
         "Glacier_Falls": "2024/33519",
         "Lake_Placid": "2024/33491",
-        "Philadelphia": "2024/33453",
-        "Scott_Hamilton": "2024/33501",
-        "Copper_Cup": "2024/33425",
-        "Cup_of_Colorado": "2024/33507",
-        "Skate_the_Lake": "2024/33520",
-        "MiddleAtlantics": "2024/33515",
-        "SkateSF": "2024/33479",
-        "Potomac": "2024/33523",
-        # "Providence": "",
-        "Chicagoland": "2024/33497",
-        "JohnSmith": "2024/33451",
-        "Pasadena": "2024/33509",
-        "PNIW": "2024/33489",
-        "Challenge_Cup": "2024/34444",
-        "Skate_Cleveland": "2024/33466",
-        "Austin_Autumn_Classic": "2024/33458",
+        # "Philadelphia": "2024/33453",
+        # "Scott_Hamilton": "2024/33501",
+        # "Copper_Cup": "2024/33425",
+        # "Cup_of_Colorado": "2024/33507",
+        # "Skate_the_Lake": "2024/33520",
+        # "MiddleAtlantics": "2024/33515",
+        # "SkateSF": "2024/33479",
+        # "Potomac": "2024/33523",
+        # # "Providence": "",
+        # "Chicagoland": "2024/33497",
+        # "JohnSmith": "2024/33451",
+        # "Pasadena": "2024/33509",
+        # "PNIW": "2024/33489",
+        # "Challenge_Cup": "2024/34444",
+        # "Skate_Cleveland": "2024/33466",
+        # "Austin_Autumn_Classic": "2024/33458",
         "BostonNQS": "2024/33526",
         "Pacifics2425": "2024/34291",
         "Midwesterns_DanceFinal2425": "2024/34290",
         "Easterns_PairsFinal2425": "2024/34289",
+        "2025USChampionships": "2025/35539",
+        
     }
     summary_dict = {}
     all_rules_errors = []
@@ -604,6 +621,8 @@ def create_season_summary(full_report_name="2425Summary", only_rule_errors=False
             f"{event_name}",
             event_regex,
             only_rule_errors=only_rule_errors,
+            write_to_database=True,
+            pdf_folder=pdf_folder
         )
         all_rules_errors.append(rule_errors)
         for judge in result:
@@ -715,18 +734,19 @@ if __name__ == "__main__":
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25_Dance", event_regex=".*(Dance).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34240", "Midwestern_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25", event_regex=".*(Novice|Junior|Senior).*")
-    scrape(
-        "https://ijs.usfigureskating.org/leaderboard/results/2025/35899",
-        "Pacific_Coast_Synchro_25",
-        excel_folder=excel_folder,
-        pdf_folder=pdf_folder,
-        # event_regex=".*(Dance).*",
-        add_additional_analysis=False,
-    )
+    # scrape(
+    #     "https://ijs.usfigureskating.org/leaderboard/results/2025/34241",
+    #     "Pacific_Coast_Synchro_25",
+    #     excel_folder=excel_folder,
+    #     pdf_folder=pdf_folder,
+    #     # event_regex=".*(Dance).*",
+    #     add_additional_analysis=False,
+    #     write_to_database=True
+    # )
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/34241", "PacificCoast_Synchro_25_all")
 
     # scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/34290', "2024_Dance_Final", ".*(Novice|Junior|Senior).?(Dance).*")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30895', "2022_Golden_West", "")
-    # create_season_summary()
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/33491', "Lake_Placid", "", write_to_database=True)
+    create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)

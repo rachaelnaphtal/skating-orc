@@ -148,6 +148,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
             elif current_skater and pcs_match:
                 component = pcs_match.group(1)
                 no_spaces = pcs_match.group(3).replace(" ", "")
+                possible_missing_position=pcs_match.group(3).split(" ").index("")
                 scores = []
                 current_score = ""
                 i = 0
@@ -162,7 +163,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                         i += 1
                 judges_scores = list(map(float, scores))
                 pcs_per_skater[current_skater].append(
-                    {"Component": component, "Scores": judges_scores}
+                    {"Component": component, "Scores": judges_scores, "Possible Missing Position":possible_missing_position}
                 )
             if current_skater == None and (pcs_match or element_match):
                 print(
@@ -230,6 +231,10 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
     for skater in pcs_per_skater:
         for pcs_mark in pcs_per_skater[skater]:
             all_scores = pcs_mark["Scores"]
+            if len(all_scores) < len(judges) :
+                missing_position=pcs_mark["Possible Missing Position"]
+                all_scores.insert(missing_position, 0)
+
             avg = sum(all_scores) / len(all_scores)
             judgeNumber = 1
             for judge in judges:
@@ -659,7 +664,7 @@ def printToExcel(
 
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
-    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/four_continents_men.pdf"  # Update with the correct path
+    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis/36.pdf"  # Update with the correct path
     excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/"
     tj_pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/FC.xlsx"
 
@@ -680,6 +685,7 @@ if __name__ == "__main__":
             "Name9",
         ],
         2,
+        create_thrown_out_analysis=True
     )
     excel_path = f"{excel_path}DeviationsReport2.xlsx"
     workbook.save(excel_path)

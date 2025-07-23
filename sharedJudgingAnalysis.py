@@ -17,6 +17,7 @@ def categorizeElement(element):
         element = element.replace("+SeStM", "")
         element = element.replace("+SqTwM", "")
         element = element.replace("+MiStM", "")
+        # element = element.replace("+SeEe", "")
     if element[-1] == "V":
         element = element[:-1]
     if element[-1].isdigit():
@@ -45,20 +46,30 @@ def categorizeElement(element):
         "Mi": "Mixed Element",
         "PB": "Pivoting Block",
         "ChSq": "ChSq",
-        "ChSl": "ChSl",
-        "ChSt": "ChSt",
-        "ChAJ": "ChAJ",
-        "ChRS": "ChRS",
-        "SyTwW": "SyTw",
-        "SeStW": "SeSt",
-        "DiStW": "DiSt",
-        "MiStW": "MiSt",
-        "CiStW": "CiSt",
-        "PSt": "PSt",
-        "OFTW": "OFT",
-        "SqTwW": "SqTw",
-        "ChTw": "ChTw",
-        "PiF": "PiF",
+        "ChSl": "Choreo Element",
+        "ChSt": "Choreo Element",
+        "pChSt": "Choreo Element",
+        "ChAJ": "Choreo Element",
+        "ChRS": "Choreo Element",
+        "SyTwW": "Twizzle",
+        "SeStW": "Step Sequence",
+        "DiStW": "Step Sequence",
+        "MiStW": "Step Sequence",
+        "CiStW": "Step Sequence",
+        "PSt": "Step Sequence",
+        "OFTW": "Step Sequence",
+        "SqTwW": "Twizzle",
+        "ChTw": "Twizzle",
+        "PiF": "Pivot Figure",
+        "DiSt": "Step Sequence",
+        "OFT": "Step Sequence",
+        "MiSt": "Step Sequence",
+        "SpEe":"Edge Element",
+        "SeEe":"Edge Element",
+        "CiSt":"Step Sequence",
+        "CrEe":"Edge Element",
+        "IBEe":"Edge Element",
+        "SeSt":"Step Sequence",
     }
 
     if element in ["FiDs", "FoDs", "BiDs", "BoDs"]:
@@ -87,6 +98,14 @@ def categorizeElement(element):
         if element.startswith("StSq"):
             return "StSq"
         return "Pattern dance"
+    elif re.search(r'\dSq$', element):
+        return "Pattern dance"
+    elif re.search(r'\dSq\dSe$', element):
+        return "Pattern dance"
+    elif element.strip().endswith("Ee"):
+        return "Edge Element"
+    elif element.strip().startswith("A+"):
+        return "Jump"
     print(f"Unable to categorize {element}")
     return element
 
