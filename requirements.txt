@@ -13,3 +13,5 @@ st-files-connection
 google-cloud-storage
 psycopg2-binary
 sqlalchemy
+plotly
+scipy
