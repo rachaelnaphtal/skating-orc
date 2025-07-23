@@ -23,6 +23,7 @@ if 'current_page' not in st.session_state:
 # Test database connection
 @st.cache_resource
 def get_analytics():
+    print("Rachael 9")
     connection_test = test_connection()
     print(f"Rachael connection{connection_test}")
     if connection_test is not True:
@@ -32,6 +33,7 @@ def get_analytics():
     session = get_db_session()
     return JudgeAnalytics(session)
 
+print("Rachael 8")
 analytics = get_analytics()
 
 print("Rachael 7")
