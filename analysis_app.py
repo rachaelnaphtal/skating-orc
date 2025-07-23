@@ -20,23 +20,46 @@ st.set_page_config(
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "Individual Judge Analysis"
 
-# Test database connection
+# Test database connection with timeout and better error handling
 @st.cache_resource
 def get_analytics():
-    print("Rachael 9")
-    connection_test = test_connection()
-    print(f"Rachael connection{connection_test}")
-    if connection_test is not True:
-        st.error(f"Database connection failed: {connection_test[1]}")
+    try:
+        with st.spinner("Connecting to database..."):
+            connection_test = test_connection()
+            if connection_test is not True:
+                st.error(f"Database connection failed: {connection_test[1]}")
+                st.info("This usually means the database is starting up. Please refresh the page in a few seconds.")
+                st.stop()
+            
+            session = get_db_session()
+            analytics_obj = JudgeAnalytics(session)
+            
+            # Test that we can actually query data
+            try:
+                judges = analytics_obj.get_judges()
+                if not judges:
+                    st.warning("Database connected but no judge data found. Please import your data first.")
+                    st.info("Use one of the import scripts to populate your database with figure skating data.")
+                else:
+                    st.success(f"Database connected successfully! Found {len(judges)} judges.")
+            except Exception as e:
+                st.error(f"Database connection successful but data access failed: {e}")
+                st.stop()
+            
+            return analytics_obj
+            
+    except Exception as e:
+        st.error(f"Failed to initialize analytics: {e}")
+        st.info("This might be a temporary issue. Please refresh the page.")
         st.stop()
-    
-    session = get_db_session()
-    return JudgeAnalytics(session)
 
-print("Rachael 8")
-analytics = get_analytics()
+# Lazy load analytics only when needed
+def get_analytics_safe():
+    """Safely get analytics object with error handling"""
+    if 'analytics' not in st.session_state:
+        st.session_state.analytics = get_analytics()
+    return st.session_state.analytics
 
-print("Rachael 7")
 # Main title
 st.title("⛸️ Figure Skating Judge Performance Analytics")
 
@@ -89,6 +112,7 @@ def judge_performance_heatmap():
         col1, col2, col3 = st.columns(3)
         
         with col1:
+            analytics = get_analytics_safe()
             years = analytics.get_years()
             year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
             year_filter = None if year_filter == "All Years" else year_filter
@@ -158,6 +182,7 @@ def judge_performance_heatmap():
     else:  # Judge vs Competition
         # Get heatmap data for judge vs competition
         with st.spinner("Loading judge vs competition heatmap data..."):
+            analytics = get_analytics_safe()
             heatmap_df = analytics.get_judge_competition_heatmap_data(
                 metric=metric, 
                 score_type=score_type
@@ -248,12 +273,13 @@ def temporal_trend_analysis():
     
     if analysis_type == "Individual Judge Trends":
         # Judge selection
+        analytics = get_analytics_safe()
         judges = analytics.get_judges()
         if not judges:
             st.error("No judges found in database")
             return
         
-        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
+        judge_options = {f"{name} ": judge_id for judge_id, name in judges}
         selected_judge_display = st.selectbox("Select Judge", list(judge_options.keys()))
         selected_judge_id = judge_options[selected_judge_display]
         
@@ -331,6 +357,7 @@ def temporal_trend_analysis():
     elif analysis_type == "Overall System Trends":
         # Get system-wide temporal trends
         with st.spinner("Loading system-wide trends data..."):
+            analytics = get_analytics_safe()
             trends_df = analytics.get_temporal_trends_data(
                 judge_id=None,
                 period='year',
@@ -421,6 +448,7 @@ def temporal_trend_analysis():
         
     else:  # Judge Consistency Ranking
         # Get all judges and their consistency metrics
+        analytics = get_analytics_safe()
         judges = analytics.get_judges()
         if not judges:
             st.error("No judges found in database")
@@ -516,6 +544,7 @@ def statistical_bias_detection():
     col1, col2, col3 = st.columns(3)
     
     with col1:
+        analytics = get_analytics_safe()
         years = analytics.get_years()
         year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
         year_filter = None if year_filter == "All Years" else year_filter
@@ -541,7 +570,7 @@ def statistical_bias_detection():
             st.error("No judges found in database")
             return
         
-        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
+        judge_options = {f"{name} ": judge_id for judge_id, name in judges}
         selected_judge_display = st.selectbox("Select Judge", list(judge_options.keys()))
         selected_judge_id = judge_options[selected_judge_display]
         
@@ -640,6 +669,7 @@ def statistical_bias_detection():
     elif analysis_mode == "System-Wide Bias Summary":
         # Get bias detection summary for all judges
         with st.spinner("Analyzing bias across all judges..."):
+            analytics = get_analytics_safe()
             bias_summary_df = analytics.get_bias_detection_summary(
                 competition_ids, discipline_ids, year_filter
             )
@@ -712,6 +742,7 @@ def statistical_bias_detection():
     
     else:  # Judge Comparison
         # Select two judges for comparison
+        analytics = get_analytics_safe()
         judges = analytics.get_judges()
         if len(judges) < 2:
             st.error("Need at least 2 judges for comparison")
@@ -766,12 +797,13 @@ if page == "Individual Judge Analysis":
     st.header("Individual Judge Analysis")
     
     # Judge selection
+    analytics = get_analytics_safe()
     judges = analytics.get_judges()
     if not judges:
         st.error("No judges found in database")
         st.stop()
     
-    judge_options = {f"{name} ": judge_id for judge_id, name, location in judges}
+    judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
     selected_judge_display = st.selectbox("Select Judge", list(judge_options.keys()))
     selected_judge_id = judge_options[selected_judge_display]
     
@@ -897,7 +929,7 @@ if page == "Individual Judge Analysis":
                     unique_competitions = problem_elements[['competition_name', 'competition_url']].drop_duplicates()
                     for _, row in unique_competitions.iterrows():
                         if row['competition_url']:
-                            st.markdown(f"[{row['competition_name']}]({row['competition_url']}/index.asp)")
+                            st.markdown(f"[{row['competition_name']}]({row['competition_url']})")
             else:
                 st.info("No element scores with issues found for selected filters")
         
@@ -978,6 +1010,7 @@ elif page == "Multi-Judge Comparison":
     st.header("Multi-Judge Comparison")
     
     # Judge selection
+    analytics = get_analytics_safe()
     judges = analytics.get_judges()
     if not judges:
         st.error("No judges found in database")

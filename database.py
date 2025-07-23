@@ -7,6 +7,7 @@ from models import Base
 
 # Get database connection details from environment variables
 DATABASE_URL = os.getenv('DATABASE_URL')
+print (DATABASE_URL)
 if not DATABASE_URL:
     # Fallback to individual components if DATABASE_URL is not available
     PGUSER = os.getenv('PGUSER', 'postgres')
@@ -41,6 +42,7 @@ def get_db_session():
     
 def test_connection():
     """Test database connection"""
+    print(f"test connection {DATABASE_URL}")
     try:
         with engine.connect() as conn:
             result = conn.execute(text("SELECT 1"))
