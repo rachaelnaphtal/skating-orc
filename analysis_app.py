@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import database
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from scipy import stats
 
-from database import get_db_session, test_connection
+from database_cloud import get_db_session, test_connection
 from analytics import JudgeAnalytics
 
 # Page configuration
@@ -26,8 +25,8 @@ if 'current_page' not in st.session_state:
 def get_analytics():
     try:
         with st.spinner("Connecting to database..."):
-            connection_test = test_connection()
-            if connection_test is not True:
+            connection_success, connection_error = test_connection()
+            if not connection_success:
                 st.error(f"Database connection failed: {connection_test[1]}")
                 st.info("This usually means the database is starting up. Please refresh the page in a few seconds.")
                 st.stop()
@@ -571,7 +570,7 @@ def statistical_bias_detection():
             st.error("No judges found in database")
             return
         
-        judge_options = {f"{name} ": judge_id for judge_id, name in judges}
+        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
         selected_judge_display = st.selectbox("Select Judge", list(judge_options.keys()))
         selected_judge_id = judge_options[selected_judge_display]
         

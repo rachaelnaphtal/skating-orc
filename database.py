@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from models import Base
 
+print("indatabase")
 
 # Get database connection details from environment variables
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -29,6 +30,7 @@ def get_db_session():
     """Create and return a database session"""
     # conn = st.connection("postgresql", type="sql")
     # return conn.session
+    print ("getdbsession")
     return SessionLocal()
 
 # def test_connection():
