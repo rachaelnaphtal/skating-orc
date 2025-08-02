@@ -6,7 +6,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 from scipy import stats
 
-from database_cloud import get_db_session, test_connection
+from database import get_db_session, test_connection
 from analytics import JudgeAnalytics
 
 # Page configuration
