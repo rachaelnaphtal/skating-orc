@@ -76,7 +76,7 @@ smmap==5.0.2
 soupsieve==2.7
 sqlacodegen==3.0.0
 SQLAlchemy==2.0.41
-# streamlit==1.46.1
+streamlit
 tenacity==9.1.2
 tld==0.13.1
 toml==0.10.2
