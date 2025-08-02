@@ -65,7 +65,7 @@ def createCompetitionReportLayout():
     This creates a report to analyze the deviations found in a competition. It is meant to then be used by review captains to decide on which deviations are errors for a given competition.
     There are a couple of options:
 
-    -  **Include only some events**: Do this via an event regex. For example, enter '.\*(Novice|Junior|Senior).\*(Women|Men|Pairs).\*' to just include the Novice and higher Singles/Pairs events at a competiiton.
+    -  **Include only some events**: Do this via an event regex. For example, enter '.*(Novice|Junior|Senior).*(Women|Men|Pairs).*' to just include the Novice and higher Singles/Pairs events at a competiiton.
     -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
                     """)
     with st.form("options_form", border=False):
@@ -79,7 +79,7 @@ def createCompetitionReportLayout():
         st.text_input(
             "Event Regex. (Optional)",
             value="",
-            help="For example, '.\*(Novice|Junior|Senior).\*' will only consider results for Novice, Junior and Senior events.",
+            help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.",
             key="event_regex",
         )
         st.checkbox(
