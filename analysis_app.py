@@ -570,7 +570,7 @@ def statistical_bias_detection():
             st.error("No judges found in database")
             return
         
-        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
+        judge_options = {f"{name}": judge_id for judge_id, name, location in judges}
         selected_judge_display = st.selectbox("Select Judge", list(judge_options.keys()))
         selected_judge_id = judge_options[selected_judge_display]
         

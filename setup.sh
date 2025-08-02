@@ -11,6 +11,8 @@ enableCORS = false
 
 echo "
 
+DATABASE_URL=\"$PG_DB_URL\"
+
 [connections.postgresql]
 dialect = \"postgresql\"
 host = \"$DB_HOST\"
