@@ -1,3 +1,5 @@
+echo $DB_HOST
+printenv
 mkdir -p ~/.streamlit/
 echo "
 [server]
