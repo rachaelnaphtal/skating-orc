@@ -25,8 +25,8 @@ if 'current_page' not in st.session_state:
 def get_analytics():
     try:
         with st.spinner("Connecting to database..."):
-            connection_success, connection_error = test_connection()
-            if not connection_success:
+            connection_test = test_connection()
+            if connection_test is not True:
                 st.error(f"Database connection failed: {connection_test[1]}")
                 st.info("This usually means the database is starting up. Please refresh the page in a few seconds.")
                 st.stop()

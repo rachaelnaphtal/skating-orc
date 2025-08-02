@@ -48,6 +48,8 @@ def test_connection():
     try:
         with engine.connect() as conn:
             result = conn.execute(text("SELECT 1"))
+            print("connected")
             return True
     except Exception as e:
+        print ("failed")
         return False, str(e)
