@@ -19,6 +19,9 @@ database = \"$DB_NAME\"
 username = \"$DB_USERNAME\"
 password = \"$DB_PASSWORD\"
 
+[connections.gcs]
+$GCS_CONNECTION
+
 " > ~/.streamlit/secrets.toml
 
 cat ~/.streamlit/secrets.toml
