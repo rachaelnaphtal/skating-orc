@@ -37,7 +37,7 @@ def insert_discipline_type(segment_name):
     with conn.session as s:
         existing = s.query(DisciplineType).filter_by(name=type).first()
         if not existing:
-            new = Competition(name=type)
+            new = DisciplineType(name=type)
             s.add(new)
             s.commit()
             return new.id

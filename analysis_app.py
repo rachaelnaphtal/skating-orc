@@ -66,7 +66,7 @@ st.title("⛸️ Figure Skating Judge Performance Analytics")
 # Navigation
 page = st.sidebar.selectbox(
     "Select Analysis Type",
-    ["Individual Judge Analysis", "Multi-Judge Comparison", "Judge Performance Heatmap", "Temporal Trend Analysis", "Statistical Bias Detection"]
+    ["Individual Judge Analysis", "Multi-Judge Comparison", "Judge Performance Heatmap"]
 )
 
 def judge_performance_heatmap():
@@ -748,7 +748,7 @@ def statistical_bias_detection():
             st.error("Need at least 2 judges for comparison")
             return
         
-        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
+        judge_options = {f"{name}": judge_id for judge_id, name, location in judges}
         
         col1, col2 = st.columns(2)
         with col1:

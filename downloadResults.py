@@ -340,7 +340,7 @@ def scrape(
     use_gcp=False,
     add_additional_analysis=False,
     write_to_database=False, 
-    year='2425'
+    year="2526"
 ):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
@@ -748,5 +748,5 @@ if __name__ == "__main__":
     # scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/34290', "2024_Dance_Final", ".*(Novice|Junior|Senior).?(Dance).*")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/33491', "Lake_Placid", "", write_to_database=True)
-    create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "GlacierFalls2025", "", write_to_database=True)
+    # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
