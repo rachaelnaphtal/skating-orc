@@ -7,6 +7,10 @@ headless = true
 port = $PORT
 enableCORS = false
 
+" > ~/.streamlit/config.toml
+
+echo "
+
 [connections.postgresql]
 dialect = \"postgresql\"
 host = \"$DB_HOST\"
@@ -15,6 +19,6 @@ database = \"$DB_NAME\"
 username = \"$DB_USERNAME\"
 password = \"$DB_PASSWORD\"
 
-" > ~/.streamlit/config.toml
+" > ~/.streamlit/secrets.toml
 
-cat ~/.streamlit/config.toml
+cat ~/.streamlit/secrets.toml
