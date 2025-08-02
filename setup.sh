@@ -21,6 +21,7 @@ password = \"$DB_PASSWORD\"
 
 [connections.gcs]
 $GCS_CONNECTION
+private_key = \"$GCS_PRIVATE_KEY\"
 
 " > ~/.streamlit/secrets.toml
 
