@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, text
 from scipy import stats
 from scipy.stats import linregress
 from models import (
@@ -15,14 +15,291 @@ class JudgeAnalytics:
         self.session = session
     
     def get_judges(self):
-        """Get all judges"""
-        judges = self.session.query(Judge).all()
+        """Get all judges in alphabetical order"""
+        judges = self.session.query(Judge).order_by(Judge.name).all()
         return [(judge.id, judge.name, judge.location) for judge in judges]
     
     def get_competitions(self):
         """Get all competitions"""
-        competitions = self.session.query(Competition).all()
+        competitions = self.session.query(Competition).order_by(Competition.year.desc(), Competition.name).all()
         return [(comp.id, comp.name, comp.year) for comp in competitions]
+        
+    def get_judge_competitions(self, judge_id):
+        """Get competitions where a specific judge participated"""
+        # Get competitions from PCS scores
+        pcs_competitions = self.session.query(Competition).join(
+            Segment, Segment.competition_id == Competition.id
+        ).join(
+            SkaterSegment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            PcsScorePerJudge, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+        ).filter(
+            PcsScorePerJudge.judge_id == judge_id
+        ).distinct()
+        
+        # Get competitions from element scores  
+        element_competitions = self.session.query(Competition).join(
+            Segment, Segment.competition_id == Competition.id
+        ).join(
+            SkaterSegment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            Element, Element.skater_segment_id == SkaterSegment.id
+        ).join(
+            ElementScorePerJudge, ElementScorePerJudge.element_id == Element.id
+        ).filter(
+            ElementScorePerJudge.judge_id == judge_id
+        ).distinct()
+        
+        # Combine and deduplicate
+        all_competitions = set()
+        for comp in pcs_competitions:
+            all_competitions.add((comp.id, comp.name, comp.year))
+        for comp in element_competitions:
+            all_competitions.add((comp.id, comp.name, comp.year))
+            
+        # Sort by year desc, then name
+        return sorted(list(all_competitions), key=lambda x: (x[2], x[1]), reverse=True)
+    
+    def get_judge_segment_stats(self, judge_id, year_filter=None, competition_ids=None, discipline_type_ids=None):
+        """Get segment statistics for a specific judge"""
+        # Base query for segments this judge scored
+        segment_query = self.session.query(Segment).join(
+            Competition, Segment.competition_id == Competition.id
+        ).join(
+            DisciplineType, Segment.discipline_type_id == DisciplineType.id
+        )
+        
+        # Apply filters
+        if year_filter:
+            segment_query = segment_query.filter(Competition.year == year_filter)
+        if competition_ids:
+            segment_query = segment_query.filter(Segment.competition_id.in_(competition_ids))
+        if discipline_type_ids:
+            segment_query = segment_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        
+        # Get segments where this judge has PCS scores
+        pcs_segments = segment_query.join(
+            SkaterSegment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            PcsScorePerJudge, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+        ).filter(
+            PcsScorePerJudge.judge_id == judge_id
+        ).distinct()
+        
+        # Get segments where this judge has element scores
+        element_segments = segment_query.join(
+            SkaterSegment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            Element, Element.skater_segment_id == SkaterSegment.id
+        ).join(
+            ElementScorePerJudge, ElementScorePerJudge.element_id == Element.id
+        ).filter(
+            ElementScorePerJudge.judge_id == judge_id
+        ).distinct()
+        
+        segment_stats = []
+        all_segment_ids = set()
+        
+        # Collect all segments
+        for segment in pcs_segments:
+            all_segment_ids.add(segment.id)
+        for segment in element_segments:
+            all_segment_ids.add(segment.id)
+        
+        for segment_id in all_segment_ids:
+            segment = self.session.query(Segment).filter(Segment.id == segment_id).first()
+            if not segment:
+                continue
+                
+            # Count skaters in this segment
+            skater_count = self.session.query(SkaterSegment).filter(
+                SkaterSegment.segment_id == segment_id
+            ).count()
+            
+            # Count PCS anomalies
+            pcs_anomalies = self.session.query(PcsScorePerJudge).join(
+                SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+            ).filter(
+                PcsScorePerJudge.judge_id == judge_id,
+                SkaterSegment.segment_id == segment_id,
+                func.abs(PcsScorePerJudge.deviation) > 1.5
+            ).count()
+            
+            # Count element anomalies
+            element_anomalies = self.session.query(ElementScorePerJudge).join(
+                Element, ElementScorePerJudge.element_id == Element.id
+            ).join(
+                SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+            ).filter(
+                ElementScorePerJudge.judge_id == judge_id,
+                SkaterSegment.segment_id == segment_id,
+                func.abs(ElementScorePerJudge.deviation) > 2.0
+            ).count()
+            
+            # Count rule errors  
+            pcs_rule_errors = self.session.query(PcsScorePerJudge).join(
+                SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+            ).filter(
+                PcsScorePerJudge.judge_id == judge_id,
+                SkaterSegment.segment_id == segment_id,
+                PcsScorePerJudge.is_rule_error == True
+            ).count()
+            
+            element_rule_errors = self.session.query(ElementScorePerJudge).join(
+                Element, ElementScorePerJudge.element_id == Element.id
+            ).join(
+                SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+            ).filter(
+                ElementScorePerJudge.judge_id == judge_id,
+                SkaterSegment.segment_id == segment_id,
+                ElementScorePerJudge.is_rule_error == True
+            ).count()
+            
+            total_anomalies = pcs_anomalies + element_anomalies
+            total_rule_errors = pcs_rule_errors + element_rule_errors
+            
+            segment_stats.append({
+                'segment_id': segment_id,
+                'competition_name': segment.competition.name,
+                'competition_year': segment.competition.year,
+                'discipline': segment.discipline_type.name,
+                'segment_name': segment.name,
+                'skater_count': skater_count,
+                'total_anomalies': total_anomalies,
+                'pcs_anomalies': pcs_anomalies,
+                'element_anomalies': element_anomalies,
+                'total_rule_errors': total_rule_errors,
+                'pcs_rule_errors': pcs_rule_errors,
+                'element_rule_errors': element_rule_errors
+            })
+        
+        return pd.DataFrame(segment_stats)
+    
+    def get_all_rule_errors(self, year_filter=None, competition_ids=None, judge_ids=None):
+        """Get all rule errors with optional filters"""
+        # PCS rule errors
+        pcs_query = self.session.query(
+            PcsScorePerJudge.judge_id,
+            Judge.name.label('judge_name'),
+            Competition.name.label('competition_name'),
+            Competition.year.label('competition_year'),
+            Competition.results_url.label('competition_url'),
+            Segment.name.label('segment_name'),
+            DisciplineType.name.label('discipline_name'),
+            Skater.name.label('skater_name'),
+            PcsType.name.label('score_type'),
+            PcsScorePerJudge.judge_score,
+            PcsScorePerJudge.panel_average,
+            PcsScorePerJudge.deviation,
+
+        ).join(
+            Judge, PcsScorePerJudge.judge_id == Judge.id
+        ).join(
+            SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+        ).join(
+            Segment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            Competition, Segment.competition_id == Competition.id
+        ).join(
+            DisciplineType, Segment.discipline_type_id == DisciplineType.id
+        ).join(
+            Skater, SkaterSegment.skater_id == Skater.id
+        ).join(
+            PcsType, PcsScorePerJudge.pcs_type_id == PcsType.id
+        ).filter(
+            PcsScorePerJudge.is_rule_error == True
+        )
+        
+        # Element rule errors
+        element_query = self.session.query(
+            ElementScorePerJudge.judge_id,
+            Judge.name.label('judge_name'),
+            Competition.name.label('competition_name'),
+            Competition.year.label('competition_year'),
+            Competition.results_url.label('competition_url'),
+            Segment.name.label('segment_name'),
+            DisciplineType.name.label('discipline_name'),
+            Skater.name.label('skater_name'),
+            Element.name.label('element_name'),
+            ElementType.name.label('element_type'),
+            ElementScorePerJudge.judge_score,
+            ElementScorePerJudge.panel_average,
+            ElementScorePerJudge.deviation
+        ).join(
+            Judge, ElementScorePerJudge.judge_id == Judge.id
+        ).join(
+            Element, ElementScorePerJudge.element_id == Element.id
+        ).join(
+            SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+        ).join(
+            Segment, SkaterSegment.segment_id == Segment.id
+        ).join(
+            Competition, Segment.competition_id == Competition.id
+        ).join(
+            DisciplineType, Segment.discipline_type_id == DisciplineType.id
+        ).join(
+            Skater, SkaterSegment.skater_id == Skater.id
+        ).join(
+            ElementType, Element.element_type_id == ElementType.id
+        ).filter(
+            ElementScorePerJudge.is_rule_error == True
+        )
+        
+        # Apply filters to both queries
+        if year_filter:
+            pcs_query = pcs_query.filter(Competition.year == year_filter)
+            element_query = element_query.filter(Competition.year == year_filter)
+        if competition_ids:
+            pcs_query = pcs_query.filter(Competition.id.in_(competition_ids))
+            element_query = element_query.filter(Competition.id.in_(competition_ids))
+        if judge_ids:
+            pcs_query = pcs_query.filter(Judge.id.in_(judge_ids))
+            element_query = element_query.filter(Judge.id.in_(judge_ids))
+        
+        # Execute queries and convert to DataFrames
+        pcs_results = pcs_query.all()
+        element_results = element_query.all()
+        
+        # Convert to DataFrames and add category
+        pcs_data = []
+        for result in pcs_results:
+            pcs_data.append({
+                'judge_id': result.judge_id,
+                'judge_name': result.judge_name,
+                'competition_name': result.competition_name,
+                'competition_year': result.competition_year,
+                'competition_url': result.competition_url,
+                'segment_name': result.segment_name,
+                'discipline_name': result.discipline_name,
+                'skater_name': result.skater_name,
+                'element_name': '',  # PCS doesn't have element name
+                'element_type': result.score_type,
+                'judge_score': result.judge_score,
+                'panel_average': result.panel_average,
+                'deviation': result.deviation
+            })
+            
+        element_data = []
+        for result in element_results:
+            element_data.append({
+                'judge_id': result.judge_id,
+                'judge_name': result.judge_name,
+                'competition_name': result.competition_name,
+                'competition_year': result.competition_year,
+                'competition_url': result.competition_url,
+                'segment_name': result.segment_name,
+                'discipline_name': result.discipline_name,
+                'skater_name': result.skater_name,
+                'element_name': result.element_name,
+                'element_type': result.element_type,
+                'judge_score': result.judge_score,
+                'panel_average': result.panel_average,
+                'deviation': result.deviation
+            })
+        
+        # Combine results
+        all_data = pcs_data + element_data
+        return pd.DataFrame(all_data)
     
     def get_years(self):
         """Get all unique years"""

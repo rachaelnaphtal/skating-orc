@@ -76,9 +76,9 @@ st.title("⛸️ Figure Skating Judge Performance Analytics")
 
 # Navigation
 page = st.sidebar.selectbox("Select Analysis Type", [
-    "Individual Judge Analysis", "Multi-Judge Comparison",
+    "Individual Judge Analysis", "Multi-Judge Comparison", 
     "Judge Performance Heatmap", "Temporal Trend Analysis",
-    "Statistical Bias Detection"
+    "Statistical Bias Detection", "Rule Errors Analysis"
 ])
 
 
@@ -945,14 +945,15 @@ if page == "Individual Judge Analysis":
         year_filter = None if year_filter == "All Years" else year_filter
 
     with col2:
-        competitions = analytics.get_competitions()
+        # Get competitions where this judge participated
+        judge_competitions = analytics.get_judge_competitions(selected_judge_id)
         competition_names = [
-            f"{name} ({year})" for comp_id, name, year in competitions
+            f"{name} ({year})" for comp_id, name, year in judge_competitions
         ]
         selected_competitions = st.multiselect("Filter by Competitions",
                                                competition_names)
         competition_ids = [
-            comp_id for comp_id, name, year in competitions
+            comp_id for comp_id, name, year in judge_competitions
             if f"{name} ({year})" in selected_competitions
         ] if selected_competitions else None
 
@@ -974,6 +975,8 @@ if page == "Individual Judge Analysis":
                                                        year_filter,
                                                        competition_ids,
                                                        discipline_ids)
+        segment_df = analytics.get_judge_segment_stats(selected_judge_id, year_filter,
+                                                      competition_ids, discipline_ids)
 
     if pcs_df.empty and element_df.empty:
         st.warning("No data found for selected judge with current filters")
@@ -1260,6 +1263,152 @@ if page == "Individual Judge Analysis":
                             )
             else:
                 st.info("No PCS scores with issues found for selected filters")
+        
+        # Segment Statistics
+        if not segment_df.empty:
+            st.subheader("Segment Statistics")
+            st.write("Performance summary for segments judged by this judge:")
+            
+            # Sort by total anomalies + rule errors descending
+            segment_display = segment_df.copy()
+            segment_display['total_issues'] = segment_display['total_anomalies'] + segment_display['total_rule_errors']
+            segment_display = segment_display.sort_values('total_issues', ascending=False)
+            
+            # Calculate allowed errors and excess
+            def calculate_allowed_errors(skater_count):
+                if skater_count <= 10:
+                    return 1
+                elif skater_count <= 20:
+                    return 2
+                else:
+                    return 3
+            
+            segment_display['allowed_errors'] = segment_display['skater_count'].apply(calculate_allowed_errors)
+            segment_display['excess_anomalies'] = segment_display['total_anomalies'] - segment_display['allowed_errors']
+            segment_display['excess_anomalies'] = segment_display['excess_anomalies'].apply(lambda x: max(0, x))
+            
+            # Format the display columns
+            segment_display_cols = segment_display[[
+                'competition_name', 'competition_year', 'discipline', 'segment_name',
+                'skater_count', 'allowed_errors', 'total_anomalies', 'excess_anomalies',
+                'pcs_anomalies', 'element_anomalies', 'total_rule_errors', 
+                'pcs_rule_errors', 'element_rule_errors'
+            ]].copy()
+            
+            segment_display_cols.columns = [
+                'Competition', 'Year', 'Discipline', 'Segment',
+                'Skaters', 'Allowed Errors', 'Total Anomalies', 'Excess Anomalies',
+                'PCS Anomalies', 'Element Anomalies', 'Total Rule Errors', 
+                'PCS Rule Errors', 'Element Rule Errors'
+            ]
+            
+            st.dataframe(segment_display_cols, use_container_width=True)
+        else:
+            st.info("No segment data found for selected filters")
+
+elif page == "Rule Errors Analysis":
+    st.header("Rule Errors Analysis")
+    
+    analytics = get_analytics_safe()
+    
+    # Filters
+    st.subheader("Filters")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        years = analytics.get_years()
+        year_filter = st.selectbox("Filter by Year", ["All Years"] + years, key="rule_errors_year")
+        year_filter = None if year_filter == "All Years" else year_filter
+    
+    with col2:
+        competitions = analytics.get_competitions()
+        competition_names = [f"{name} ({year})" for comp_id, name, year in competitions]
+        selected_competitions = st.multiselect("Filter by Competitions", competition_names, key="rule_errors_comps")
+        competition_ids = [
+            comp_id for comp_id, name, year in competitions
+            if f"{name} ({year})" in selected_competitions
+        ] if selected_competitions else None
+    
+    with col3:
+        judges = analytics.get_judges()
+        judge_names = [name for judge_id, name, location in judges]
+        selected_judges = st.multiselect("Filter by Judges", judge_names, key="rule_errors_judges")
+        judge_ids = [
+            judge_id for judge_id, name, location in judges
+            if name in selected_judges
+        ] if selected_judges else None
+    
+    # Get rule errors data
+    with st.spinner("Loading rule errors data..."):
+        rule_errors_df = analytics.get_all_rule_errors(year_filter, competition_ids, judge_ids)
+    
+    if rule_errors_df.empty:
+        st.warning("No rule errors found with selected filters")
+    else:
+        # Summary statistics
+        st.subheader("Rule Errors Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Rule Errors", len(rule_errors_df))
+        
+        with col2:
+            pcs_errors = len(rule_errors_df[rule_errors_df['element_name'] == ''])
+            st.metric("PCS Rule Errors", pcs_errors)
+        
+        with col3:
+            element_errors = len(rule_errors_df[rule_errors_df['element_name'] != ''])
+            st.metric("Element Rule Errors", element_errors)
+        
+        with col4:
+            unique_judges = rule_errors_df['judge_name'].nunique()
+            st.metric("Judges with Rule Errors", unique_judges)
+        
+        # Rule errors by judge
+        st.subheader("Rule Errors by Judge")
+        judge_summary = rule_errors_df.groupby('judge_name').agg({
+            'judge_id': 'first',
+            'element_name': 'count'
+        }).rename(columns={'element_name': 'total_rule_errors'})
+        
+        # Count PCS vs Element errors (using element_type column to distinguish)
+        pcs_errors_count = rule_errors_df[rule_errors_df['element_name'] == ''].groupby('judge_name').size().fillna(0)
+        element_errors_count = rule_errors_df[rule_errors_df['element_name'] != ''].groupby('judge_name').size().fillna(0)
+        
+        judge_summary['pcs_errors'] = pcs_errors_count
+        judge_summary['element_errors'] = element_errors_count
+        judge_summary = judge_summary.sort_values('total_rule_errors', ascending=False).reset_index()
+        
+        judge_summary_display = judge_summary[['judge_name', 'total_rule_errors', 'pcs_errors', 'element_errors']].copy()
+        judge_summary_display.columns = ['Judge', 'Total Rule Errors', 'PCS Errors', 'Element Errors']
+        
+        st.dataframe(judge_summary_display, use_container_width=True)
+        
+        # Detailed rule errors table
+        st.subheader("Detailed Rule Errors")
+        
+        # Create display dataframe with proper competition links
+        display_df = rule_errors_df[[
+            'judge_name', 'competition_name', 'competition_url', 'competition_year',
+            'segment_name', 'discipline_name', 'skater_name', 'element_name', 'element_type',
+            'judge_score', 'panel_average', 'deviation'
+        ]].copy()
+        
+        display_df.columns = [
+            'Judge', 'Competition', 'Competition URL', 'Year',
+            'Segment', 'Discipline', 'Skater', 'Element Name', 'Element Type',
+            'Judge Score', 'Panel Average', 'Deviation'
+        ]
+        
+        st.dataframe(display_df.drop('Competition URL', axis=1), use_container_width=True)
+        
+        # Show competition links
+        if 'Competition URL' in display_df.columns and not display_df['Competition URL'].isna().all():
+            st.subheader("Competition Links")
+            unique_competitions = display_df[['Competition', 'Competition URL']].drop_duplicates()
+            for _, row in unique_competitions.iterrows():
+                if pd.notna(row['Competition URL']) and row['Competition URL']:
+                    st.markdown(f"[{row['Competition']}]({row['Competition URL']}/index.asp)")
 
 elif page == "Multi-Judge Comparison":
     st.header("Multi-Judge Comparison")
