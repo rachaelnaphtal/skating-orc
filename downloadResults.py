@@ -13,7 +13,9 @@ import re
 import openpyxl
 import time
 import pdfkit
-import database_loader
+from database import test_connection, get_db_session
+from database_loader import DatabaseLoader
+from sqlalchemy.orm import Session
 from openpyxl import Workbook
 from openpyxl.styles import (
     PatternFill,
@@ -347,9 +349,12 @@ def scrape(
     workbook = openpyxl.Workbook()
     agg_all_element_df = None
     agg_all_pcs_df = None
+    session = get_db_session()
+    database_obj = DatabaseLoader(session)
 
     if write_to_database:
-        competition_id = database_loader.insert_competition(report_name, base_url, year)
+        competition_id = database_obj.insert_competition(report_name, base_url, year)
+        proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
@@ -421,11 +426,13 @@ def scrape(
                 agg_all_element_df = pd.concat([agg_all_element_df, all_element_df])
 
             # write to database
-            if write_to_database:
-                segment_id = database_loader.insert_segment(event_name, competition_id)
-                database_loader.insert_element_scores(judgesNames, all_element_dict, segment_id, rule_errors)
-                database_loader.insert_pcs_scores(judgesNames, all_pcs_dict, segment_id)
-
+            if write_to_database and event_name not in proccessed_segments:
+                print(f"Writing segment {event_name}")
+                segment_id = database_obj.insert_segment(event_name, competition_id)
+                database_obj.insert_element_scores(judgesNames, all_element_dict, segment_id, rule_errors)
+                database_obj.insert_pcs_scores(judgesNames, all_pcs_dict, segment_id)
+            else:
+                print(f"Skipping segment {event_name}")
         # Sort sheets
         del workbook["Sheet"]
         workbook._sheets.sort(key=lambda ws: ws.title)
@@ -748,5 +755,11 @@ if __name__ == "__main__":
     # scrape(base_url, "2024_Pairs_Final_with_errors", ".?(Novice|Junior|Senior).?(Pairs).?")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2024/34290', "2024_Dance_Final", ".*(Novice|Junior|Senior).?(Dance).*")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/33513', "2023_Boston_NQS", "")
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "GlacierFalls2025", "", write_to_database=True)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35701', "PhiladelphiaSummerChallengeNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/34237', "2025USSynchroChamps", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "GlacierFallsSummerClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35895', "DuPageNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35719', "2025ColonialOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)

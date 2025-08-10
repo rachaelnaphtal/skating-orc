@@ -57,7 +57,6 @@ def make_gui():
 
 ## Layouts for different options
 
-
 def createCompetitionReportLayout():
     with st.expander("See more details"):
         st.markdown("""

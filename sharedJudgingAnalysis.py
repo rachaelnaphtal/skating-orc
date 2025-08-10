@@ -46,6 +46,7 @@ def categorizeElement(element):
         "Mi": "Mixed Element",
         "PB": "Pivoting Block",
         "ChSq": "ChSq",
+        "pChSq":"ChSq",
         "ChSl": "Choreo Element",
         "ChSt": "Choreo Element",
         "pChSt": "Choreo Element",
@@ -70,6 +71,7 @@ def categorizeElement(element):
         "CrEe":"Edge Element",
         "IBEe":"Edge Element",
         "SeSt":"Step Sequence",
+        "1Wz": "Jump"
     }
 
     if element in ["FiDs", "FoDs", "BiDs", "BoDs"]:
@@ -105,6 +107,8 @@ def categorizeElement(element):
     elif element.strip().endswith("Ee"):
         return "Edge Element"
     elif element.strip().startswith("A+"):
+        return "Jump"
+    elif "Wz" in element:
         return "Jump"
     print(f"Unable to categorize {element}")
     return element

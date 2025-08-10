@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
+from scipy import stats
+from scipy.stats import linregress
 from models import (
     Judge, Competition, Segment, DisciplineType, ElementType, 
     PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment,
@@ -669,7 +671,9 @@ class JudgeAnalytics:
                 'trend_strength': 0,
                 'consistency_score': 0,
                 'variance': 0,
-                'coefficient_variation': 0
+                'coefficient_variation': 0,
+                'slope': 0,
+                'p_value': 1.0
             }
         
         # Calculate trend metrics
@@ -677,7 +681,11 @@ class JudgeAnalytics:
         time_periods = range(len(values))
         
         # Linear regression for trend
-        slope, intercept, r_value, p_value, std_err = stats.linregress(time_periods, values)
+        try:
+            slope, intercept, r_value, p_value, std_err = linregress(time_periods, values)
+        except Exception as e:
+            # Handle cases where linregress fails (e.g., all values are the same)
+            slope, r_value, p_value = 0.0, 0.0, 1.0
         
         # Determine trend direction
         if abs(slope) < 0.1:
@@ -754,8 +762,11 @@ class JudgeAnalytics:
                 shapiro_stat_pcs, shapiro_p_pcs = 1.0, 1.0
             
             # Test 4: Outlier detection using z-score
-            z_scores_pcs = np.abs(stats.zscore(deviations))
-            outliers_pcs = np.sum(z_scores_pcs > 2.58)  # 99% confidence level
+            if len(deviations) > 1:
+                z_scores_pcs = np.abs(stats.zscore(deviations))
+                outliers_pcs = np.sum(z_scores_pcs > 2.58)  # 99% confidence level
+            else:
+                outliers_pcs = 0
             outlier_rate_pcs = outliers_pcs / len(deviations) if len(deviations) > 0 else 0
             
             results['pcs_tests'] = {
@@ -812,8 +823,11 @@ class JudgeAnalytics:
                 shapiro_stat_elem, shapiro_p_elem = 1.0, 1.0
             
             # Test 4: Outlier detection using z-score
-            z_scores_elem = np.abs(stats.zscore(deviations))
-            outliers_elem = np.sum(z_scores_elem > 2.58)  # 99% confidence level
+            if len(deviations) > 1:
+                z_scores_elem = np.abs(stats.zscore(deviations))
+                outliers_elem = np.sum(z_scores_elem > 2.58)  # 99% confidence level
+            else:
+                outliers_elem = 0
             outlier_rate_elem = outliers_elem / len(deviations) if len(deviations) > 0 else 0
             
             results['element_tests'] = {
@@ -904,6 +918,12 @@ class JudgeAnalytics:
     def compare_judge_distributions(self, judge_id_1, judge_id_2, score_type='both'):
         """Compare two judges' scoring distributions using statistical tests"""
         from scipy import stats
+        
+        # Initialize dataframes
+        pcs_df_1 = pd.DataFrame()
+        pcs_df_2 = pd.DataFrame()
+        element_df_1 = pd.DataFrame()
+        element_df_2 = pd.DataFrame()
         
         # Get data for both judges
         if score_type in ['pcs', 'both']:

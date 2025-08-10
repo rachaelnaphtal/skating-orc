@@ -116,55 +116,97 @@ def process_scores(pdf, event_regex="", use_gcp=False):
 
             # Match elements and judge scores
             element_match = re.match(
-                r"^(1?\d)(\s)*([\w\+\.\*<>!]+(?:\w+)?)\s+(?:([F*<!>qnscuSCUex]+)\s+)?(-?[\d\.]+x?)\s+(?:([F\*x]+)\s+)?(-?[\d\.]+)\s+(-?(?:-?\d\s+){3,9})\s*([\d\.]+\s)?([\d\.]+)",
+                r"""^
+                (1?\d)                                   # Element number
+                (\s)*                                    
+                ([\w\+\.\*<>!]+(?:\w+)?)                 # Element name
+                \s+
+                (?:([F*<!>qnscuSCUex]+)\s+)?             # Optional notes
+                (-?[\d\.]+x?)                            # Base value
+                \s+
+                (?:([F\*x]+)\s+)?                        # Optional flags
+                (-?[\d\.]+)                              # GOE
+                \s+
+                (-?(?:-?\d\s+){3,9})                     # Judge scores
+                \s*
+                ([\d\.]+\s)?                             # Optional referee score
+                ([\d\.]+)                                # Total score
+                """,
                 line,
+                re.VERBOSE,
             )
+
             pcs_match = re.match(
-                r"^\s*(Timing|Presentation|Skating\sSkills|Composition|Artistic\sAppeal)\s+([\d\.]+)\s+((?:[\d]{1,2}\.[\d]{2}\s*){3,9})([\d\.]+)",
+                r"""^\s*
+                (Timing|Presentation|Skating\sSkills|Composition|Artistic\sAppeal)  # Component
+                \s+
+                ([\d\.]+)                                    # Factor
+                \s+
+                ((?:\d{1,2}\.\d{2}\s*){3,9})                 # Per-judge scores
+                ([\d\.]+)                                    # Total
+                """,
                 line,
+                re.VERBOSE,
             )
+
             if current_skater and element_match:
-                # element_number = int(element_match.group(1))
+                element_number = int(element_match.group(1))
                 element_name = element_match.group(3)
-                # Fix parsing issues for SEQ< or SEQ<<
+                notes = element_match.group(4)
+                judge_scores_raw = element_match.group(8)
+                total_score = float(element_match.group(10))
+
+                # Clean up element name for SEQ< or SEQ<<
                 if element_name.endswith("SEQ<"):
                     element_name = element_name[:-1]
                 elif element_name.endswith("SEQ<<"):
-                    element_name = element_name[: len(element_name) - 2]
-                judges_scores = list(map(float, element_match.group(8).split()))
-                total_score = float(element_match.group(10))
-                notes = element_match.group(4)
-                element_number = int(element_match.group(1))
-                # scores = list(map(int, element_match.group(2).split()))
-                elements_per_skater[current_skater].append(
-                    {
-                        "Element": element_name,
-                        "Scores": judges_scores,
-                        "Value": total_score,
-                        "Notes": notes,
-                        "Number": element_number,
-                    }
-                )
+                    element_name = element_name[:-2]
+
+                judges_scores = list(map(float, judge_scores_raw.split()))
+
+                elements_per_skater[current_skater].append({
+                    "Element": element_name,
+                    "Scores": judges_scores,
+                    "Value": total_score,
+                    "Notes": notes,
+                    "Number": element_number,
+                })
+
             elif current_skater and pcs_match:
                 component = pcs_match.group(1)
-                no_spaces = pcs_match.group(3).replace(" ", "")
-                possible_missing_position=pcs_match.group(3).split(" ").index("")
+                raw_scores_with_spaces = pcs_match.group(3)
+                total_score = float(pcs_match.group(4))
+
+                # Attempt to detect missing position
+                score_tokens = raw_scores_with_spaces.split(" ")
+                try:
+                    possible_missing_position = score_tokens.index("")
+                except ValueError:
+                    possible_missing_position = None
+
+                # Reconstruct scores by joining chars until each decimal completes
+                no_spaces = raw_scores_with_spaces.replace(" ", "")
                 scores = []
-                current_score = ""
                 i = 0
+                current_score = ""
+
                 while i < len(no_spaces):
                     if no_spaces[i] == ".":
-                        current_score += no_spaces[i : i + 3]
+                        current_score += no_spaces[i:i+3]
                         i += 3
                         scores.append(current_score)
                         current_score = ""
                     else:
                         current_score += no_spaces[i]
                         i += 1
+
                 judges_scores = list(map(float, scores))
-                pcs_per_skater[current_skater].append(
-                    {"Component": component, "Scores": judges_scores, "Possible Missing Position":possible_missing_position}
-                )
+
+                pcs_per_skater[current_skater].append({
+                    "Component": component,
+                    "Scores": judges_scores,
+                    "Possible Missing Position": possible_missing_position
+                })
             if current_skater == None and (pcs_match or element_match):
                 print(
                     f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
@@ -664,7 +706,7 @@ def printToExcel(
 
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
-    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis/36.pdf"  # Update with the correct path
+    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/1.pdf"  # Update with the correct path
     excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/"
     tj_pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/FC.xlsx"
 
@@ -679,10 +721,10 @@ if __name__ == "__main__":
             "Name3",
             "Name4",
             "Name5",
-            "Name6",
-            "Name7",
-            "Name8",
-            "Name9",
+            # "Name6",
+            # "Name7",
+            # "Name8",
+            # "Name9",
         ],
         2,
         create_thrown_out_analysis=True

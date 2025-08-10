@@ -33,15 +33,6 @@ def get_db_session():
     print ("getdbsession")
     return SessionLocal()
 
-# def test_connection():
-#     """Test database connection"""
-#     try:
-#         with st.connection("postgresql", type="sql") as conn:
-#             result = conn.execute(text("SELECT 1"))
-#             return True
-#     except Exception as e:
-#         return False, str(e)
-    
 def test_connection():
     """Test database connection"""
     print(f"test connection {DATABASE_URL}")
