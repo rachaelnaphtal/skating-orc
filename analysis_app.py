@@ -78,7 +78,7 @@ st.title("⛸️ Figure Skating Judge Performance Analytics")
 page = st.sidebar.selectbox("Select Analysis Type", [
     "Individual Judge Analysis", "Multi-Judge Comparison", 
     "Judge Performance Heatmap", "Temporal Trend Analysis",
-    "Statistical Bias Detection", "Rule Errors Analysis"
+    "Rule Errors Analysis", "Competition Analysis"
 ])
 
 
@@ -1039,7 +1039,7 @@ if page == "Individual Judge Analysis":
                 })
 
             element_summary = element_df.groupby('element_type_name').apply(
-                analyze_element_issues).reset_index()
+                analyze_element_issues, include_groups=False).reset_index()
             element_summary['throwout_rate'] = (
                 element_summary['throwouts'] /
                 element_summary['total_scores']) * 100
@@ -1170,7 +1170,7 @@ if page == "Individual Judge Analysis":
                 })
 
             pcs_summary = pcs_df.groupby('pcs_type_name').apply(
-                analyze_pcs_issues).reset_index()
+                analyze_pcs_issues, include_groups=False).reset_index()
             pcs_summary['throwout_rate'] = (pcs_summary['throwouts'] /
                                             pcs_summary['total_scores']) * 100
             pcs_summary['anomaly_rate'] = (pcs_summary['anomalies'] /
@@ -1302,7 +1302,26 @@ if page == "Individual Judge Analysis":
                 'PCS Rule Errors', 'Element Rule Errors'
             ]
             
-            st.dataframe(segment_display_cols, use_container_width=True)
+            # Add totals row
+            totals_row = pd.DataFrame([{
+                'Competition': 'TOTAL',
+                'Year': '',
+                'Discipline': '',
+                'Segment': '',
+                'Skaters': segment_display_cols['Skaters'].sum(),
+                'Allowed Errors': segment_display_cols['Allowed Errors'].sum(),
+                'Total Anomalies': segment_display_cols['Total Anomalies'].sum(),
+                'Excess Anomalies': segment_display_cols['Excess Anomalies'].sum(),
+                'PCS Anomalies': segment_display_cols['PCS Anomalies'].sum(),
+                'Element Anomalies': segment_display_cols['Element Anomalies'].sum(),
+                'Total Rule Errors': segment_display_cols['Total Rule Errors'].sum(),
+                'PCS Rule Errors': segment_display_cols['PCS Rule Errors'].sum(),
+                'Element Rule Errors': segment_display_cols['Element Rule Errors'].sum()
+            }])
+            
+            segment_display_with_totals = pd.concat([segment_display_cols, totals_row], ignore_index=True)
+            
+            st.dataframe(segment_display_with_totals, use_container_width=True)
         else:
             st.info("No segment data found for selected filters")
 
@@ -1409,6 +1428,107 @@ elif page == "Rule Errors Analysis":
             for _, row in unique_competitions.iterrows():
                 if pd.notna(row['Competition URL']) and row['Competition URL']:
                     st.markdown(f"[{row['Competition']}]({row['Competition URL']}/index.asp)")
+
+elif page == "Competition Analysis":
+    st.header("Competition Analysis")
+    
+    # Competition selection
+    analytics = get_analytics_safe()
+    competitions = analytics.get_competitions()
+    if not competitions:
+        st.error("No competitions found in database")
+        st.stop()
+    
+    competition_options = {
+        f"{name} ({year})": comp_id
+        for comp_id, name, year in competitions
+    }
+    selected_competition = st.selectbox(
+        "Select Competition", 
+        list(competition_options.keys())
+    )
+    
+    if selected_competition:
+        competition_id = competition_options[selected_competition]
+        
+        # Get segment statistics for all judges in this competition efficiently
+        with st.spinner("Loading competition data..."):
+            segment_stats = st.cache_data(
+                analytics.get_competition_segment_statistics,
+                ttl=300  # Cache for 5 minutes
+            )(competition_id)
+        
+        if segment_stats.empty:
+            st.warning("No segment statistics found for this competition")
+        else:
+            # Calculate allowed errors function
+            def calculate_allowed_errors(skater_count):
+                if skater_count <= 10:
+                    return 1
+                elif skater_count <= 20:
+                    return 2
+                else:
+                    return 3
+            
+            # Build the judge-segment grid
+            st.subheader(f"Judge Performance Grid - {selected_competition}")
+            # Calculate allowed and excess anomalies
+            segment_stats['allowed_errors'] = segment_stats['skater_count'].apply(calculate_allowed_errors)
+            segment_stats['excess_anomalies'] = (segment_stats['total_anomalies'] - segment_stats['allowed_errors']).apply(lambda x: max(0, x))
+            
+            # Create the main grid showing total anomalies
+            anomalies_grid = segment_stats.pivot_table(
+                index=['discipline', 'segment_name'],
+                columns='judge_name',
+                values='total_anomalies',
+                fill_value=0,
+                aggfunc='sum'
+            )
+            
+            # Create grid for excess anomalies
+            excess_grid = segment_stats.pivot_table(
+                index=['discipline', 'segment_name'],
+                columns='judge_name',
+                values='excess_anomalies',
+                fill_value=0,
+                aggfunc='sum'
+            )
+            
+            # Replace 0s with empty strings for display but keep numeric for calculations
+            anomalies_grid_display = anomalies_grid.replace(0, '')
+            excess_grid_display = excess_grid.replace(0, '')
+            
+            # Display total anomalies grid
+            st.subheader("Total Anomalies by Judge and Segment")
+            if not anomalies_grid.empty:
+                st.dataframe(anomalies_grid_display, use_container_width=True)
+                
+                # Add judge totals for total anomalies
+                st.subheader("Judge Totals - Total Anomalies")
+                judge_totals_anomalies = anomalies_grid.sum().sort_values(ascending=False)
+                judge_totals_df_anomalies = pd.DataFrame({
+                    'Judge': judge_totals_anomalies.index,
+                    'Total Anomalies': judge_totals_anomalies.values
+                })
+                st.dataframe(judge_totals_df_anomalies, use_container_width=True)
+            else:
+                st.info("No anomalies data available for grid display")
+            
+            # Display excess anomalies grid
+            st.subheader("Excess Anomalies by Judge and Segment")
+            if not excess_grid.empty:
+                st.dataframe(excess_grid_display, use_container_width=True)
+                
+                # Add judge totals for excess anomalies
+                st.subheader("Judge Totals - Excess Anomalies")
+                judge_totals_excess = excess_grid.sum().sort_values(ascending=False)
+                judge_totals_df_excess = pd.DataFrame({
+                    'Judge': judge_totals_excess.index,
+                    'Total Excess Anomalies': judge_totals_excess.values
+                })
+                st.dataframe(judge_totals_df_excess, use_container_width=True)
+            else:
+                st.info("No excess anomalies data available for grid display")
 
 elif page == "Multi-Judge Comparison":
     st.header("Multi-Judge Comparison")
