@@ -761,5 +761,5 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35895', "DuPageNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35719', "2025ColonialOpen", "", write_to_database=True, pdf_folder=pdf_folder)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)

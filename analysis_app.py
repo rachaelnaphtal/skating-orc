@@ -1776,8 +1776,8 @@ st.sidebar.markdown("""
 This dashboard analyzes figure skating judge performance by examining:
 - **Throwout rates**: How often judges' scores are excluded from final calculations
 - **Deviation rates**: How often judges score significantly differently from the panel average
-- **PCS thresholds**: Deviations >1.5 points
-- **Element thresholds**: Deviations >2.0 points
+- **PCS thresholds**: Deviations >= 1.5 points
+- **Element thresholds**: Deviations >= 2.0 points
 
 Use the filters to focus your analysis on specific years, competitions, or discipline types.
 """)
