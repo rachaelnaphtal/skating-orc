@@ -323,6 +323,7 @@ def extract_judge_scores(
     only_rule_errors=False,
     use_gcp=False,
     create_thrown_out_analysis=False,
+    judge_filter=""
 ):
     (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
         pdf_path, event_regex, use_gcp=use_gcp
@@ -340,14 +341,14 @@ def extract_judge_scores(
         or "Girls" in event_name
     ):
         element_errors = findSinglesElementErrors(
-            elements_per_skater, judges, event_name
+            elements_per_skater, judges, event_name, judge_filter=judge_filter
         )
     elif "Pairs" in event_name:
-        element_errors = findPairsElementErrors(elements_per_skater, judges, event_name)
+        element_errors = findPairsElementErrors(elements_per_skater, judges, event_name, judge_filter=judge_filter)
 
     if not only_rule_errors:
-        element_deviations = findElementDeviations(elements_per_skater, judges)
-        pcs_errors = findPCSDeviations(pcs_per_skater, judges)
+        element_deviations = findElementDeviations(elements_per_skater, judges, judge_filter=judge_filter)
+        pcs_errors = findPCSDeviations(pcs_per_skater, judges, judge_filter=judge_filter)
     total_errors = count_total_errors_per_judge(
         judges, element_errors, element_deviations, pcs_errors
     )
@@ -401,7 +402,7 @@ def get_allowed_errors(num_skaters: int):
     return 3
 
 
-def findSinglesElementErrors(skater_scores, judges, event_name):
+def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter=""):
     errors = []
     for skater in skater_scores:
         for element in skater_scores[skater]:
@@ -411,6 +412,8 @@ def findSinglesElementErrors(skater_scores, judges, event_name):
 
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
+                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                    continue
                 # Must be -5 if  it is a short and there is a +COMBO or *
                 if (
                     "Short" in event_name
@@ -424,7 +427,7 @@ def findSinglesElementErrors(skater_scores, judges, event_name):
                             judgeNumber,
                             judges,
                             allScores,
-                            "Short Program NAR",
+                            "Short Program NAR"
                         )
                     )
                     continue
@@ -472,8 +475,8 @@ def findSinglesElementErrors(skater_scores, judges, event_name):
     return errors
 
 
-def findPairsElementErrors(skater_scores, judges, event_name):
-    return findSinglesElementErrors(skater_scores, judges, event_name)
+def findPairsElementErrors(skater_scores, judges, event_name, judge_filter=""):
+    return findSinglesElementErrors(skater_scores, judges, event_name, judge_filter=judge_filter)
 
 
 def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
@@ -492,7 +495,7 @@ def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
     }
 
 
-def findElementDeviations(skater_scores, judges):
+def findElementDeviations(skater_scores, judges, judge_filter=""):
     errors = []
     for skater in skater_scores:
         for element in skater_scores[skater]:
@@ -500,6 +503,8 @@ def findElementDeviations(skater_scores, judges):
             avg = sum(allScores) / len(allScores)
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
+                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                    continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if abs(deviation) >= 2:
                     # print (f"Deviation found for judge {judgeNumber} on skater {skater}, element {element["Element"]}")
@@ -518,14 +523,18 @@ def findElementDeviations(skater_scores, judges):
     return errors
 
 
-def findPCSDeviations(skater_scores, judges):
+def findPCSDeviations(skater_scores, judges, judge_filter=""):
     errors = []
     for skater in skater_scores:
         deviation_points = [float(0)] * (len(judges) + 1)
+        if len(skater_scores[skater]) == 0:
+            continue
         for component in skater_scores[skater]:
             allScores = component["Scores"]
             avg = sum(allScores) / len(allScores)
             for judgeNumber in range(1, len(allScores) + 1):
+                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                    continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5:
                     errors.append(

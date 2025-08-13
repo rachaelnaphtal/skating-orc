@@ -71,6 +71,7 @@ def processEvent(
     only_rule_errors=False,
     use_gcp=False,
     create_thrown_out_analysis=False,
+    judge_filter=""
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
@@ -85,6 +86,7 @@ def processEvent(
         only_rule_errors,
         use_gcp=use_gcp,
         create_thrown_out_analysis=create_thrown_out_analysis,
+        judge_filter=judge_filter
     )
 
 
@@ -342,7 +344,8 @@ def scrape(
     use_gcp=False,
     add_additional_analysis=False,
     write_to_database=False, 
-    year="2526"
+    year="2526",
+    judge_filter=""
 ):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
@@ -353,7 +356,7 @@ def scrape(
     database_obj = DatabaseLoader(session)
 
     if write_to_database:
-        competition_id = database_obj.insert_competition(report_name, base_url, year)
+        competition_id = database_obj.insert_competition(report_name.replace("_", " "), base_url, year)
         proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
 
     if page_contents:
@@ -385,6 +388,7 @@ def scrape(
                 only_rule_errors=only_rule_errors,
                 use_gcp=use_gcp,
                 create_thrown_out_analysis=add_additional_analysis or write_to_database,
+                judge_filter=judge_filter
             )
             if total_errors == None:
                 # This is an event to skip per the regex
@@ -398,6 +402,8 @@ def scrape(
             }
             for i in range(len(judgesNames)):
                 judge = judgesNames[i]
+                if len(judge_filter) > 0 and judge_filter!=judge:
+                    continue
                 if judge not in judge_errors:
                     judge_errors[judge] = {}
                 judge_errors[judge][event_name] = {
@@ -761,5 +767,9 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35895', "DuPageNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
+
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "2025_Glacier", event_regex=".*(Short|Free).*", write_to_database=False, judge_filter="Jaclyn Helms", pdf_folder=pdf_folder, year=2526)
+
+    

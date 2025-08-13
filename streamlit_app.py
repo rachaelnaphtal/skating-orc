@@ -81,6 +81,12 @@ def createCompetitionReportLayout():
             help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.",
             key="event_regex",
         )
+        st.text_input(
+            "Judge Filter (Optional)",
+            value="",
+            help="Enter the name of the judge you want on the report. If none are specified, all will be included.",
+            key="judge_filter",
+        )
         st.checkbox(
             "Include errors only?",
             help="Whether to only include rule errors.",
@@ -227,6 +233,7 @@ def generate_full_competition_report():
     url = st.session_state["url"].replace("/index.asp", "")
     report_name_value = st.session_state["report_name"]
     event_regex = st.session_state["event_regex"]
+    judge_filter = st.session_state["judge_filter"]
     only_include_errors = st.session_state["only_include_errors"]
     folder_name = LOCAL_RESULTS_FILES_PATH
     generate_analysis_sheet = st.session_state["generate_analysis_sheet"]
@@ -240,6 +247,7 @@ def generate_full_competition_report():
             excel_folder=folder_name,
             pdf_folder=f"{folder_name}PDFs/",
             use_gcp=USE_GCP,
+            judge_filter=judge_filter,
             only_rule_errors=only_include_errors,
             add_additional_analysis=generate_analysis_sheet,
         )
@@ -250,6 +258,7 @@ def generate_full_competition_report():
             excel_folder=folder_name,
             pdf_folder=f"{folder_name}PDFs/",
             use_gcp=USE_GCP,
+            judge_filter=judge_filter,
             only_rule_errors=only_include_errors,
             add_additional_analysis=generate_analysis_sheet,
         )
