@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_, text
+from sqlalchemy import func, and_, or_, text, select, case
 from scipy import stats
 from scipy.stats import linregress
+from collections import defaultdict
 from models import (
     Judge, Competition, Segment, DisciplineType, ElementType, 
     PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment,
@@ -98,79 +99,87 @@ class JudgeAnalytics:
         ).distinct()
         
         segment_stats = []
-        all_segment_ids = set()
+        all_segments = set()
         
         # Collect all segments
         for segment in pcs_segments:
-            all_segment_ids.add(segment.id)
+            all_segments.add(segment)
         for segment in element_segments:
-            all_segment_ids.add(segment.id)
+            all_segments.add(segment)
         
-        for segment_id in all_segment_ids:
-            segment = self.session.query(Segment).filter(Segment.id == segment_id).first()
-            if not segment:
+        all_segment_ids = [segment.id for segment in all_segments]
+        
+            # --- Pre-calculate skater counts ---
+        segment_skater_counts = dict(
+            self.session.execute(
+                select(SkaterSegment.segment_id, func.count())
+                .group_by(SkaterSegment.segment_id)
+                .filter(SkaterSegment.segment_id.in_(all_segment_ids))
+            ).all()
+        )
+
+        # --- PCS anomaly counts for this judge ---
+        pcs_counts = self.session.execute(
+            select(
+                SkaterSegment.segment_id,
+                func.count().label("pcs_anomalies"),
+                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
+            )
+            .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+            .filter(SkaterSegment.segment_id.in_(all_segment_ids))
+            .filter(PcsScorePerJudge.judge_id == judge_id)
+            .filter(or_(func.abs(PcsScorePerJudge.deviation) >= 1.5, PcsScorePerJudge.is_rule_error))
+            .group_by(SkaterSegment.segment_id)
+        ).all()
+
+        pcs_counts_dict = {seg_id: (pcs_anom, pcs_rule)
+                        for seg_id, pcs_anom, pcs_rule in pcs_counts}
+
+        # --- Element anomaly counts for this judge ---
+        element_counts = self.session.execute(
+            select(
+                SkaterSegment.segment_id,
+                func.count().label("element_anomalies"),
+                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("element_rule_errors")
+            )
+            .join(Element, ElementScorePerJudge.element_id == Element.id)
+            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+            .filter(SkaterSegment.segment_id.in_(all_segment_ids))
+            .filter(ElementScorePerJudge.judge_id == judge_id)
+            .filter(or_(func.abs(ElementScorePerJudge.deviation) >= 2, ElementScorePerJudge.is_rule_error))
+            .group_by(SkaterSegment.segment_id)
+        ).all()
+
+        element_counts_dict = {seg_id: (elem_anom, elem_rule)
+                            for seg_id, elem_anom, elem_rule in element_counts}
+
+        # --- Fetch judge info once ---
+        judge = self.session.get(Judge, judge_id)
+
+        # --- Assemble statistics ---
+        segment_stats = []
+        for segment in all_segments:
+            if segment.id not in segment_skater_counts:
                 continue
-                
-            # Count skaters in this segment
-            skater_count = self.session.query(SkaterSegment).filter(
-                SkaterSegment.segment_id == segment_id
-            ).count()
-            
-            # Count PCS anomalies
-            pcs_anomalies = self.session.query(PcsScorePerJudge).join(
-                SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-            ).filter(
-                PcsScorePerJudge.judge_id == judge_id,
-                SkaterSegment.segment_id == segment_id,
-                func.abs(PcsScorePerJudge.deviation) >= 1.5
-            ).count()
-            
-            # Count element anomalies
-            element_anomalies = self.session.query(ElementScorePerJudge).join(
-                Element, ElementScorePerJudge.element_id == Element.id
-            ).join(
-                SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-            ).filter(
-                ElementScorePerJudge.judge_id == judge_id,
-                SkaterSegment.segment_id == segment_id,
-                func.abs(ElementScorePerJudge.deviation) >= 2.0
-            ).count()
-            
-            # Count rule errors  
-            pcs_rule_errors = self.session.query(PcsScorePerJudge).join(
-                SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-            ).filter(
-                PcsScorePerJudge.judge_id == judge_id,
-                SkaterSegment.segment_id == segment_id,
-                PcsScorePerJudge.is_rule_error == True
-            ).count()
-            
-            element_rule_errors = self.session.query(ElementScorePerJudge).join(
-                Element, ElementScorePerJudge.element_id == Element.id
-            ).join(
-                SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-            ).filter(
-                ElementScorePerJudge.judge_id == judge_id,
-                SkaterSegment.segment_id == segment_id,
-                ElementScorePerJudge.is_rule_error == True
-            ).count()
-            
-            total_anomalies = pcs_anomalies + element_anomalies
-            total_rule_errors = pcs_rule_errors + element_rule_errors
-            
+
+            skater_count = segment_skater_counts[segment.id]
+
+            pcs_anom, pcs_rule = pcs_counts_dict.get(segment.id, (0, 0))
+            elem_anom, elem_rule = element_counts_dict.get(segment.id, (0, 0))
+
             segment_stats.append({
-                'segment_id': segment_id,
+                'segment_id': segment.id,
                 'competition_name': segment.competition.name,
                 'competition_year': segment.competition.year,
                 'discipline': segment.discipline_type.name,
                 'segment_name': segment.name,
                 'skater_count': skater_count,
-                'total_anomalies': total_anomalies,
-                'pcs_anomalies': pcs_anomalies,
-                'element_anomalies': element_anomalies,
-                'total_rule_errors': total_rule_errors,
-                'pcs_rule_errors': pcs_rule_errors,
-                'element_rule_errors': element_rule_errors
+                'total_anomalies': pcs_anom + elem_anom,
+                'pcs_anomalies': pcs_anom,
+                'element_anomalies': elem_anom,
+                'total_rule_errors': pcs_rule + elem_rule,
+                'pcs_rule_errors': pcs_rule,
+                'element_rule_errors': elem_rule
             })
         
         return pd.DataFrame(segment_stats)
@@ -178,135 +187,109 @@ class JudgeAnalytics:
     def get_competition_segment_statistics(self, competition_id):
         """Get segment statistics for all judges in a specific competition"""
         # Get all segments in this competition
-        segments = self.session.query(Segment).join(
+        segments_raw = self.session.execute(select(Segment).join(
             Competition, Segment.competition_id == Competition.id
         ).join(
             DisciplineType, Segment.discipline_type_id == DisciplineType.id
         ).filter(
             Competition.id == competition_id
+        )).all()
+
+        segments = [segment[0] for segment in segments_raw]
+
+        return pd.DataFrame(self.get_segment_statistics(segments))
+
+    
+    def get_segment_statistics(self, segments):
+        """Get segment statistics for all judges in a set of segments"""
+        segment_ids = [seg.id for seg in segments]
+
+        # --- Pre-calculate skater counts ---
+        segment_skater_counts = dict(
+            self.session.execute(
+                select(SkaterSegment.segment_id, func.count())
+                .group_by(SkaterSegment.segment_id)
+                .filter(SkaterSegment.segment_id.in_(segment_ids))
+            ).all()
+        )
+
+        # --- PCS anomaly counts per (segment_id, judge_id) ---
+        pcs_counts = self.session.execute(
+            select(
+                SkaterSegment.segment_id,
+                PcsScorePerJudge.judge_id,
+                func.count().label("pcs_anomalies"),
+                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
+            )
+            .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+            .filter(SkaterSegment.segment_id.in_(segment_ids))
+            .filter(or_(func.abs(PcsScorePerJudge.deviation) >= 1.5, PcsScorePerJudge.is_rule_error))
+            .group_by(SkaterSegment.segment_id, PcsScorePerJudge.judge_id)
         ).all()
-        
-        # Get all judges who participated in this competition (from both PCS and element scores)
-        pcs_judges = self.session.query(Judge.id, Judge.name).join(
-            PcsScorePerJudge, Judge.id == PcsScorePerJudge.judge_id
-        ).join(
-            SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-        ).join(
-            Segment, SkaterSegment.segment_id == Segment.id
-        ).filter(
-            Segment.competition_id == competition_id
-        ).distinct().all()
-        
-        element_judges = self.session.query(Judge.id, Judge.name).join(
-            ElementScorePerJudge, Judge.id == ElementScorePerJudge.judge_id
-        ).join(
-            Element, ElementScorePerJudge.element_id == Element.id
-        ).join(
-            SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-        ).join(
-            Segment, SkaterSegment.segment_id == Segment.id
-        ).filter(
-            Segment.competition_id == competition_id
-        ).distinct().all()
-        
-        # Combine judges
-        all_judges = set(pcs_judges + element_judges)
-        
-        # Pre-calculate skater counts for all segments to avoid repeated queries
-        segment_skater_counts = {}
-        for segment in segments:
-            segment_skater_counts[segment.id] = self.session.query(SkaterSegment).filter(
-                SkaterSegment.segment_id == segment.id
-            ).count()
-        
-        # Calculate statistics for each judge-segment combination
+
+        pcs_counts_dict = {(seg_id, judge_id): (pcs_anom, pcs_rule) 
+                        for seg_id, judge_id, pcs_anom, pcs_rule in pcs_counts}
+
+        # --- Element anomaly counts per (segment_id, judge_id) ---
+        element_counts = self.session.execute(
+            select(
+                SkaterSegment.segment_id,
+                ElementScorePerJudge.judge_id,
+                func.count().label("element_anomalies"),
+                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("element_rule_errors")
+            )
+            .join(Element, ElementScorePerJudge.element_id == Element.id)
+            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+            .filter(SkaterSegment.segment_id.in_(segment_ids))
+            .filter(or_(func.abs(ElementScorePerJudge.deviation) >= 2, ElementScorePerJudge.is_rule_error))
+            .group_by(SkaterSegment.segment_id, ElementScorePerJudge.judge_id)
+        ).all()
+
+        element_counts_dict = {(seg_id, judge_id): (elem_anom, elem_rule) 
+                            for seg_id, judge_id, elem_anom, elem_rule in element_counts}
+
+        # --- Collect judges involved in these segments ---
+        judge_ids = set(j for (_, j) in pcs_counts_dict.keys()) | set(j for (_, j) in element_counts_dict.keys())
+        judges = self.session.execute(
+            select(Judge).filter(Judge.id.in_(judge_ids))
+        ).scalars().all()
+        judge_map = {j.id: j for j in judges}
+
+        # --- Assemble statistics ---
         segment_stats = []
         for segment in segments:
-            for judge_id, judge_name in all_judges:
-                # More efficient existence check using exists()
-                has_pcs_scores = self.session.query(PcsScorePerJudge.id).join(
-                    SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    PcsScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id
-                ).first() is not None
-                
-                has_element_scores = self.session.query(ElementScorePerJudge.id).join(
-                    Element, ElementScorePerJudge.element_id == Element.id
-                ).join(
-                    SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    ElementScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id
-                ).first() is not None
-                
-                # Only process if judge actually scored this segment
-                if not (has_pcs_scores or has_element_scores):
-                    continue
-                
-                # Use pre-calculated skater count
-                skater_count = segment_skater_counts[segment.id]
-                
-                # Count PCS anomalies
-                pcs_anomalies = self.session.query(PcsScorePerJudge).join(
-                    SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    PcsScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id,
-                    func.abs(PcsScorePerJudge.deviation) >= 1.5
-                ).count()
-                
-                # Count element anomalies
-                element_anomalies = self.session.query(ElementScorePerJudge).join(
-                    Element, ElementScorePerJudge.element_id == Element.id
-                ).join(
-                    SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    ElementScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id,
-                    func.abs(ElementScorePerJudge.deviation) >= 2.0
-                ).count()
-                
-                # Count rule errors
-                pcs_rule_errors = self.session.query(PcsScorePerJudge).join(
-                    SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    PcsScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id,
-                    PcsScorePerJudge.is_rule_error == True
-                ).count()
-                
-                element_rule_errors = self.session.query(ElementScorePerJudge).join(
-                    Element, ElementScorePerJudge.element_id == Element.id
-                ).join(
-                    SkaterSegment, Element.skater_segment_id == SkaterSegment.id
-                ).filter(
-                    ElementScorePerJudge.judge_id == judge_id,
-                    SkaterSegment.segment_id == segment.id,
-                    ElementScorePerJudge.is_rule_error == True
-                ).count()
-                
-                total_anomalies = pcs_anomalies + element_anomalies
-                total_rule_errors = pcs_rule_errors + element_rule_errors
-                
+            if segment.id not in segment_skater_counts:
+                continue
+
+            skater_count = segment_skater_counts[segment.id]
+
+            # Find all judges that had scores in this segment
+            segment_judge_ids = {j for (seg_id, j) in pcs_counts_dict if seg_id == segment.id}
+            segment_judge_ids |= {j for (seg_id, j) in element_counts_dict if seg_id == segment.id}
+
+            for judge_id in segment_judge_ids:
+                pcs_anom, pcs_rule = pcs_counts_dict.get((segment.id, judge_id), (0, 0))
+                elem_anom, elem_rule = element_counts_dict.get((segment.id, judge_id), (0, 0))
+
+                judge = judge_map[judge_id]
                 segment_stats.append({
-                    'judge_id': judge_id,
-                    'judge_name': judge_name,
+                    'judge_id': judge.id,
+                    'judge_name': judge.name,
                     'segment_id': segment.id,
                     'segment_name': segment.name,
                     'competition_name': segment.competition.name,
                     'competition_year': segment.competition.year,
                     'discipline': segment.discipline_type.name,
                     'skater_count': skater_count,
-                    'total_anomalies': total_anomalies,
-                    'pcs_anomalies': pcs_anomalies,
-                    'element_anomalies': element_anomalies,
-                    'total_rule_errors': total_rule_errors,
-                    'pcs_rule_errors': pcs_rule_errors,
-                    'element_rule_errors': element_rule_errors
+                    'total_anomalies': pcs_anom + elem_anom,
+                    'pcs_anomalies': pcs_anom,
+                    'element_anomalies': elem_anom,
+                    'total_rule_errors': pcs_rule + elem_rule,
+                    'pcs_rule_errors': pcs_rule,
+                    'element_rule_errors': elem_rule
                 })
-        
-        return pd.DataFrame(segment_stats)
+
+        return segment_stats
     
     def get_all_rule_errors(self, year_filter=None, competition_ids=None, judge_ids=None):
         """Get all rule errors with optional filters"""
@@ -499,7 +482,7 @@ class JudgeAnalytics:
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
             'skater_name': r.skater_name,
-            'anomaly': abs(float(r.deviation)) >= 1.5
+            'anomaly': abs(float(r.deviation)) >= 1.5 or r.is_rule_error
         } for r in results])
         
         return df
@@ -559,7 +542,7 @@ class JudgeAnalytics:
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
             'skater_name': r.skater_name,
-            'anomaly': abs(float(r.deviation)) >= 2.0
+            'anomaly': abs(float(r.deviation)) >= 2.0 or r.is_rule_error
         } for r in results])
         
         return df
@@ -609,7 +592,7 @@ class JudgeAnalytics:
             'competition_name': r.competition_name,
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
-            'anomaly': abs(float(r.deviation)) >= 1.5
+            'anomaly': abs(float(r.deviation)) >= 1.5 or r.is_rule_error
         } for r in results])
         
         return df
@@ -662,7 +645,7 @@ class JudgeAnalytics:
             'competition_name': r.competition_name,
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
-            'anomaly': abs(float(r.deviation)) >= 2.0
+            'anomaly': abs(float(r.deviation)) >= 2.0 or r.is_rule_error
         } for r in results])
         
         return df
@@ -713,6 +696,11 @@ class JudgeAnalytics:
         
         judges = judge_query.all()
         judge_data = []
+
+        all_excess_anomalies = defaultdict(int)
+        if metric=='excess_anomalies':
+            all_excess_anomalies = self._calculate_all_judge_excess_anomalies(year_filter, competition_ids, discipline_type_ids, score_type)
+            
         
         for judge_id, judge_name in judges:
             # Get PCS and Element data for this judge
@@ -764,6 +752,9 @@ class JudgeAnalytics:
                         value = (total_rule_errors / total_scores) * 100
                     else:
                         value = 0
+            elif metric == 'excess_anomalies':
+                # Calculate excess anomalies using the same logic as Individual Judge Analysis
+                value = all_excess_anomalies[judge_id]
             else:  # avg_deviation
                 if score_type == 'pcs':
                     value = abs(stats['pcs_avg_deviation']) if stats['pcs_total_scores'] > 0 else 0
@@ -809,6 +800,10 @@ class JudgeAnalytics:
                     
                 stats = self.calculate_judge_summary_stats(pcs_df, element_df)
                 
+                excess_anomalies = defaultdict(int)
+                if metric == 'excess_anomalies':
+                    excess_anomalies = self._calculate_all_judge_excess_anomalies(None, [comp_id], None, score_type)
+               
                 # Calculate the requested metric
                 if metric == 'throwout_rate':
                     if score_type == 'pcs':
@@ -849,6 +844,11 @@ class JudgeAnalytics:
                             value = (total_rule_errors / total_scores) * 100
                         else:
                             continue
+                elif metric == 'excess_anomalies':
+                    # Calculate excess anomalies for this specific competition
+                    value = excess_anomalies[judge_id]
+                    if value == 0:
+                        continue
                 else:  # avg_deviation
                     if score_type == 'pcs':
                         value = abs(stats['pcs_avg_deviation']) if stats['pcs_total_scores'] > 0 else 0
@@ -871,6 +871,67 @@ class JudgeAnalytics:
                 })
         
         return pd.DataFrame(heatmap_data)
+    
+    def calculate_allowed_errors(self, skater_count):
+                if skater_count <= 10:
+                    return 1
+                elif skater_count <= 20:
+                    return 2
+                else:
+                    return 3
+
+    def _calculate_all_judge_excess_anomalies(self, year_filter=None, competition_ids=None, discipline_ids=None, score_type='both'):
+        """Calculate excess anomalies for all judges using optimized batch queries"""
+        
+        # Single query to get all segment data with skater counts that match filters
+        base_query = select(Segment).join(
+            Competition, Segment.competition_id == Competition.id
+        ).join(
+            DisciplineType, Segment.discipline_type_id == DisciplineType.id
+        )
+        
+        # Apply filters to base query
+        if year_filter:
+            base_query = base_query.filter(Competition.year == year_filter)
+        if competition_ids:
+            base_query = base_query.filter(Competition.id.in_(competition_ids))
+        if discipline_ids:
+            base_query = base_query.filter(Segment.discipline_type_id.in_(discipline_ids))
+        
+        segments_raw = self.session.execute(base_query).all()
+        segments = [segment[0] for segment in segments_raw]
+
+        statistics = self.get_segment_statistics(segments)
+
+        excess_per_judge = defaultdict(int)
+        judges = set(stat["judge_id"] for stat in statistics)
+
+        for judge_id in judges:
+            excess = 0
+            relevant_statistics = [stat for stat in statistics if stat["judge_id"] == judge_id]
+            segment_ids = {stat["segment_id"] for stat in relevant_statistics}
+
+            for segment_id in segment_ids:
+                # determine observed anomalies for this segment & judge
+                if score_type == 'pcs':
+                    observed = sum(stat["pcs_anomalies"] for stat in relevant_statistics if stat["segment_id"] == segment_id)
+                elif score_type == 'element':
+                    observed = sum(stat["element_anomalies"] for stat in relevant_statistics if stat["segment_id"] == segment_id)
+                else:  # both
+                    observed = sum(stat["total_anomalies"] for stat in relevant_statistics if stat["segment_id"] == segment_id)
+
+                allowed = self.calculate_allowed_errors(
+                    next(stat["skater_count"] for stat in relevant_statistics if stat["segment_id"] == segment_id)
+                )
+
+                # excess anomalies only count if observed > allowed
+                excess += max(0, observed - allowed)
+
+            excess_per_judge[judge_id] = excess
+
+        return excess_per_judge
+
+        
     
     def get_temporal_trends_data(self, judge_id=None, period='year', metric='throwout_rate', score_type='both'):
         """Get temporal trends data for judge consistency over time"""

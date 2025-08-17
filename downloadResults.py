@@ -17,6 +17,7 @@ from database import test_connection, get_db_session
 from database_loader import DatabaseLoader
 from sqlalchemy.orm import Session
 from openpyxl import Workbook
+from datetime import datetime
 from openpyxl.styles import (
     PatternFill,
     Border,
@@ -331,8 +332,26 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     soup = BeautifulSoup(page_contents, "html.parser")
     link = soup.find("a", href=True, string="Judge detail scores")
     judgesNames = findJudgesNames(soup)
-    return (link["href"], judgesNames)
+    event_name = soup.find_all('h1')[0].get_text()
+    return (link["href"], judgesNames, event_name)
 
+def loadCompetitionInfo(base_url):
+    page_contents = get_page_contents(base_url)
+    soup = BeautifulSoup(page_contents, "html.parser")
+    all_h3_tags = soup.find_all('h3')
+    date = all_h3_tags[0].get_text().split(" ")
+    start_date = date[0]
+    end_date = date[2]
+    location = all_h3_tags[2].get_text()
+    return (start_date, end_date, location)
+
+def loadInfoForExistingCompetitions():
+    session = get_db_session()
+    database_obj = DatabaseLoader(session)
+    urls = database_obj.getCompetitionUrlsWithNoLocation()
+    for url in urls:
+        (start_date, end_date, location) = loadCompetitionInfo(f"{url}/index.asp")
+        database_obj.updateCompetition(url, location=location, start_date=start_date, end_date=end_date)
 
 def scrape(
     base_url,
@@ -345,7 +364,8 @@ def scrape(
     add_additional_analysis=False,
     write_to_database=False, 
     year="2526",
-    judge_filter=""
+    judge_filter="",
+    specific_exclude=""
 ):
     url = f"{base_url}/index.asp"
     page_contents = get_page_contents(url)
@@ -365,9 +385,20 @@ def scrape(
         event_details = {}
         detailed_rule_errors = []
         for i in range(len(links)):
-            (resultsLink, judgesNames) = findResultsDetailUrlAndJudgesNames(
+            (resultsLink, judgesNames, event_name) = findResultsDetailUrlAndJudgesNames(
                 base_url, links[i]["href"]
             )
+            # event_name_formatted = (
+            #     event_name
+            #     .replace("/", "")
+            #     .replace(" ", "_")
+            #     .replace("__", "_")
+            #     .replace("-", "_")
+            # )
+            # event_name_formatted = event_name_formatted.split("/")[0]
+            # event_name_formatted = event_name_formatted.split(":")[0]
+            if specific_exclude and re.match(specific_exclude, event_name):
+                continue
             (
                 event_name,
                 total_errors,
@@ -433,7 +464,7 @@ def scrape(
 
             # write to database
             if write_to_database and event_name not in proccessed_segments:
-                print(f"Writing segment {event_name}")
+                print(f"Writing segment {event_name} {datetime.now().strftime("%H:%M:%S")}")
                 segment_id = database_obj.insert_segment(event_name, competition_id)
                 database_obj.insert_element_scores(judgesNames, all_element_dict, segment_id, rule_errors)
                 database_obj.insert_pcs_scores(judgesNames, all_pcs_dict, segment_id)
@@ -466,7 +497,7 @@ def scrape(
         create_additional_analysis_sheet(
             agg_all_element_df, agg_all_pcs_df, excel_folder, report_name, use_gcp=use_gcp
         )
-    print("Finished " + report_name)
+    print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
     return df_dict, errors_dict_to_return
 
 
@@ -770,6 +801,44 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
 
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "2025_Glacier", event_regex=".*(Short|Free).*", write_to_database=False, judge_filter="Jaclyn Helms", pdf_folder=pdf_folder, year=2526)
-
+#     scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30614', '2023_Eastern_Sectional_Singles_&_U.S._Ice_Dance_Final', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/32047', '2023_Midwestern_Sectional_Singles_&_U.S._Pairs_Final', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30618', '2023_Pacific_Coast_Sectional_Singles_Final', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/30876', '2023_U.S._Figure_Skating_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30513', '2022_Dallas_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30663', '2022_Cactus_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+# scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30389', '2022_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30600', '2022_Lake_Placid_Ice_Dance_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="15_22 Junior Combined Dance")
     
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30696', '2022_DuPage_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30702', '2022_Philadelphia_Summer_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30686', '2022_Scott_Hamilton_Invitational_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30718', '2022_Cranberry_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30444', '2022_Copper_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30642', '2022_Potomac_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30709', '2022_Southern_California_Open_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30631', '2022_Sherwood_Invitational_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30628', '2022_Skate_Houston_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30700', '2022_Middle_Atlantic_Figure_Skating_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30707', '2022_Greater_Chicagoland_Fall_Invitational_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30677', '2022_Skate_St._Moritz_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30869', '2022_Austin_Autumn_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/30903', '2023_US_Synchronized_Skating_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/30556', '2022_Eastern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/30555', '2021_Pacific_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2023/30554', '2020_Midwestern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+   
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35783', '2025_Potomac_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    loadInfoForExistingCompetitions()
+
+    #Issues
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30670', '2022_John_Smith_Memorial_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude='314 Juvenile Boys SP')
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30472', '2022_Cup_of_Colorado_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="(47) Intermediate Pairs")
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30692', '2022_Pasadena_Open_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # Dance
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30629', '2022_Glacier_Falls_Summer_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30690', '2022_Silicon_Valley_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30693', '2022_Onyx_Challenge_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30712', '2022_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)

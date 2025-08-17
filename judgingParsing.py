@@ -220,10 +220,10 @@ def process_scores(pdf, event_regex="", use_gcp=False):
         expected = float(skater_details[skater])
         if foundElements != expected:
             print(
-                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
+                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
             st.error(
-                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements} {pdf_path}"
+                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
@@ -240,6 +240,8 @@ def create_all_element_dict(judges, elements_per_skater, event_name):
             all_scores = element["Scores"]
             avg = sum(all_scores) / len(all_scores)
             judgeNumber = 1
+            if len(all_scores)< len(judges):
+                raise ValueError(f"Missing components in {event_name} for {skater}, element: {element}")
             for judge in judges:
                 judge_score = all_scores[judgeNumber - 1]
                 deviation = judge_score - avg

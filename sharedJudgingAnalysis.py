@@ -52,13 +52,16 @@ def categorizeElement(element):
         "pChSt": "Choreo Element",
         "ChAJ": "Choreo Element",
         "ChRS": "Choreo Element",
+        "ChHy": "Choreo Element",
         "SyTwW": "Twizzle",
         "SeStW": "Step Sequence",
         "DiStW": "Step Sequence",
         "MiStW": "Step Sequence",
         "CiStW": "Step Sequence",
+        "SoPSt": "Step Sequence",
         "PSt": "Step Sequence",
         "OFTW": "Step Sequence",
+        "SoOFT": "Step Sequence",
         "SqTwW": "Twizzle",
         "ChTw": "Twizzle",
         "PiF": "Pivot Figure",
@@ -71,7 +74,10 @@ def categorizeElement(element):
         "CrEe":"Edge Element",
         "IBEe":"Edge Element",
         "SeSt":"Step Sequence",
-        "1Wz": "Jump"
+        "1Wz": "Jump",
+        "SoOFSt": "Step Sequence",
+        "1MB": "Pattern dance",
+        "1M": "Pattern dance",
     }
 
     if element in ["FiDs", "FoDs", "BiDs", "BoDs"]:
@@ -90,7 +96,7 @@ def categorizeElement(element):
         return "Spin"
     elif element.endswith("Th"):
         return "Lift"
-    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F"]:
+    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F","H"]:
         return "Jump"
     elif element.endswith("+pi") or element == "I":
         return "Intersection"
@@ -110,6 +116,8 @@ def categorizeElement(element):
         return "Jump"
     elif "Wz" in element:
         return "Jump"
+    elif element.strip().startswith("SlLi4+RoLi4*"):
+        return "Lift"
     print(f"Unable to categorize {element}")
     return element
 

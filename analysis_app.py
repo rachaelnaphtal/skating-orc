@@ -8,6 +8,7 @@ from scipy import stats
 
 from database import get_db_session, test_connection
 from analytics import JudgeAnalytics
+from sqlalchemy import text
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -63,12 +64,26 @@ def get_analytics():
         st.stop()
 
 
-# Lazy load analytics only when needed
+# Lazy load analytics only when needed with connection retry
 def get_analytics_safe():
-    """Safely get analytics object with error handling"""
+    """Safely get analytics object with error handling and retry logic"""
     if 'analytics' not in st.session_state:
         st.session_state.analytics = get_analytics()
-    return st.session_state.analytics
+    
+    # Check if we need to refresh the connection
+    try:
+        # Simple test query to check if connection is still alive
+        analytics = st.session_state.analytics
+        analytics.session.execute(text("SELECT 1"))
+        return analytics
+    except Exception as e:
+        st.warning("Database connection lost, reconnecting...")
+        # Clear cached analytics and reconnect
+        if 'analytics' in st.session_state:
+            del st.session_state.analytics
+        st.cache_resource.clear()
+        st.session_state.analytics = get_analytics()
+        return st.session_state.analytics
 
 
 # Main title
@@ -96,13 +111,14 @@ def judge_performance_heatmap():
 
     with col2:
         metric = st.selectbox("Performance Metric", [
-            "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation"
+            "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation", "excess_anomalies"
         ],
                               format_func=lambda x: {
                                   "throwout_rate": "Throwout Rate (%)",
                                   "anomaly_rate": "Anomaly Rate (%)",
                                   "rule_error_rate": "Rule Error Rate (%)",
-                                  "avg_deviation": "Average Deviation"
+                                  "avg_deviation": "Average Deviation",
+                                  "excess_anomalies": "Total Excess Anomalies"
                               }[x])
 
     with col3:
@@ -146,14 +162,24 @@ def judge_performance_heatmap():
                 if name in selected_disciplines
             ] if selected_disciplines else None
 
-        # Get heatmap data
-        with st.spinner("Loading heatmap data..."):
-            heatmap_df = analytics.get_judge_performance_heatmap_data(
+        # Get heatmap data with caching
+        @st.cache_data(ttl=300)  # 5-minute cache
+        def get_cached_heatmap_data(metric, score_type, year_filter, competition_ids_tuple, discipline_ids_tuple):
+            analytics = get_analytics_safe()
+            return analytics.get_judge_performance_heatmap_data(
                 metric=metric,
                 score_type=score_type,
                 year_filter=year_filter,
-                competition_ids=competition_ids,
-                discipline_type_ids=discipline_ids)
+                competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
+                discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None)
+        
+        with st.spinner("Loading heatmap data..."):
+            # Convert lists to tuples for caching
+            comp_ids_tuple = tuple(competition_ids) if competition_ids else None
+            disc_ids_tuple = tuple(discipline_ids) if discipline_ids else None
+            
+            heatmap_df = get_cached_heatmap_data(
+                metric, score_type, year_filter, comp_ids_tuple, disc_ids_tuple)
 
         if heatmap_df.empty:
             st.warning("No data found for selected filters")
@@ -164,7 +190,8 @@ def judge_performance_heatmap():
             "throwout_rate": "Throwout Rate (%)",
             "anomaly_rate": "Anomaly Rate (%)",
             "rule_error_rate": "Rule Error Rate (%)",
-            "avg_deviation": "Average Deviation"
+            "avg_deviation": "Average Deviation",
+            "excess_anomalies": "Total Excess Anomalies"
         }
 
         # Sort by metric value for better visualization
@@ -221,7 +248,8 @@ def judge_performance_heatmap():
             "throwout_rate": "Throwout Rate (%)",
             "anomaly_rate": "Anomaly Rate (%)",
             "rule_error_rate": "Rule Error Rate (%)",
-            "avg_deviation": "Average Deviation"
+            "avg_deviation": "Average Deviation",
+            "excess_anomalies": "Total Excess Anomalies"
         }
 
         fig = px.imshow(
@@ -1776,8 +1804,8 @@ st.sidebar.markdown("""
 This dashboard analyzes figure skating judge performance by examining:
 - **Throwout rates**: How often judges' scores are excluded from final calculations
 - **Deviation rates**: How often judges score significantly differently from the panel average
-- **PCS thresholds**: Deviations >= 1.5 points
-- **Element thresholds**: Deviations >= 2.0 points
+- **PCS thresholds**: Deviations >=1.5 points
+- **Element thresholds**: Deviations >=2.0 points
 
 Use the filters to focus your analysis on specific years, competitions, or discipline types.
 """)

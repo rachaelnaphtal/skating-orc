@@ -13,6 +13,17 @@ class DatabaseLoader:
     def __init__(self, session: Session):
         self.session = session
 
+    def getCompetitionUrlsWithNoLocation(self):
+        competitions = (self.session.query(Competition).filter(Competition.location == None).all())
+        return [competition.results_url for competition in competitions]
+    
+    def updateCompetition(self, url, location, start_date, end_date):
+        existing = self.session.query(Competition).filter_by(results_url=url).first()
+        existing.location = location
+        existing.start_date = start_date
+        existing.end_date = end_date
+        self.session.commit()
+    
     def getSegmentNamesForCompetition(self, url):
         segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
         return [segment.name for segment in segments]
