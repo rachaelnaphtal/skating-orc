@@ -111,14 +111,15 @@ def judge_performance_heatmap():
 
     with col2:
         metric = st.selectbox("Performance Metric", [
-            "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation", "excess_anomalies"
+            "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation", "excess_anomalies", "rule_errors"
         ],
                               format_func=lambda x: {
                                   "throwout_rate": "Throwout Rate (%)",
                                   "anomaly_rate": "Anomaly Rate (%)",
                                   "rule_error_rate": "Rule Error Rate (%)",
                                   "avg_deviation": "Average Deviation",
-                                  "excess_anomalies": "Total Excess Anomalies"
+                                  "excess_anomalies": "Total Excess Anomalies",
+                                  "rule_errors": "Total Rule Errors"
                               }[x])
 
     with col3:
@@ -191,7 +192,8 @@ def judge_performance_heatmap():
             "anomaly_rate": "Anomaly Rate (%)",
             "rule_error_rate": "Rule Error Rate (%)",
             "avg_deviation": "Average Deviation",
-            "excess_anomalies": "Total Excess Anomalies"
+            "excess_anomalies": "Total Excess Anomalies",
+            "rule_errors": "Total Rule Errors"
         }
 
         # Sort by metric value for better visualization
@@ -249,7 +251,8 @@ def judge_performance_heatmap():
             "anomaly_rate": "Anomaly Rate (%)",
             "rule_error_rate": "Rule Error Rate (%)",
             "avg_deviation": "Average Deviation",
-            "excess_anomalies": "Total Excess Anomalies"
+            "excess_anomalies": "Total Excess Anomalies",
+            "rule_errors": "Total Rule Errors"
         }
 
         fig = px.imshow(
