@@ -132,11 +132,15 @@ def findJudgesNames(soup):
     alltd = soup.find_all("td")
     judges = []
     nextJudge = False
+    judgeNumber=1
     for td in alltd:
         if td.text.count("Judge ") > 0:
             nextJudge = True
+            judgeNumber = int(td.text.replace("Judge ",""))
+            while len(judges) < judgeNumber:
+                judges.append("")
         elif nextJudge:
-            judges.append(td.text.split(",")[0])
+            judges[judgeNumber-1] = td.text.split(",")[0]
             nextJudge = False
     return judges
 
@@ -350,7 +354,10 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     link = soup.find("a", href=True, string="Judge detail scores")
     judgesNames = findJudgesNames(soup)
     event_name = soup.find_all('h1')[0].get_text()
-    return (link["href"], judgesNames, event_name)
+    details_link=""
+    if link is not None:
+        details_link = link["href"]
+    return (details_link, judgesNames, event_name)
 
 def loadCompetitionInfo(base_url):
     page_contents = get_page_contents(base_url)
@@ -396,6 +403,8 @@ def scrape(
     if write_to_database:
         competition_id = database_obj.insert_competition(report_name.replace("_", " "), base_url, year)
         proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
+        (start_date, end_date, location) = loadCompetitionInfo(f"{base_url}/index.asp")
+        database_obj.updateCompetition(base_url, location=location, start_date=start_date, end_date=end_date)
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
@@ -415,7 +424,7 @@ def scrape(
             # )
             # event_name_formatted = event_name_formatted.split("/")[0]
             # event_name_formatted = event_name_formatted.split(":")[0]
-            if specific_exclude and re.match(specific_exclude, event_name):
+            if specific_exclude and (event_name == specific_exclude or re.match(specific_exclude, event_name)):
                 continue
     
             (
@@ -816,19 +825,28 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/34237', "2025USSynchroChamps", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "GlacierFallsSummerClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35895', "DuPageNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
+    
+    # findResultsDetailUrlAndJudgesNames("https://ijs.usfigureskating.org/leaderboard/results/2025/36275", "CAT023SEG042.html")
+    
+    
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
 
     #Issues
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30670', '2022_John_Smith_Memorial_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude='314 Juvenile Boys SP')
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30472', '2022_Cup_of_Colorado_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="(47) Intermediate Pairs")
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30670', '2022_John_Smith_Memorial_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, event_regex=".*(Women|Men|Boys|Girls).*")
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30472', '2022_Cup_of_Colorado_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30692', '2022_Pasadena_Open_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
-    # Dance
+    # # Dance
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30629', '2022_Glacier_Falls_Summer_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30690', '2022_Silicon_Valley_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30693', '2022_Onyx_Challenge_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30712', '2022_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30712', '2022_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="Intermediate Men Combined (202 - 209)")
+
+    # 202526 NQS
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36180', '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664', '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35905', '2025_Silver_State_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
 
     loadInfoForExistingCompetitions()

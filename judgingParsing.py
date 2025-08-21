@@ -269,6 +269,10 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
     pcs_per_skater = defaultdict(list)
     skater_details = {}
     event_name = soup.find_all(class_="catseg")[0].text.replace("/", "")
+    event_name = event_name.replace("/", "").replace(" ", "_").replace("__", "_").replace("-", "_")
+            
+    event_name = event_name.split("/")[0]
+    event_name = event_name.split(":")[0]
     
     skater_element_pairs = extract_skater_element_sections(soup)
 
@@ -887,13 +891,13 @@ if __name__ == "__main__":
             "Name4",
             "Name5",
             "Name6",
-            # "Name7",
+            "Name7",
             # "Name8",
             # "Name9",
         ],
         2,
         use_html=True,
-        url='https://ijs.usfigureskating.org/leaderboard/results/2023/33415/SEGM007.html',
+        url='https://ijs.usfigureskating.org/leaderboard/results/2025/36275/SEGM042.html',
         create_thrown_out_analysis=True
     )
     excel_path = f"{excel_path}DeviationsReport2.xlsx"
