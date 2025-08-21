@@ -17,6 +17,7 @@ def categorizeElement(element):
         element = element.replace("+SeStM", "")
         element = element.replace("+SqTwM", "")
         element = element.replace("+MiStM", "")
+        element = element.replace("+pSTwM", "")
         # element = element.replace("+SeEe", "")
     if element[-1] == "V":
         element = element[:-1]
@@ -57,6 +58,7 @@ def categorizeElement(element):
         "SeStW": "Step Sequence",
         "DiStW": "Step Sequence",
         "MiStW": "Step Sequence",
+        "pSTwW": "Twizzle",
         "CiStW": "Step Sequence",
         "SoPSt": "Step Sequence",
         "PSt": "Step Sequence",
