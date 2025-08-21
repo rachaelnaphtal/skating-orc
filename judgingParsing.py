@@ -110,7 +110,8 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     pcs_per_skater[current_skater] = []
                     skater_details[current_skater] = technical_score
                 if int(skater_match.group(1)) != len(elements_per_skater.keys()):
-                    print(f"Missing skater in {event_name}. Next is {current_skater}")
+                    print(
+                        f"Missing skater in {event_name}. Next is {current_skater}")
                     st.error(
                         f"Missing skater in {event_name}. Next is {current_skater}"
                     )
@@ -218,7 +219,8 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 )
 
     for skater in elements_per_skater:
-        foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
+        foundElements = round(sum([x["Value"]
+                              for x in elements_per_skater[skater]]), 2)
         expected = float(skater_details[skater])
         if foundElements != expected:
             print(
@@ -234,6 +236,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
+
 def extract_skater_element_sections(soup):
     tables = soup.find_all("table")
     pairs = []
@@ -243,10 +246,13 @@ def extract_skater_element_sections(soup):
         if "sum" in (tbl.get("class") or []):
             row = tbl.find("tbody").find("tr")
 
-            rank = row.find_all(class_="rank")[0].get_text(strip=True) if row else None
-            skater_title = row.find_all(class_="name")[0].get_text(strip=True) if row else None
+            rank = row.find_all(class_="rank")[0].get_text(
+                strip=True) if row else None
+            skater_title = row.find_all(class_="name")[0].get_text(
+                strip=True) if row else None
             skater_name = skater_title.split(",")[0]
-            skater_total_element_score = row.find_all(class_="totElm")[0].get_text(strip=True) if row else None
+            skater_total_element_score = row.find_all(
+                class_="totElm")[0].get_text(strip=True) if row else None
             skater = {"name": skater_name,
                       "rank": rank,
                       "element_score": skater_total_element_score}
@@ -260,8 +266,10 @@ def extract_skater_element_sections(soup):
                 pairs.append((skater, elm))
                 i = j
         i += 1
-    if not pairs: raise ValueError("No skater data found on the segment page.")
+    if not pairs:
+        raise ValueError("No skater data found on the segment page.")
     return pairs
+
 
 def process_scores_html(soup, event_regex="", use_gcp=False):
     # Initialize list for storing extracted data
@@ -269,22 +277,24 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
     pcs_per_skater = defaultdict(list)
     skater_details = {}
     event_name = soup.find_all(class_="catseg")[0].text.replace("/", "")
-    event_name = event_name.replace("/", "").replace(" ", "_").replace("__", "_").replace("-", "_")
-            
+    event_name = event_name.replace(
+        "/", "").replace(" ", "_").replace("__", "_").replace("-", "_")
+
     event_name = event_name.split("/")[0]
     event_name = event_name.split(":")[0]
-    
+
     skater_element_pairs = extract_skater_element_sections(soup)
 
     for (skater_info, element_section) in skater_element_pairs:
         current_skater = skater_info["name"]
-        skater_details[current_skater] =skater_info
-        if int(skater_info["rank"]) != len(skater_details) :
-            raise ValueError (f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
-        
+        skater_details[current_skater] = skater_info
+        if int(skater_info["rank"]) != len(skater_details):
+            raise ValueError(
+                f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
+
         rows = element_section.find_all("tr")
 
-        for i in range (1, len(rows)):
+        for i in range(1, len(rows)):
             row = rows[i]
             tds = row.find_all("td")
 
@@ -294,25 +304,28 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
                 element_name = row.find_all(class_='elem')[0].text
                 element_info = row.find_all(class_='info')[0].text
                 element_bv = float(row.find_all(class_='bv')[0].text)
-                scores = [td.text.replace(u'\xa0', "") for td in row.find_all(class_="jud")]
+                scores = [td.text.replace(u'\xa0', "")
+                          for td in row.find_all(class_="jud")]
                 if any(v.strip() == "-" for v in scores):
                     continue
                 scores = [int(x) if x.strip() != "" else None for x in scores]
                 element_total_value = float(row.find_all(class_='psv')[0].text)
 
                 elements_per_skater[current_skater].append({
-                        "Element": element_name,
-                        "Scores": scores,
-                        "Base Value": element_bv,
-                        "Value": element_total_value,
-                        "Notes": element_info,
-                        "Number": element_number,
-                    })
+                    "Element": element_name,
+                    "Scores": scores,
+                    "Base Value": element_bv,
+                    "Value": element_total_value,
+                    "Notes": element_info,
+                    "Number": element_number,
+                })
             # Process PCS
             elif "class" in tds[1].attrs and "cn" in tds[1].attrs["class"]:
                 component_name = row.find_all(class_='cn')[0].text
-                scores = [td.text.replace(u'\xa0', "") for td in row.find_all(class_="cjud")]
-                scores = [float(x) if x.strip() != "" else None for x in scores]
+                scores = [td.text.replace(u'\xa0', "")
+                          for td in row.find_all(class_="cjud")]
+                scores = [float(x) if x.strip() !=
+                          "" else None for x in scores]
 
                 pcs_per_skater[current_skater].append({
                     "Component": component_name,
@@ -320,7 +333,8 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
                 })
 
     for skater in elements_per_skater:
-        foundElements = round(sum([x["Value"] for x in elements_per_skater[skater]]), 2)
+        foundElements = round(sum([x["Value"]
+                              for x in elements_per_skater[skater]]), 2)
         expected = float(skater_details[skater]["element_score"])
         if foundElements != expected:
             print(
@@ -336,22 +350,26 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
+
 def create_all_element_dict(judges, elements_per_skater, event_name):
     all_elements = []
     for skater in elements_per_skater:
         for element in elements_per_skater[skater]:
             all_scores = element["Scores"]
-            filtered_scores = [score for score in all_scores if score is not None]
+            filtered_scores = [
+                score for score in all_scores if score is not None]
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
-            if len(all_scores)< len(judges):
-                raise ValueError(f"Missing components in {event_name} for {skater}, element: {element}")
+            if len(all_scores) < len(judges):
+                raise ValueError(
+                    f"Missing components in {event_name} for {skater}, element: {element}")
             for judge in judges:
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
-                    print(f"Missing elements for skater {skater} judge {judgeNumber}")
+                    print(
+                        f"Missing elements for skater {skater} judge {judgeNumber}")
                     continue
-               
+
                 deviation = judge_score - avg
                 thrown_out = is_score_thrown_out(judge_score, all_scores)
                 high = judge_score > avg
@@ -383,11 +401,12 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
     for skater in pcs_per_skater:
         for pcs_mark in pcs_per_skater[skater]:
             all_scores = pcs_mark["Scores"]
-            if len(all_scores) < len(judges) :
-                missing_position=pcs_mark["Possible Missing Position"]
+            if len(all_scores) < len(judges):
+                missing_position = pcs_mark["Possible Missing Position"]
                 all_scores.insert(missing_position, 0)
 
-            filtered_scores = [score for score in all_scores if score is not None]
+            filtered_scores = [
+                score for score in all_scores if score is not None]
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
             for judge in judges:
@@ -434,7 +453,7 @@ def extract_judge_scores(
     base_excel_path,
     judges,
     pdf_number,
-    use_html=True, 
+    use_html=True,
     url="",
     event_regex="",
     only_rule_errors=False,
@@ -446,7 +465,7 @@ def extract_judge_scores(
         page_contents = get_page_contents(url)
         soup = BeautifulSoup(page_contents, "html.parser")
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = process_scores_html(
-        soup=soup, event_regex=event_regex, use_gcp=use_gcp
+            soup=soup, event_regex=event_regex, use_gcp=use_gcp
         )
     else:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
@@ -468,11 +487,14 @@ def extract_judge_scores(
             elements_per_skater, judges, event_name, judge_filter=judge_filter
         )
     elif "Pairs" in event_name:
-        element_errors = findPairsElementErrors(elements_per_skater, judges, event_name, judge_filter=judge_filter)
+        element_errors = findPairsElementErrors(
+            elements_per_skater, judges, event_name, judge_filter=judge_filter)
 
     if not only_rule_errors:
-        element_deviations = findElementDeviations(elements_per_skater, judges, judge_filter=judge_filter)
-        pcs_errors = findPCSDeviations(pcs_per_skater, judges, judge_filter=judge_filter)
+        element_deviations = findElementDeviations(
+            elements_per_skater, judges, judge_filter=judge_filter)
+        pcs_errors = findPCSDeviations(
+            pcs_per_skater, judges, judge_filter=judge_filter)
     total_errors = count_total_errors_per_judge(
         judges, element_errors, element_deviations, pcs_errors
     )
@@ -546,12 +568,13 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
 
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
-                if allScores[judgeNumber -1] is None:
-                    #This is a missing score or judge that isn't included
-                    if judgeNumber<len(judges)+1:
-                        print(f"Missing elements for skater {skater} judge {judgeNumber}")
+                if allScores[judgeNumber - 1] is None:
+                    # This is a missing score or judge that isn't included
+                    if judgeNumber < len(judges)+1:
+                        print(
+                            f"Missing elements for skater {skater} judge {judgeNumber}")
                     continue
                 # Must be -5 if  it is a short and there is a +COMBO or *
                 if (
@@ -639,15 +662,17 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
     for skater in skater_scores:
         for element in skater_scores[skater]:
             allScores = element["Scores"]
-            filtered_scores = [score for score in allScores if score is not None]
+            filtered_scores = [
+                score for score in allScores if score is not None]
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
-                if allScores[judgeNumber -1] is None:
-                    if judgeNumber<len(judges)+1:
-                        print(f"Missing elements for skater {skater} judge {judgeNumber}")
+                if allScores[judgeNumber - 1] is None:
+                    if judgeNumber < len(judges)+1:
+                        print(
+                            f"Missing elements for skater {skater} judge {judgeNumber}")
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if abs(deviation) >= 2:
@@ -675,14 +700,16 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
             continue
         for component in skater_scores[skater]:
             allScores = component["Scores"]
-            filtered_scores = [score for score in allScores if score is not None]
+            filtered_scores = [
+                score for score in allScores if score is not None]
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter!=judges[judgeNumber-1]:
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
-                if allScores[judgeNumber -1] is None:
-                    if judgeNumber<len(judges)+1:
-                        print(f"Missing component for skater {skater} judge {judgeNumber}")
+                if allScores[judgeNumber - 1] is None:
+                    if judgeNumber < len(judges)+1:
+                        print(
+                            f"Missing component for skater {skater} judge {judgeNumber}")
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5:
@@ -739,7 +766,7 @@ def get_sheet_name(event_name, pdf_number):
     if with_el_match:
         sheet_name = with_el_match.group(3)
     if len(sheet_name) >= 28:
-        sheet_name = f"{sheet_name[0 : min(len(sheet_name), 26)]}{pdf_number}"
+        sheet_name = f"{sheet_name[0: min(len(sheet_name), 26)]}{pdf_number}"
     return sheet_name
 
 
@@ -861,6 +888,7 @@ def printToExcel(
     sheet.column_dimensions["F"].width = 35
     # print (f"Processed {event_name}")
 
+
 def get_page_contents(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
@@ -873,9 +901,11 @@ def get_page_contents(url):
 
     return None
 
+
 if __name__ == "__main__":
     # Specify paths for the input PDF and output Excel file
-    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/1.pdf"  # Update with the correct path
+    # Update with the correct path
+    pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/1.pdf"
     excel_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/"
     tj_pdf_path = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/ISU/FC.xlsx"
 

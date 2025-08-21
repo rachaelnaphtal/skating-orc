@@ -47,7 +47,7 @@ def categorizeElement(element):
         "Mi": "Mixed Element",
         "PB": "Pivoting Block",
         "ChSq": "ChSq",
-        "pChSq":"ChSq",
+        "pChSq": "ChSq",
         "ChSl": "Choreo Element",
         "ChSt": "Choreo Element",
         "pChSt": "Choreo Element",
@@ -70,12 +70,12 @@ def categorizeElement(element):
         "DiSt": "Step Sequence",
         "OFT": "Step Sequence",
         "MiSt": "Step Sequence",
-        "SpEe":"Edge Element",
-        "SeEe":"Edge Element",
-        "CiSt":"Step Sequence",
-        "CrEe":"Edge Element",
-        "IBEe":"Edge Element",
-        "SeSt":"Step Sequence",
+        "SpEe": "Edge Element",
+        "SeEe": "Edge Element",
+        "CiSt": "Step Sequence",
+        "CrEe": "Edge Element",
+        "IBEe": "Edge Element",
+        "SeSt": "Step Sequence",
         "1Wz": "Jump",
         "SoOFSt": "Step Sequence",
         "1MB": "Pattern dance",
@@ -98,7 +98,7 @@ def categorizeElement(element):
         return "Spin"
     elif element.endswith("Th"):
         return "Lift"
-    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F","H"]:
+    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F", "H"]:
         return "Jump"
     elif element.endswith("+pi") or element == "I":
         return "Intersection"

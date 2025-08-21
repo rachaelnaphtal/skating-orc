@@ -77,19 +77,19 @@ def processEvent(
 ):
     if use_html:
         return judgingParsing.extract_judge_scores(
-        workbook=workbook,
-        pdf_path="",
-        base_excel_path=excel_path,
-        judges=judges,
-        pdf_number=pdf_number,
-        event_regex=event_regex,
-        only_rule_errors=only_rule_errors,
-        url=url,
-        use_gcp=use_gcp,
-        create_thrown_out_analysis=create_thrown_out_analysis,
-        judge_filter=judge_filter,
-        use_html=use_html
-         )
+            workbook=workbook,
+            pdf_path="",
+            base_excel_path=excel_path,
+            judges=judges,
+            pdf_number=pdf_number,
+            event_regex=event_regex,
+            only_rule_errors=only_rule_errors,
+            url=url,
+            use_gcp=use_gcp,
+            create_thrown_out_analysis=create_thrown_out_analysis,
+            judge_filter=judge_filter,
+            use_html=use_html
+        )
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
     # convert_url_to_pdf(url, pdf_path)
@@ -132,11 +132,11 @@ def findJudgesNames(soup):
     alltd = soup.find_all("td")
     judges = []
     nextJudge = False
-    judgeNumber=1
+    judgeNumber = 1
     for td in alltd:
         if td.text.count("Judge ") > 0:
             nextJudge = True
-            judgeNumber = int(td.text.replace("Judge ",""))
+            judgeNumber = int(td.text.replace("Judge ", ""))
             while len(judges) < judgeNumber:
                 judges.append("")
         elif nextJudge:
@@ -301,7 +301,8 @@ def make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex):
         sheet.cell(
             current_row, current_col + 3, value=int(df_dict[judge]["In Excess"].sum())
         )
-        sheet.cell(current_row, current_col + 5, value=len(judge_errors[judge]))
+        sheet.cell(current_row, current_col + 5,
+                   value=len(judge_errors[judge]))
         current_row += 1
     current_col += 7
     for judge in dict(sorted(judge_errors.items())):
@@ -312,8 +313,10 @@ def make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex):
         sheet.cell(current_row, current_col + 1, value="Anomalies")
         sheet.cell(current_row, current_col + 2, value="ORC recognized")
         sheet.cell(current_row, current_col + 3, value="Allowed")
-        sheet.cell(current_row, current_col + 4, value="In Excess (Pre Review)")
-        sheet.cell(current_row, current_col + 5, value="In Excess (Post Review)")
+        sheet.cell(current_row, current_col + 4,
+                   value="In Excess (Pre Review)")
+        sheet.cell(current_row, current_col + 5,
+                   value="In Excess (Post Review)")
         current_row += 1
 
         for event in judge_errors[judge]:
@@ -354,10 +357,11 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     link = soup.find("a", href=True, string="Judge detail scores")
     judgesNames = findJudgesNames(soup)
     event_name = soup.find_all('h1')[0].get_text()
-    details_link=""
+    details_link = ""
     if link is not None:
         details_link = link["href"]
     return (details_link, judgesNames, event_name)
+
 
 def loadCompetitionInfo(base_url):
     page_contents = get_page_contents(base_url)
@@ -369,13 +373,17 @@ def loadCompetitionInfo(base_url):
     location = all_h3_tags[2].get_text()
     return (start_date, end_date, location)
 
+
 def loadInfoForExistingCompetitions():
     session = get_db_session()
     database_obj = DatabaseLoader(session)
     urls = database_obj.getCompetitionUrlsWithNoLocation()
     for url in urls:
-        (start_date, end_date, location) = loadCompetitionInfo(f"{url}/index.asp")
-        database_obj.updateCompetition(url, location=location, start_date=start_date, end_date=end_date)
+        (start_date, end_date, location) = loadCompetitionInfo(
+            f"{url}/index.asp")
+        database_obj.updateCompetition(
+            url, location=location, start_date=start_date, end_date=end_date)
+
 
 def scrape(
     base_url,
@@ -386,10 +394,10 @@ def scrape(
     only_rule_errors=False,
     use_gcp=False,
     add_additional_analysis=False,
-    write_to_database=False, 
+    write_to_database=False,
     year="2526",
     judge_filter="",
-    specific_exclude="", 
+    specific_exclude="",
     use_html=True
 ):
     url = f"{base_url}/index.asp"
@@ -401,10 +409,14 @@ def scrape(
     database_obj = DatabaseLoader(session)
 
     if write_to_database:
-        competition_id = database_obj.insert_competition(report_name.replace("_", " "), base_url, year)
-        proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
-        (start_date, end_date, location) = loadCompetitionInfo(f"{base_url}/index.asp")
-        database_obj.updateCompetition(base_url, location=location, start_date=start_date, end_date=end_date)
+        competition_id = database_obj.insert_competition(
+            report_name.replace("_", " "), base_url, year)
+        proccessed_segments = database_obj.getSegmentNamesForCompetition(
+            base_url)
+        (start_date, end_date, location) = loadCompetitionInfo(
+            f"{base_url}/index.asp")
+        database_obj.updateCompetition(
+            base_url, location=location, start_date=start_date, end_date=end_date)
 
     if page_contents:
         links, names = get_urls_and_names(page_contents)
@@ -426,7 +438,7 @@ def scrape(
             # event_name_formatted = event_name_formatted.split(":")[0]
             if specific_exclude and (event_name == specific_exclude or re.match(specific_exclude, event_name)):
                 continue
-    
+
             (
                 event_name,
                 total_errors,
@@ -447,7 +459,7 @@ def scrape(
                 only_rule_errors=only_rule_errors,
                 use_gcp=use_gcp,
                 create_thrown_out_analysis=add_additional_analysis or write_to_database,
-                judge_filter=judge_filter, 
+                judge_filter=judge_filter,
                 use_html=use_html
             )
             if total_errors == None:
@@ -462,7 +474,7 @@ def scrape(
             }
             for i in range(len(judgesNames)):
                 judge = judgesNames[i]
-                if len(judge_filter) > 0 and judge_filter!=judge:
+                if len(judge_filter) > 0 and judge_filter != judge:
                     continue
                 if judge not in judge_errors:
                     judge_errors[judge] = {}
@@ -489,14 +501,19 @@ def scrape(
             if agg_all_element_df is None:
                 agg_all_element_df = all_element_df
             else:
-                agg_all_element_df = pd.concat([agg_all_element_df, all_element_df])
+                agg_all_element_df = pd.concat(
+                    [agg_all_element_df, all_element_df])
 
             # write to database
             if write_to_database and event_name not in proccessed_segments:
-                print(f"Writing segment {event_name} {datetime.now().strftime("%H:%M:%S")}")
-                segment_id = database_obj.insert_segment(event_name, competition_id)
-                database_obj.insert_element_scores(judgesNames, all_element_dict, segment_id, rule_errors)
-                database_obj.insert_pcs_scores(judgesNames, all_pcs_dict, segment_id)
+                print(
+                    f"Writing segment {event_name} {datetime.now().strftime("%H:%M:%S")}")
+                segment_id = database_obj.insert_segment(
+                    event_name, competition_id)
+                database_obj.insert_element_scores(
+                    judgesNames, all_element_dict, segment_id, rule_errors)
+                database_obj.insert_pcs_scores(
+                    judgesNames, all_pcs_dict, segment_id)
             else:
                 print(f"Skipping segment {event_name}")
         # Sort sheets
@@ -505,7 +522,8 @@ def scrape(
 
         df_dict = {}
         for judge in judge_errors:
-            df_dict[judge] = pd.DataFrame.from_dict(judge_errors[judge], orient="index")
+            df_dict[judge] = pd.DataFrame.from_dict(
+                judge_errors[judge], orient="index")
 
         errors_dict_to_return = pd.DataFrame.from_dict(detailed_rule_errors)
 
@@ -552,7 +570,8 @@ def create_summary_element_df(df, grouping_name):
     )
 
     # Merge with thrown-out data
-    summary = summary.merge(total_judged, on=["Judge Name", grouping_name], how="left")
+    summary = summary.merge(
+        total_judged, on=["Judge Name", grouping_name], how="left")
 
     # Calculate percentages
     summary["% Low"] = summary["Num_Low"] / summary["Total # Judged"]
@@ -562,8 +581,10 @@ def create_summary_element_df(df, grouping_name):
     ]
 
     # Rename columns to match your desired format
-    summary.rename(columns={"Num_Low": "# Low", "Num_High": "# High"}, inplace=True)
+    summary.rename(columns={"Num_Low": "# Low",
+                   "Num_High": "# High"}, inplace=True)
     return summary
+
 
 def make_analysis_cover_sheet(workbook):
     sheet = workbook.create_sheet("Overview")
@@ -619,7 +640,8 @@ def create_additional_analysis_sheet(
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         make_analysis_cover_sheet(writer.book)
         # Analyze elements
-        summary_goe_df = create_summary_element_df(all_element_df, "Element Type")
+        summary_goe_df = create_summary_element_df(
+            all_element_df, "Element Type")
         summary_goe_df.to_excel(
             writer, sheet_name="GOE Thrown out", float_format="%.2f", index=False
         )
@@ -643,10 +665,11 @@ def create_additional_analysis_sheet(
                 judgingParsing.autofit_worksheet(writer.sheets[sheet])
 
     if use_gcp:
-        gcp_interactions_helper.write_file_to_gcp(excel_buffer.getvalue(), excel_path)
+        gcp_interactions_helper.write_file_to_gcp(
+            excel_buffer.getvalue(), excel_path)
 
 
-def create_season_summary(pdf_folder = "", excel_folder = "", full_report_name="2425Summary", only_rule_errors=False):
+def create_season_summary(pdf_folder="", excel_folder="", full_report_name="2425Summary", only_rule_errors=False):
     start = time.time()
     workbook = openpyxl.Workbook()
     events = {
@@ -679,7 +702,7 @@ def create_season_summary(pdf_folder = "", excel_folder = "", full_report_name="
         "Midwesterns_DanceFinal2425": "2024/34290",
         "Easterns_PairsFinal2425": "2024/34289",
         "2025USChampionships": "2025/35539",
-        
+
     }
     summary_dict = {}
     all_rules_errors = []
@@ -733,8 +756,10 @@ def print_summary_workbook(workbook, summary_dict, full_report_name):
         summary_dict.items(), key=lambda kv: kv[1]["In Excess"].sum(), reverse=True
     ):
         sheet.cell(current_row, current_col, value=judge)
-        sheet.cell(current_row, current_col + 1, value=int(value["Errors"].sum()))
-        sheet.cell(current_row, current_col + 2, value=int(value["In Excess"].sum()))
+        sheet.cell(current_row, current_col + 1,
+                   value=int(value["Errors"].sum()))
+        sheet.cell(current_row, current_col + 2,
+                   value=int(value["In Excess"].sum()))
         num_events = len(value[value["Errors"] >= 0])
         sheet.cell(current_row, current_col + 3, value=num_events)
         sheet.cell(
@@ -756,7 +781,8 @@ def print_summary_workbook(workbook, summary_dict, full_report_name):
 
 
 def print_sheet_per_judge(writer, judge_name: str, judge_df):
-    judge_df.rename(columns={"Errors": "Anomalies", "Allowed Errors": "Allowed"})
+    judge_df.rename(columns={"Errors": "Anomalies",
+                    "Allowed Errors": "Allowed"})
     judge_df.to_excel(writer, sheet_name=judge_name)
     writer.sheets[judge_name].column_dimensions["A"].width = 35
     writer.sheets[judge_name].column_dimensions["B"].width = 12
@@ -799,7 +825,8 @@ def print_rule_error_summary_workbook(rule_errors, full_report_name):
 
 if __name__ == "__main__":
     # #Easterns/ Pairs Final 2425
-    pdf_folder = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/"  # Update with the correct path
+    # Update with the correct path
+    pdf_folder = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/"
     excel_folder = "/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Official/"
     base_url = "https://ijs.usfigureskating.org/leaderboard/results/2024/34289"
     # scrape("https://ijs.usfigureskating.org/leaderboard/results/2025/35539", "US_Champs_25")
@@ -825,16 +852,15 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/34237', "2025USSynchroChamps", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35645', "GlacierFallsSummerClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35895', "DuPageNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
-    
+
     # findResultsDetailUrlAndJudgesNames("https://ijs.usfigureskating.org/leaderboard/results/2025/36275", "CAT023SEG042.html")
-    
-    
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder) 
+
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36275', "DallasClassicNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672', "LakePlacidNQS2025", "", write_to_database=True, pdf_folder=pdf_folder)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35638', "2025SiliconValleyOpen", "", write_to_database=True, pdf_folder=pdf_folder)
     # create_season_summary(pdf_folder=pdf_folder, excel_folder=excel_folder)
 
-    #Issues
+    # Issues
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30670', '2022_John_Smith_Memorial_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, event_regex=".*(Women|Men|Boys|Girls).*")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30472', '2022_Cup_of_Colorado_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30692', '2022_Pasadena_Open_Championships_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223)
@@ -845,8 +871,11 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30712', '2022_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="Intermediate Men Combined (202 - 209)")
 
     # 202526 NQS
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36180', '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664', '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35905', '2025_Silver_State_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36180',
+           '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664',
+           '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35905',
+           '2025_Silver_State_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
 
     loadInfoForExistingCompetitions()
