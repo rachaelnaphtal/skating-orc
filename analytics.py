@@ -690,49 +690,60 @@ class JudgeAnalytics:
         judges = self.session.query(Judge.id, Judge.name).all()
 
         # --- Precompute PCS stats grouped by judge ---
-        pcs_stats = self.session.execute(
-            select(
-                PcsScorePerJudge.judge_id,
-                func.count().label("pcs_total_scores"),
-                func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
-                func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
-                                PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
-                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
-            )
-            .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
-            .join(Segment, SkaterSegment.segment_id == Segment.id)
-            .join(Competition, Segment.competition_id == Competition.id)
-            .group_by(PcsScorePerJudge.judge_id)
-        ).all()
+        pcs_query = select(
+            PcsScorePerJudge.judge_id,
+            func.count().label("pcs_total_scores"),
+            func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
+            func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                            PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
+            func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
+        ).join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+        ).join(Segment, SkaterSegment.segment_id == Segment.id
+        ).join(Competition, Segment.competition_id == Competition.id)
+        
+        # Apply filters
+        if year_filter:
+            pcs_query = pcs_query.filter(Competition.year == year_filter)
+        if competition_ids:
+            pcs_query = pcs_query.filter(Competition.id.in_(competition_ids))
+        if discipline_type_ids:
+            pcs_query = pcs_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+            
+        pcs_stats = self.session.execute(pcs_query.group_by(PcsScorePerJudge.judge_id)).all()
         pcs_dict = {judge_id: dict(total=pcs_total, throwouts=pcs_thr,
                                 anomalies=pcs_anom, rule_errors=pcs_rules)
                     for judge_id, pcs_total, pcs_thr, pcs_anom, pcs_rules in pcs_stats}
 
         # --- Precompute Element stats grouped by judge ---
-        elem_stats = self.session.execute(
-            select(
-                ElementScorePerJudge.judge_id,
-                func.count().label("elem_total_scores"),
-                func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
-                func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
-                                ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
-                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors")
-            )
-            .join(Element, ElementScorePerJudge.element_id == Element.id)
-            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
-            .join(Segment, SkaterSegment.segment_id == Segment.id)
-            .join(Competition, Segment.competition_id == Competition.id)
-            .group_by(ElementScorePerJudge.judge_id)
-        ).all()
+        elem_query = select(
+            ElementScorePerJudge.judge_id,
+            func.count().label("elem_total_scores"),
+            func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
+            func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
+                            ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
+            func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors")
+        ).join(Element, ElementScorePerJudge.element_id == Element.id
+        ).join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+        ).join(Segment, SkaterSegment.segment_id == Segment.id
+        ).join(Competition, Segment.competition_id == Competition.id)
+        
+        # Apply filters
+        if year_filter:
+            elem_query = elem_query.filter(Competition.year == year_filter)
+        if competition_ids:
+            elem_query = elem_query.filter(Competition.id.in_(competition_ids))
+        if discipline_type_ids:
+            elem_query = elem_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+            
+        elem_stats = self.session.execute(elem_query.group_by(ElementScorePerJudge.judge_id)).all()
         elem_dict = {judge_id: dict(total=elem_total, throwouts=elem_thr,
                                     anomalies=elem_anom, rule_errors=elem_rules)
                     for judge_id, elem_total, elem_thr, elem_anom, elem_rules in elem_stats}
-
         # --- Precompute excess anomalies once for all judges ---
         excess_anomalies = None
         if metric == 'excess_anomalies':
             excess_anomalies = self._calculate_all_judge_excess_anomalies(
-                year_filter=None, competition_ids=None, discipline_ids=None, score_type=score_type, by_competition=False
+                year_filter=year_filter, competition_ids=competition_ids, discipline_ids=discipline_type_ids, score_type=score_type, by_competition=False
             )
 
         # --- Assemble heatmap data ---

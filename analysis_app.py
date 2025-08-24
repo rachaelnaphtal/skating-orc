@@ -1560,6 +1560,185 @@ elif page == "Competition Analysis":
                 st.dataframe(judge_totals_df_excess, use_container_width=True)
             else:
                 st.info("No excess anomalies data available for grid display")
+            
+            # Rule Errors Summary and List
+            st.subheader("Rule Errors Analysis")
+            with st.spinner("Loading rule errors data..."):
+                rule_errors_df = analytics.get_all_rule_errors(
+                    competition_ids=[competition_id]
+                )
+            
+            if not rule_errors_df.empty:
+                # Rule errors summary
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    total_rule_errors = len(rule_errors_df)
+                    st.metric("Total Rule Errors", total_rule_errors)
+                
+                with col2:
+                    pcs_rule_errors = len(rule_errors_df[rule_errors_df['element_name'] == ''])
+                    st.metric("PCS Rule Errors", pcs_rule_errors)
+                
+                with col3:
+                    element_rule_errors = len(rule_errors_df[rule_errors_df['element_name'] != ''])
+                    st.metric("Element Rule Errors", element_rule_errors)
+                
+                # Judge breakdown
+                rule_error_judge_summary = rule_errors_df.groupby('judge_name').size().sort_values(ascending=False)
+                st.subheader("Rule Errors by Judge")
+                judge_rule_error_df = pd.DataFrame({
+                    'Judge': rule_error_judge_summary.index,
+                    'Rule Errors': rule_error_judge_summary.values
+                })
+                st.dataframe(judge_rule_error_df, use_container_width=True)
+                
+                # Detailed rule errors table
+                st.subheader("Detailed Rule Errors")
+                display_rule_errors = rule_errors_df[[
+                    'judge_name', 'segment_name', 'discipline_name', 'skater_name',
+                    'element_name', 'element_type', 'judge_score', 
+                    'panel_average', 'deviation'
+                ]].copy()
+                
+                # Add a score type column based on whether element_name is empty
+                display_rule_errors['score_type'] = display_rule_errors['element_name'].apply(
+                    lambda x: 'PCS' if x == '' else 'Element'
+                )
+                
+                # Fill NaN values for better display
+                display_rule_errors['element_name'] = display_rule_errors['element_name'].fillna('N/A')
+                display_rule_errors['element_type'] = display_rule_errors['element_type'].fillna('N/A')
+                
+                # Reorder columns to include score_type
+                display_rule_errors = display_rule_errors[[
+                    'judge_name', 'segment_name', 'discipline_name', 'skater_name',
+                    'score_type', 'element_name', 'element_type', 'judge_score', 
+                    'panel_average', 'deviation'
+                ]]
+                
+                display_rule_errors.columns = [
+                    'Judge', 'Segment', 'Discipline', 'Skater', 'Score Type',
+                    'Element Name', 'Element Type', 'Judge Score', 'Panel Average', 'Deviation'
+                ]
+                
+                st.dataframe(display_rule_errors, use_container_width=True)
+            else:
+                st.info("No rule errors found for this competition")
+            
+            # Anomalies Analysis
+            st.subheader("Anomalies Analysis")
+            
+            # Get all judges for this competition from segment stats
+            competition_judges = [int(judge_id) for judge_id in segment_stats['judge_id'].unique()]
+            
+            # Collect all anomalies data for this competition
+            with st.spinner("Loading anomalies data..."):
+                all_pcs_anomalies = []
+                all_element_anomalies = []
+                
+                # Get judge names mapping
+                judges = analytics.get_judges()
+                judge_names = {judge_id: judge_name for judge_id, judge_name, _ in judges}
+                
+                for judge_id in competition_judges:
+                    # Get PCS anomalies for this judge and competition
+                    judge_pcs = analytics.get_judge_pcs_stats(
+                        judge_id, competition_ids=[competition_id]
+                    )
+                    if not judge_pcs.empty:
+                        pcs_anomalies = judge_pcs[judge_pcs['anomaly'] == True]
+                        if not pcs_anomalies.empty:
+                            pcs_anomalies = pcs_anomalies.copy()
+                            pcs_anomalies['judge_id'] = judge_id
+                            pcs_anomalies['judge_name'] = judge_names.get(judge_id, 'Unknown')
+                            all_pcs_anomalies.append(pcs_anomalies)
+                    
+                    # Get element anomalies for this judge and competition
+                    judge_elements = analytics.get_judge_element_stats(
+                        judge_id, competition_ids=[competition_id]
+                    )
+                    if not judge_elements.empty:
+                        element_anomalies = judge_elements[judge_elements['anomaly'] == True]
+                        if not element_anomalies.empty:
+                            element_anomalies = element_anomalies.copy()
+                            element_anomalies['judge_id'] = judge_id
+                            element_anomalies['judge_name'] = judge_names.get(judge_id, 'Unknown')
+                            all_element_anomalies.append(element_anomalies)
+                
+                # Combine all anomalies
+                pcs_anomalies_df = pd.concat(all_pcs_anomalies, ignore_index=True) if all_pcs_anomalies else pd.DataFrame()
+                element_anomalies_df = pd.concat(all_element_anomalies, ignore_index=True) if all_element_anomalies else pd.DataFrame()
+            
+            if not pcs_anomalies_df.empty or not element_anomalies_df.empty:
+                
+                # Display PCS anomalies
+                if not pcs_anomalies_df.empty:
+                    st.subheader("PCS Anomalies")
+                    
+                    # Filter PCS data based on issue types
+                    filtered_pcs = pcs_anomalies_df.copy()
+                    
+                    if not filtered_pcs.empty:
+                        def get_issue_type_pcs(row):
+                            issues = []
+                            if row['anomaly'] and abs(row['deviation']) >= 1.5:
+                                direction = 'High' if row['deviation'] > 0 else 'Low'
+                                issues.append(f'Anomaly ({direction})')
+                            if row['is_rule_error']:
+                                issues.append('Rule Error')
+                            return ', '.join(issues)
+                        
+                        filtered_pcs['issue_type'] = filtered_pcs.apply(get_issue_type_pcs, axis=1)
+                        
+                        display_pcs_anomalies = filtered_pcs[[
+                            'judge_name', 'segment_name', 'discipline_name', 'skater_name',
+                            'pcs_type_name', 'judge_score', 'panel_average', 'deviation', 'issue_type'
+                        ]].copy()
+                        
+                        display_pcs_anomalies.columns = [
+                            'Judge', 'Segment', 'Discipline', 'Skater', 'PCS Component',
+                            'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
+                        ]
+                        
+                        st.dataframe(display_pcs_anomalies, use_container_width=True)
+                    else:
+                        st.info("No PCS anomalies match the selected filters")
+                
+                # Display element anomalies
+                if not element_anomalies_df.empty:
+                    st.subheader("Element Anomalies")
+                    
+                    # Filter element data based on issue types
+                    filtered_elements = element_anomalies_df.copy()
+                    
+                    if not filtered_elements.empty:
+                        def get_issue_type_elem(row):
+                            issues = []
+                            if row['anomaly'] and abs(row['deviation']) >= 2.0:
+                                direction = 'High' if row['deviation'] > 0 else 'Low'
+                                issues.append(f'Anomaly ({direction})')
+                            if row['is_rule_error']:
+                                issues.append('Rule Error')
+                            return ', '.join(issues)
+                        
+                        filtered_elements['issue_type'] = filtered_elements.apply(get_issue_type_elem, axis=1)
+                        
+                        display_element_anomalies = filtered_elements[[
+                            'judge_name', 'segment_name', 'discipline_name', 'skater_name',
+                            'element_name', 'element_type_name', 'judge_score', 'panel_average', 'deviation', 'issue_type'
+                        ]].copy()
+                        
+                        display_element_anomalies.columns = [
+                            'Judge', 'Segment', 'Discipline', 'Skater', 'Element Name',
+                            'Element Type', 'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
+                        ]
+                        
+                        st.dataframe(display_element_anomalies, use_container_width=True)
+                    else:
+                        st.info("No element anomalies match the selected filters")
+            else:
+                st.info("No anomalies found for this competition")
 
 elif page == "Multi-Judge Comparison":
     st.header("Multi-Judge Comparison")
