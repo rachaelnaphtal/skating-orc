@@ -871,11 +871,13 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2022/30712', '2022_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2223, specific_exclude="Intermediate Men Combined (202 - 209)")
 
     # 202526 NQS
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36180',
-           '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664',
-           '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35905',
-           '2025_Silver_State_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36180',
+    #        '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664',
+    #        '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36181',
+           '2025_Middle_Atlantics_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526, judge_filter="Jaclyn Helms")
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35103',
+    #        '2025_Greater_Chicagoland_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
 
     loadInfoForExistingCompetitions()

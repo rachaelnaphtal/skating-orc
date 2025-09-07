@@ -568,13 +568,14 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
 
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
-                    continue
+                
                 if allScores[judgeNumber - 1] is None:
                     # This is a missing score or judge that isn't included
                     if judgeNumber < len(judges)+1:
                         print(
                             f"Missing elements for skater {skater} judge {judgeNumber}")
+                    continue
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
                 # Must be -5 if  it is a short and there is a +COMBO or *
                 if (
@@ -667,12 +668,12 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
-                    continue
                 if allScores[judgeNumber - 1] is None:
                     if judgeNumber < len(judges)+1:
                         print(
                             f"Missing elements for skater {skater} judge {judgeNumber}")
+                    continue
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if abs(deviation) >= 2:
@@ -704,12 +705,12 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
                 score for score in allScores if score is not None]
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
-                    continue
                 if allScores[judgeNumber - 1] is None:
                     if judgeNumber < len(judges)+1:
                         print(
                             f"Missing component for skater {skater} judge {judgeNumber}")
+                    continue
+                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5:
