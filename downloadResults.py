@@ -875,9 +875,25 @@ if __name__ == "__main__":
     #        '2025_Skate_Detroit_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35664',
     #        '2025_Atlanta_Open_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36181',
-           '2025_Middle_Atlantics_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526, judge_filter="Jaclyn Helms")
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35672',
+    #        'LP', write_to_database=True, pdf_folder=pdf_folder, year=2526, judge_filter="Jaclyn Helms")
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35103',
     #        '2025_Greater_Chicagoland_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36182',
+    #        '2025_Colorado_Springs_Invitational_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35636',
+    #        '2025_Carousel_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35821',
+    #        '2025_Maplewood_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36179',
+    #        '2025_Challenge_Cup_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35900',
+    #        '2025_Skate_Cleveland_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35890',
+           '2025_Boston_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35743',
+           '2025_Texas_Trophy_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/35734',
+           '2025_LA_Autumn_Classic_NQS', write_to_database=True, pdf_folder=pdf_folder, year=2526)
 
     loadInfoForExistingCompetitions()

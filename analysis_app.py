@@ -1311,8 +1311,11 @@ if page == "Individual Judge Analysis":
                     return 1
                 elif skater_count <= 20:
                     return 2
-                else:
+                elif skater_count <= 30:
                     return 3
+                elif skater_count <= 40:
+                    return 4
+                return 5
             
             segment_display['allowed_errors'] = segment_display['skater_count'].apply(calculate_allowed_errors)
             segment_display['excess_anomalies'] = segment_display['total_anomalies'] - segment_display['allowed_errors']

@@ -555,7 +555,11 @@ def get_allowed_errors(num_skaters: int):
         return 1
     elif num_skaters <= 20:
         return 2
-    return 3
+    elif num_skaters <= 30:
+        return 3
+    elif num_skaters <= 40:
+        return 4
+    return 5
 
 
 def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter=""):
