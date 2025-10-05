@@ -220,12 +220,10 @@ def judge_performance_heatmap():
         # Show data table
         st.subheader("Judge Performance Data")
         display_df = heatmap_df_sorted[[
-            'judge_name', 'metric_value', 'total_scores', 'pcs_scores',
-            'element_scores'
+            'judge_name', 'metric_value', 'total_scores'
         ]].copy()
         display_df.columns = [
-            'Judge', metric_names[metric], 'Total Scores', 'PCS Scores',
-            'Element Scores'
+            'Judge', metric_names[metric], 'Total Scores'
         ]
         st.dataframe(display_df, use_container_width=True)
 
