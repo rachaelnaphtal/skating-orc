@@ -1043,10 +1043,12 @@ if __name__ == "__main__":
     #        '2025_Porter_Synchro_Classic', write_to_database=True, pdf_folder=pdf_folder, year=2526, specific_exclude='10 Unified Teams 2')
     
     #FSM testing
+    scrape('https://www.isuresults.com/results/season2425/fc2025',
+           '2025_Four_Continents', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # scrape('https://www.isuresults.com/results/season2324/fc2024',
-    #        '2025_Four_Continents', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36369',
-           '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
-    scrape('https://results.isu.org/results/season2425/wsysc2025',
-           '2025_World_Synchro', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
+    #        '2024_Four_Continents', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36369',
+    #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
+    # scrape('https://results.isu.org/results/season2425/wsysc2025',
+    #        '2025_World_Synchro', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # loadInfoForExistingCompetitions()

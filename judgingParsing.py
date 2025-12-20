@@ -288,7 +288,7 @@ def match_element_fsm(line):
         ^\s*
         ([A-Za-z0-9+*<>!]+)                    # Element name
         \s+
-        (?:([F*<!>qnscuSCUex,b]+)\s+)*         # Optional extra info
+        (?:([F*<!>qnscuSCUex,b|]+)\s+)*         # Optional extra info
         (-?\d+(?:\.\d+)?)                      # Base value
         \s*
         (x?)                                   # Optional x
@@ -806,7 +806,7 @@ def match_skater_fsm(line):
         ^
         (\d+)                                           # 1- Skate order
         \s+
-        ([A-Za-z0-9-']+(?:\s+[A-Za-z0-9-']+)*)          # 2- Name
+        ([A-Za-z0-9-'/]+(?:\s+[A-Za-z0-9-'/]+)*)          # 2- Name
         \s+
         ([A-Z]{3})                                      # 3- Country
         \s+
