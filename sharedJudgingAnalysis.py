@@ -43,6 +43,8 @@ def categorizeElement(element):
         "B": "Linear/Rotating",
         "W": "Linear/Rotating",
         "Cr": "Creative",
+        "CrL": "Creative",
+        "CrI": "Creative",
         "GL": "Group Lift",
         "Mi": "Mixed Element",
         "PB": "Pivoting Block",
@@ -97,7 +99,7 @@ def categorizeElement(element):
     elif element.endswith("Sp"):
         return "Spin"
     elif element.endswith("Th"):
-        return "Lift"
+        return "Throw Jump"
     elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F", "H"]:
         return "Jump"
     elif element.endswith("+pi") or element == "I":

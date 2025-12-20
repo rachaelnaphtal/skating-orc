@@ -46,14 +46,267 @@ def autofit_worksheet(worksheet):
         worksheet.column_dimensions[column].width = adjusted_width
 
 
-def parse_scores(pdf_path, event_regex="", use_gcp=False):
+def parse_scores(pdf_path, event_regex="", use_gcp=False, isFSM=False):
     if use_gcp:
         pdf_bytes = read_file_from_gcp(pdf_path)
-        with PdfReader(pdf_bytes) as pdf:
+        with pdfplumber.open(pdf_bytes) as pdf:
+            if isFSM:
+                return process_fsm_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
             return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
     else:
-        with PdfReader(pdf_path) as pdf:
+        with pdfplumber.open(pdf_path) as pdf:
+            if isFSM:
+                return process_fsm_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
             return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
+
+def process_fsm_scores(pdf, event_regex="", use_gcp=False):
+    elements_per_skater = {}
+    pcs_per_skater = {}
+    skater_details = {}
+    event_name = ""
+
+    judge_count = None
+
+    for page in pdf.pages:
+        text = page.extract_text(
+            x_tolerance=2,
+            y_tolerance=3,
+            layout=True,
+            extraction_mode="layout")
+        if not text:
+            continue
+
+        # -----------------------------
+        # Strong normalization
+        # -----------------------------
+        text = (
+            text.replace("\xa0", "")
+                .replace("–", "-")
+                .replace("ﬁ", "fi")
+        )
+
+        raw_lines = text.split("\n")
+        lines = [
+            re.sub(r"\s+", " ", l).strip()
+            for l in raw_lines
+            if l.strip()
+        ]
+
+        # -----------------------------
+        # Event name (once)
+        # -----------------------------
+        if event_name == "":
+            if len(lines) >= 3:
+                for i in range(0,4):
+                    if lines[i] == "JUDGES DETAILS PER SKATER":
+                        event_name=lines[i+1]
+                        break
+                event_name = (
+                    event_name
+                    .replace("/", "")
+                    .replace(" ", "_")
+                    .replace("__", "_")
+                    .replace("-", "_")
+                )
+                if not re.match(event_regex, event_name):
+                    return (None, None, None, event_name)
+
+        current_skater = None
+        has_bonus = False
+        buffer = ""
+        element_number=1
+
+        for i, line in enumerate(lines):
+
+            if i < 3:
+                continue
+            # # -----------------------------
+            # # Bonus detection
+            # # -----------------------------
+            # if line == "Bonus":
+            #     has_bonus = True
+            #     continue
+
+            # -----------------------------
+            # Skater header
+            # -----------------------------
+            skater_match = match_skater_fsm(line)
+
+            # Skater name split across lines
+            if current_skater is None and line == "# Executed" and i >= 2:
+                possible = lines[i - 2] + lines[i - 1]
+                skater_match = match_skater_fsm(possible)
+
+            if skater_match:
+                skater_name = skater_match.group(2).strip()
+                technical_score = float(skater_match.group(6))
+                current_skater = skater_name
+                element_number=1
+
+                if current_skater not in elements_per_skater:
+                    elements_per_skater[current_skater] = []
+                    pcs_per_skater[current_skater] = []
+                    skater_details[current_skater] = technical_score
+
+                continue
+
+            # # -----------------------------
+            # # Buffer multiline elements
+            # # -----------------------------
+            # if re.match(r"^\d+\s+[A-Za-z]", line):
+            #     buffer = line
+            #     continue
+
+            # if buffer and re.search(r"\d+\.\d+", line):
+            #     line = buffer + " " + line
+            #     buffer = ""
+            # else:
+            #     buffer = ""
+
+            # -----------------------------
+            # Element regex (robust)
+            # -----------------------------
+            if line.startswith(str(element_number)) :
+                line=line[len(str(element_number)):]
+            elif line.startswith(str(element_number+1)):
+                print(f"error parsing line for {skater_name} {event_name} {lines[i-1]}")
+                element_number=element_number+1
+                line=line[len(str(element_number)):]
+            
+            if "- - - -" in line:
+                element_number=element_number+1
+                continue
+
+            element_match = match_element_fsm(line)
+
+            # -----------------------------
+            # PCS regex (very loose)
+            # -----------------------------
+            pcs_match = match_pcs_fsm(line)
+
+            # -----------------------------
+            # Element parsing
+            # -----------------------------
+            if current_skater and element_match:
+                element_name = element_match.group(1)
+                notes = element_match.group(2)
+                judge_scores_raw = element_match.group(6)
+                total_score = float(element_match.group(8))
+
+                # Normalize element suffixes
+                element_name = element_name.replace("SEQ<<", "SEQ").replace("SEQ<", "SEQ")
+
+                scores = re.findall(r"-?\d+(?:\.\d+)?", judge_scores_raw)
+                judges_scores = list(map(float, scores))
+
+                if judge_count is None:
+                    judge_count = len(judges_scores)
+
+                elements_per_skater[current_skater].append({
+                    "Element": element_name,
+                    "Scores": judges_scores,
+                    "Value": total_score,
+                    "Notes": notes,
+                    "Number": element_number,
+                })
+                element_number=element_number+1
+                continue
+
+            # -----------------------------
+            # PCS parsing
+            # -----------------------------
+            if current_skater and pcs_match:
+                component = pcs_match.group(1)
+                raw = pcs_match.group(3)
+                total_score = float(pcs_match.group(4))
+
+                digits = raw.replace(" ", "")
+                scores = []
+                i = 0
+                current = ""
+
+                while i < len(digits):
+                    current += digits[i]
+                    if digits[i] == ".":
+                        current += digits[i+1:i+3]
+                        scores.append(float(current))
+                        current = ""
+                        i += 3
+                    else:
+                        i += 1
+
+                pcs_per_skater[current_skater].append({
+                    "Component": component,
+                    "Scores": scores,
+                })
+                continue
+
+            if current_skater is None and (element_match or pcs_match):
+                print(
+                    f"Element or PCS found without skater "
+                    f"(found {len(skater_details)} so far) — {event_name}"
+                )
+
+    # -----------------------------
+    # Validation
+    # -----------------------------
+    for skater in elements_per_skater:
+        found = round(sum(x["Value"] for x in elements_per_skater[skater]), 2)
+        expected = float(skater_details[skater])
+
+        if found != expected:
+            print(
+                f"TES mismatch for {skater}: "
+                f"expected {expected}, found {found}"
+            )
+
+        if len(pcs_per_skater[skater]) < 3:
+            print(f"Missing PCS for {skater} in {event_name}")
+
+    return (elements_per_skater, pcs_per_skater, skater_details, event_name)
+
+def match_pcs_fsm(line):
+    return re.match(
+                r"""
+                    ^
+                    (Timing|Presentation|Skating\ Skills|Composition|Artistic\ Appeal)
+                    \s+
+                    (\d+(?:\.\d+)?)                            # Factor
+                    \s+
+                    ((?:\d+(?:\.\d+)?\s+){2,8}\d+(?:\.\d+)?)   # Per-judge PCS scores (3–9)
+                    \s+
+                    (\d+(?:\.\d+)?)                            # Total
+                    $
+                    """,
+                line,
+                re.VERBOSE,
+            )
+
+def match_element_fsm(line):
+    return re.match(
+        r"""
+        ^\s*
+        ([A-Za-z0-9+*<>!]+)                    # Element name
+        \s+
+        (?:([F*<!>qnscuSCUex,b]+)\s+)*         # Optional extra info
+        (-?\d+(?:\.\d+)?)                      # Base value
+        \s*
+        (x?)                                   # Optional x
+        \s*
+        (-?\d+(?:\.\d+)?)                      # GOE
+
+        \s+
+        ((?:-?\d+\s+){2,8}-?\d+)               # Judge scores (3–9 integers)
+
+        (?:\s+(\d+(?:\.\d+)?))?                # Optional bonus (e.g. 1.00)
+
+        \s+
+        (-?\d+(?:\.\d+)?)                      # Total
+        $
+        """,
+        line,
+        re.VERBOSE,
+    )
 
 
 def process_scores(pdf, event_regex="", use_gcp=False):
@@ -289,8 +542,10 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
         current_skater = skater_info["name"]
         skater_details[current_skater] = skater_info
         if int(skater_info["rank"]) != len(skater_details):
-            raise ValueError(
+            print(
                 f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
+            # raise ValueError(
+            #     f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
 
         rows = element_section.find_all("tr")
 
@@ -459,9 +714,14 @@ def extract_judge_scores(
     only_rule_errors=False,
     use_gcp=False,
     create_thrown_out_analysis=False,
-    judge_filter=""
+    judge_filter="", 
+    isFSM=False,
 ):
-    if use_html:
+    if isFSM:
+        (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
+            pdf_path, event_regex, use_gcp=use_gcp, isFSM=True
+        )
+    elif use_html:
         page_contents = get_page_contents(url)
         soup = BeautifulSoup(page_contents, "html.parser")
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = process_scores_html(
@@ -469,7 +729,7 @@ def extract_judge_scores(
         )
     else:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
-            pdf_path, event_regex, use_gcp=use_gcp
+            pdf_path, event_regex, use_gcp=use_gcp, isFSM=False
         )
     if not re.match(event_regex, event_name):
         return (event_name, None, None, None, [], [], [])
@@ -500,15 +760,6 @@ def extract_judge_scores(
     )
 
     formatted_event_name = event_name.replace("/", "")
-    # event_name = (
-    #             lines[2]
-    #             .replace("/", "")
-    #             .replace(" ", "_")
-    #             .replace("__", "_")
-    #             .replace("-", "_")
-    #         )
-    #         event_name = event_name.split("/")[0]
-    #         event_name = event_name.split(":")[0]
     printToExcel(
         workbook,
         event_name,
@@ -549,6 +800,30 @@ def match_skater(line, has_bonus):
             line,
         )
 
+def match_skater_fsm(line):
+    return re.match(
+        r"""
+        ^
+        (\d+)                                           # 1- Skate order
+        \s+
+        ([A-Za-z0-9-']+(?:\s+[A-Za-z0-9-']+)*)          # 2- Name
+        \s+
+        ([A-Z]{3})                                      # 3- Country
+        \s+
+        (\d+)                                           # 4- Start order
+        \s+
+        (-?\d+(?:\.\d+)?)                               # 5- Total
+        \s+
+        (-?\d+(?:\.\d+)?)                               # 6- TES
+        \s+
+        (-?\d+(?:\.\d+)?)                               # 7- PCS
+        \s+
+        (-?\d+(?:\.\d+)?)                               # 8- Deductions
+        $
+        """,
+        line,
+        re.VERBOSE,
+    )
 
 def get_allowed_errors(num_skaters: int):
     if num_skaters <= 10:

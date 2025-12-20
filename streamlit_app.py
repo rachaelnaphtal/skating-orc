@@ -230,7 +230,9 @@ def generate_full_competition_report():
     if not validate_competition_report_input():
         return
     print(st.session_state["report_type"])
-    url = st.session_state["url"].replace("/index.asp", "")
+    url = st.session_state["url"]
+    isFSM = url.endswith("index.asp")
+    url=url.replace("/index.asp", "").replace("/index.htm", "")
     report_name_value = st.session_state["report_name"]
     event_regex = st.session_state["event_regex"]
     judge_filter = st.session_state["judge_filter"]
@@ -250,6 +252,7 @@ def generate_full_competition_report():
             judge_filter=judge_filter,
             only_rule_errors=only_include_errors,
             add_additional_analysis=generate_analysis_sheet,
+            isFSM=isFSM
         )
     else:
         downloadResults.scrape(
@@ -261,6 +264,7 @@ def generate_full_competition_report():
             judge_filter=judge_filter,
             only_rule_errors=only_include_errors,
             add_additional_analysis=generate_analysis_sheet,
+            isFSM=isFSM
         )
 
     if USE_GCP:
