@@ -185,8 +185,8 @@ def validate_exists(name, field_name):
 def validate_url(name, field_name="URL"):
     if not name:
         return False, f"{field_name} is required"
-    if not re.match(r".*[0-9]{4}\/[0-9]{5}\/index.asp$", name):
-        return False, f"{field_name} should end with the format 1111/11111/index.asp"
+    # if not re.match(r".*[0-9]{4}\/[0-9]{5}\/index.asp$", name):
+    #     return False, f"{field_name} should end with the format 1111/11111/index.asp"
     return True, ""
 
 
@@ -231,8 +231,10 @@ def generate_full_competition_report():
         return
     print(st.session_state["report_type"])
     url = st.session_state["url"]
-    isFSM = url.endswith("index.asp")
+    isFSM = not url.endswith("index.asp")
     url=url.replace("/index.asp", "").replace("/index.htm", "")
+    if url.endswith('/'):
+        url = url[:-1]
     report_name_value = st.session_state["report_name"]
     event_regex = st.session_state["event_regex"]
     judge_filter = st.session_state["judge_filter"]

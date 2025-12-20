@@ -86,8 +86,8 @@ def processEvent(
     judge_filter="",
     isFSM=False
 ):
+    pdf_path = f"{pdf_folder}{eventName}.pdf"
     if isFSM:
-        pdf_path = f"{pdf_folder}{eventName}.pdf"
         download_pdf(url, pdf_path, use_gcp=use_gcp)
         return judgingParsing.extract_judge_scores(
             workbook=workbook,
@@ -119,7 +119,6 @@ def processEvent(
             judge_filter=judge_filter,
             use_html=use_html
         )
-    pdf_path = f"{pdf_folder}{eventName}.pdf"
     asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
     # convert_url_to_pdf(url, pdf_path)
     return judgingParsing.extract_judge_scores(
@@ -489,6 +488,7 @@ def scrape(
     if isFSM:
         url = f"{base_url}/index.htm"
     page_contents = get_page_contents(url)
+    print(url)
     workbook = openpyxl.Workbook()
     agg_all_element_df = None
     agg_all_pcs_df = None
