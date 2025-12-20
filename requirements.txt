@@ -35,12 +35,12 @@ MarkupSafe==3.0.2
 more-itertools==10.7.0
 multidict==6.6.3
 narwhals==1.46.0
-nicegui==2.10.1
+nicegui>=3.4.0
 numpy==2.3.1
 openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.1
-pg8000==1.31.4
+pg8000>=1.31.5
 pillow==11.3.0
 plotly==6.2.0
 propcache==0.3.2
