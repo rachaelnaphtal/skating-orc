@@ -139,7 +139,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
 
             if skater_match:
                 skater_name = skater_match.group(2).strip()
-                technical_score = float(skater_match.group(6))
+                technical_score = float(skater_match.group(5))
                 current_skater = skater_name
                 element_number=1
 
@@ -807,9 +807,10 @@ def match_skater_fsm(line):
         (\d+)                                           # 1- Skate order
         \s+
         ([A-Za-z0-9-'/]+(?:\s+[A-Za-z0-9-'/]+)*)          # 2- Name
-        \s+
-        ([A-Z]{3})                                      # 3- Country
-        \s+
+        # (.+?) 
+         \s+
+        # ([A-Z]{3})?                                      # 3- Country
+        # \s+
         (\d+)                                           # 4- Start order
         \s+
         (-?\d+(?:\.\d+)?)                               # 5- Total
