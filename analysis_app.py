@@ -8,7 +8,8 @@ from scipy import stats
 
 from database import get_db_session, test_connection
 from analytics import JudgeAnalytics
-from sqlalchemy import text
+from models import Segment, DisciplineType, Judge, PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment
+from sqlalchemy import text, func, case
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -69,7 +70,7 @@ def get_analytics_safe():
     """Safely get analytics object with error handling and retry logic"""
     if 'analytics' not in st.session_state:
         st.session_state.analytics = get_analytics()
-    
+
     # Check if we need to refresh the connection
     try:
         # Simple test query to check if connection is still alive
@@ -173,12 +174,12 @@ def judge_performance_heatmap():
                 year_filter=year_filter,
                 competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
                 discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None)
-        
+
         with st.spinner("Loading heatmap data..."):
             # Convert lists to tuples for caching
             comp_ids_tuple = tuple(competition_ids) if competition_ids else None
             disc_ids_tuple = tuple(discipline_ids) if discipline_ids else None
-            
+
             heatmap_df = get_cached_heatmap_data(
                 metric, score_type, year_filter, comp_ids_tuple, disc_ids_tuple)
 
@@ -1292,17 +1293,17 @@ if page == "Individual Judge Analysis":
                             )
             else:
                 st.info("No PCS scores with issues found for selected filters")
-        
+
         # Segment Statistics
         if not segment_df.empty:
             st.subheader("Segment Statistics")
             st.write("Performance summary for segments judged by this judge:")
-            
+
             # Sort by total anomalies + rule errors descending
             segment_display = segment_df.copy()
             segment_display['total_issues'] = segment_display['total_anomalies'] + segment_display['total_rule_errors']
             segment_display = segment_display.sort_values('total_issues', ascending=False)
-            
+
             # Calculate allowed errors and excess
             def calculate_allowed_errors(skater_count):
                 if skater_count <= 10:
@@ -1314,11 +1315,11 @@ if page == "Individual Judge Analysis":
                 elif skater_count <= 40:
                     return 4
                 return 5
-            
+
             segment_display['allowed_errors'] = segment_display['skater_count'].apply(calculate_allowed_errors)
             segment_display['excess_anomalies'] = segment_display['total_anomalies'] - segment_display['allowed_errors']
             segment_display['excess_anomalies'] = segment_display['excess_anomalies'].apply(lambda x: max(0, x))
-            
+
             # Format the display columns
             segment_display_cols = segment_display[[
                 'competition_name', 'competition_year', 'discipline', 'segment_name',
@@ -1326,14 +1327,14 @@ if page == "Individual Judge Analysis":
                 'pcs_anomalies', 'element_anomalies', 'total_rule_errors', 
                 'pcs_rule_errors', 'element_rule_errors'
             ]].copy()
-            
+
             segment_display_cols.columns = [
                 'Competition', 'Year', 'Discipline', 'Segment',
                 'Skaters', 'Allowed Errors', 'Total Anomalies', 'Excess Anomalies',
                 'PCS Anomalies', 'Element Anomalies', 'Total Rule Errors', 
                 'PCS Rule Errors', 'Element Rule Errors'
             ]
-            
+
             # Add totals row
             totals_row = pd.DataFrame([{
                 'Competition': 'TOTAL',
@@ -1350,27 +1351,27 @@ if page == "Individual Judge Analysis":
                 'PCS Rule Errors': segment_display_cols['PCS Rule Errors'].sum(),
                 'Element Rule Errors': segment_display_cols['Element Rule Errors'].sum()
             }])
-            
+
             segment_display_with_totals = pd.concat([segment_display_cols, totals_row], ignore_index=True)
-            
+
             st.dataframe(segment_display_with_totals, use_container_width=True)
         else:
             st.info("No segment data found for selected filters")
 
 elif page == "Rule Errors Analysis":
     st.header("Rule Errors Analysis")
-    
+
     analytics = get_analytics_safe()
-    
+
     # Filters
     st.subheader("Filters")
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         years = analytics.get_years()
         year_filter = st.selectbox("Filter by Year", ["All Years"] + years, key="rule_errors_year")
         year_filter = None if year_filter == "All Years" else year_filter
-    
+
     with col2:
         competitions = analytics.get_competitions()
         competition_names = [f"{name} ({year})" for comp_id, name, year in competitions]
@@ -1379,7 +1380,7 @@ elif page == "Rule Errors Analysis":
             comp_id for comp_id, name, year in competitions
             if f"{name} ({year})" in selected_competitions
         ] if selected_competitions else None
-    
+
     with col3:
         judges = analytics.get_judges()
         judge_names = [name for judge_id, name, location in judges]
@@ -1388,71 +1389,71 @@ elif page == "Rule Errors Analysis":
             judge_id for judge_id, name, location in judges
             if name in selected_judges
         ] if selected_judges else None
-    
+
     # Get rule errors data
     with st.spinner("Loading rule errors data..."):
         rule_errors_df = analytics.get_all_rule_errors(year_filter, competition_ids, judge_ids)
-    
+
     if rule_errors_df.empty:
         st.warning("No rule errors found with selected filters")
     else:
         # Summary statistics
         st.subheader("Rule Errors Summary")
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
             st.metric("Total Rule Errors", len(rule_errors_df))
-        
+
         with col2:
             pcs_errors = len(rule_errors_df[rule_errors_df['element_name'] == ''])
             st.metric("PCS Rule Errors", pcs_errors)
-        
+
         with col3:
             element_errors = len(rule_errors_df[rule_errors_df['element_name'] != ''])
             st.metric("Element Rule Errors", element_errors)
-        
+
         with col4:
             unique_judges = rule_errors_df['judge_name'].nunique()
             st.metric("Judges with Rule Errors", unique_judges)
-        
+
         # Rule errors by judge
         st.subheader("Rule Errors by Judge")
         judge_summary = rule_errors_df.groupby('judge_name').agg({
             'judge_id': 'first',
             'element_name': 'count'
         }).rename(columns={'element_name': 'total_rule_errors'})
-        
+
         # Count PCS vs Element errors (using element_type column to distinguish)
         pcs_errors_count = rule_errors_df[rule_errors_df['element_name'] == ''].groupby('judge_name').size().fillna(0)
         element_errors_count = rule_errors_df[rule_errors_df['element_name'] != ''].groupby('judge_name').size().fillna(0)
-        
+
         judge_summary['pcs_errors'] = pcs_errors_count
         judge_summary['element_errors'] = element_errors_count
         judge_summary = judge_summary.sort_values('total_rule_errors', ascending=False).reset_index()
-        
+
         judge_summary_display = judge_summary[['judge_name', 'total_rule_errors', 'pcs_errors', 'element_errors']].copy()
         judge_summary_display.columns = ['Judge', 'Total Rule Errors', 'PCS Errors', 'Element Errors']
-        
+
         st.dataframe(judge_summary_display, use_container_width=True)
-        
+
         # Detailed rule errors table
         st.subheader("Detailed Rule Errors")
-        
+
         # Create display dataframe with proper competition links
         display_df = rule_errors_df[[
             'judge_name', 'competition_name', 'competition_url', 'competition_year',
             'segment_name', 'discipline_name', 'skater_name', 'element_name', 'element_type',
             'judge_score', 'panel_average', 'deviation'
         ]].copy()
-        
+
         display_df.columns = [
             'Judge', 'Competition', 'Competition URL', 'Year',
             'Segment', 'Discipline', 'Skater', 'Element Name', 'Element Type',
             'Judge Score', 'Panel Average', 'Deviation'
         ]
-        
+
         st.dataframe(display_df.drop('Competition URL', axis=1), use_container_width=True)
-        
+
         # Show competition links
         if 'Competition URL' in display_df.columns and not display_df['Competition URL'].isna().all():
             st.subheader("Competition Links")
@@ -1463,14 +1464,14 @@ elif page == "Rule Errors Analysis":
 
 elif page == "Competition Analysis":
     st.header("Competition Analysis")
-    
+
     # Competition selection
     analytics = get_analytics_safe()
     competitions = analytics.get_competitions()
     if not competitions:
         st.error("No competitions found in database")
         st.stop()
-    
+
     competition_options = {
         f"{name} ({year})": comp_id
         for comp_id, name, year in competitions
@@ -1479,17 +1480,17 @@ elif page == "Competition Analysis":
         "Select Competition", 
         list(competition_options.keys())
     )
-    
+
     if selected_competition:
         competition_id = competition_options[selected_competition]
-        
+
         # Get segment statistics for all judges in this competition efficiently
         with st.spinner("Loading competition data..."):
             segment_stats = st.cache_data(
                 analytics.get_competition_segment_statistics,
                 ttl=300  # Cache for 5 minutes
             )(competition_id)
-        
+
         if segment_stats.empty:
             st.warning("No segment statistics found for this competition")
         else:
@@ -1501,13 +1502,13 @@ elif page == "Competition Analysis":
                     return 2
                 else:
                     return 3
-            
+
             # Build the judge-segment grid
             st.subheader(f"Judge Performance Grid - {selected_competition}")
             # Calculate allowed and excess anomalies
             segment_stats['allowed_errors'] = segment_stats['skater_count'].apply(calculate_allowed_errors)
             segment_stats['excess_anomalies'] = (segment_stats['total_anomalies'] - segment_stats['allowed_errors']).apply(lambda x: max(0, x))
-            
+
             # Create the main grid showing total anomalies
             anomalies_grid = segment_stats.pivot_table(
                 index=['discipline', 'segment_name'],
@@ -1516,7 +1517,7 @@ elif page == "Competition Analysis":
                 fill_value=0,
                 aggfunc='sum'
             )
-            
+
             # Create grid for excess anomalies
             excess_grid = segment_stats.pivot_table(
                 index=['discipline', 'segment_name'],
@@ -1525,16 +1526,16 @@ elif page == "Competition Analysis":
                 fill_value=0,
                 aggfunc='sum'
             )
-            
+
             # Replace 0s with empty strings for display but keep numeric for calculations
             anomalies_grid_display = anomalies_grid.replace(0, '')
             excess_grid_display = excess_grid.replace(0, '')
-            
+
             # Display total anomalies grid
             st.subheader("Total Anomalies by Judge and Segment")
             if not anomalies_grid.empty:
                 st.dataframe(anomalies_grid_display, use_container_width=True)
-                
+
                 # Add judge totals for total anomalies
                 st.subheader("Judge Totals - Total Anomalies")
                 judge_totals_anomalies = anomalies_grid.sum().sort_values(ascending=False)
@@ -1545,12 +1546,12 @@ elif page == "Competition Analysis":
                 st.dataframe(judge_totals_df_anomalies, use_container_width=True)
             else:
                 st.info("No anomalies data available for grid display")
-            
+
             # Display excess anomalies grid
             st.subheader("Excess Anomalies by Judge and Segment")
             if not excess_grid.empty:
                 st.dataframe(excess_grid_display, use_container_width=True)
-                
+
                 # Add judge totals for excess anomalies
                 st.subheader("Judge Totals - Excess Anomalies")
                 judge_totals_excess = excess_grid.sum().sort_values(ascending=False)
@@ -1561,30 +1562,30 @@ elif page == "Competition Analysis":
                 st.dataframe(judge_totals_df_excess, use_container_width=True)
             else:
                 st.info("No excess anomalies data available for grid display")
-            
+
             # Rule Errors Summary and List
             st.subheader("Rule Errors Analysis")
             with st.spinner("Loading rule errors data..."):
                 rule_errors_df = analytics.get_all_rule_errors(
                     competition_ids=[competition_id]
                 )
-            
+
             if not rule_errors_df.empty:
                 # Rule errors summary
                 col1, col2, col3 = st.columns(3)
-                
+
                 with col1:
                     total_rule_errors = len(rule_errors_df)
                     st.metric("Total Rule Errors", total_rule_errors)
-                
+
                 with col2:
                     pcs_rule_errors = len(rule_errors_df[rule_errors_df['element_name'] == ''])
                     st.metric("PCS Rule Errors", pcs_rule_errors)
-                
+
                 with col3:
                     element_rule_errors = len(rule_errors_df[rule_errors_df['element_name'] != ''])
                     st.metric("Element Rule Errors", element_rule_errors)
-                
+
                 # Judge breakdown
                 rule_error_judge_summary = rule_errors_df.groupby('judge_name').size().sort_values(ascending=False)
                 st.subheader("Rule Errors by Judge")
@@ -1593,7 +1594,7 @@ elif page == "Competition Analysis":
                     'Rule Errors': rule_error_judge_summary.values
                 })
                 st.dataframe(judge_rule_error_df, use_container_width=True)
-                
+
                 # Detailed rule errors table
                 st.subheader("Detailed Rule Errors")
                 display_rule_errors = rule_errors_df[[
@@ -1601,47 +1602,47 @@ elif page == "Competition Analysis":
                     'element_name', 'element_type', 'judge_score', 
                     'panel_average', 'deviation'
                 ]].copy()
-                
+
                 # Add a score type column based on whether element_name is empty
                 display_rule_errors['score_type'] = display_rule_errors['element_name'].apply(
                     lambda x: 'PCS' if x == '' else 'Element'
                 )
-                
+
                 # Fill NaN values for better display
                 display_rule_errors['element_name'] = display_rule_errors['element_name'].fillna('N/A')
                 display_rule_errors['element_type'] = display_rule_errors['element_type'].fillna('N/A')
-                
+
                 # Reorder columns to include score_type
                 display_rule_errors = display_rule_errors[[
                     'judge_name', 'segment_name', 'discipline_name', 'skater_name',
                     'score_type', 'element_name', 'element_type', 'judge_score', 
                     'panel_average', 'deviation'
                 ]]
-                
+
                 display_rule_errors.columns = [
                     'Judge', 'Segment', 'Discipline', 'Skater', 'Score Type',
                     'Element Name', 'Element Type', 'Judge Score', 'Panel Average', 'Deviation'
                 ]
-                
+
                 st.dataframe(display_rule_errors, use_container_width=True)
             else:
                 st.info("No rule errors found for this competition")
-            
+
             # Anomalies Analysis
             st.subheader("Anomalies Analysis")
-            
+
             # Get all judges for this competition from segment stats
             competition_judges = [int(judge_id) for judge_id in segment_stats['judge_id'].unique()]
-            
+
             # Collect all anomalies data for this competition
             with st.spinner("Loading anomalies data..."):
                 all_pcs_anomalies = []
                 all_element_anomalies = []
-                
+
                 # Get judge names mapping
                 judges = analytics.get_judges()
                 judge_names = {judge_id: judge_name for judge_id, judge_name, _ in judges}
-                
+
                 for judge_id in competition_judges:
                     # Get PCS anomalies for this judge and competition
                     judge_pcs = analytics.get_judge_pcs_stats(
@@ -1654,7 +1655,7 @@ elif page == "Competition Analysis":
                             pcs_anomalies['judge_id'] = judge_id
                             pcs_anomalies['judge_name'] = judge_names.get(judge_id, 'Unknown')
                             all_pcs_anomalies.append(pcs_anomalies)
-                    
+
                     # Get element anomalies for this judge and competition
                     judge_elements = analytics.get_judge_element_stats(
                         judge_id, competition_ids=[competition_id]
@@ -1666,20 +1667,20 @@ elif page == "Competition Analysis":
                             element_anomalies['judge_id'] = judge_id
                             element_anomalies['judge_name'] = judge_names.get(judge_id, 'Unknown')
                             all_element_anomalies.append(element_anomalies)
-                
+
                 # Combine all anomalies
                 pcs_anomalies_df = pd.concat(all_pcs_anomalies, ignore_index=True) if all_pcs_anomalies else pd.DataFrame()
                 element_anomalies_df = pd.concat(all_element_anomalies, ignore_index=True) if all_element_anomalies else pd.DataFrame()
-            
+
             if not pcs_anomalies_df.empty or not element_anomalies_df.empty:
-                
+
                 # Display PCS anomalies
                 if not pcs_anomalies_df.empty:
                     st.subheader("PCS Anomalies")
-                    
+
                     # Filter PCS data based on issue types
                     filtered_pcs = pcs_anomalies_df.copy()
-                    
+
                     if not filtered_pcs.empty:
                         def get_issue_type_pcs(row):
                             issues = []
@@ -1689,30 +1690,30 @@ elif page == "Competition Analysis":
                             if row['is_rule_error']:
                                 issues.append('Rule Error')
                             return ', '.join(issues)
-                        
+
                         filtered_pcs['issue_type'] = filtered_pcs.apply(get_issue_type_pcs, axis=1)
-                        
+
                         display_pcs_anomalies = filtered_pcs[[
                             'judge_name', 'segment_name', 'discipline_name', 'skater_name',
                             'pcs_type_name', 'judge_score', 'panel_average', 'deviation', 'issue_type'
                         ]].copy()
-                        
+
                         display_pcs_anomalies.columns = [
                             'Judge', 'Segment', 'Discipline', 'Skater', 'PCS Component',
                             'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
                         ]
-                        
+
                         st.dataframe(display_pcs_anomalies, use_container_width=True)
                     else:
                         st.info("No PCS anomalies match the selected filters")
-                
+
                 # Display element anomalies
                 if not element_anomalies_df.empty:
                     st.subheader("Element Anomalies")
-                    
+
                     # Filter element data based on issue types
                     filtered_elements = element_anomalies_df.copy()
-                    
+
                     if not filtered_elements.empty:
                         def get_issue_type_elem(row):
                             issues = []
@@ -1722,24 +1723,196 @@ elif page == "Competition Analysis":
                             if row['is_rule_error']:
                                 issues.append('Rule Error')
                             return ', '.join(issues)
-                        
+
                         filtered_elements['issue_type'] = filtered_elements.apply(get_issue_type_elem, axis=1)
-                        
+
                         display_element_anomalies = filtered_elements[[
                             'judge_name', 'segment_name', 'discipline_name', 'skater_name',
                             'element_name', 'element_type_name', 'judge_score', 'panel_average', 'deviation', 'issue_type'
                         ]].copy()
-                        
+
                         display_element_anomalies.columns = [
                             'Judge', 'Segment', 'Discipline', 'Skater', 'Element Name',
                             'Element Type', 'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
                         ]
-                        
+
                         st.dataframe(display_element_anomalies, use_container_width=True)
                     else:
                         st.info("No element anomalies match the selected filters")
             else:
                 st.info("No anomalies found for this competition")
+
+        # Judge Performance Summary Table
+        st.markdown("---")
+        st.subheader("Judge Performance Summary")
+        st.markdown("Throwout and anomaly rates for all judges at this competition")
+        
+        with st.spinner("Calculating judge performance metrics..."):
+            # Get all segments for this competition
+            segments = analytics.session.query(
+                Segment.id, Segment.name, DisciplineType.name.label('discipline')
+            ).join(
+                DisciplineType, Segment.discipline_type_id == DisciplineType.id
+            ).filter(
+                Segment.competition_id == competition_id
+            ).all()
+            
+            segment_ids = [s.id for s in segments]
+            segment_info = {s.id: {'name': s.name, 'discipline': s.discipline} for s in segments}
+            
+            if segment_ids:
+                # Calculate PCS stats per judge
+                pcs_stats = analytics.session.query(
+                    PcsScorePerJudge.judge_id,
+                    Judge.name.label('judge_name'),
+                    func.count().label('total_pcs'),
+                    func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label('pcs_throwouts'),
+                    func.sum(case((func.abs(PcsScorePerJudge.deviation) >= 1.5, 1), else_=0)).label('pcs_anomalies'),
+                    func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label('pcs_rule_errors')
+                ).join(
+                    Judge, PcsScorePerJudge.judge_id == Judge.id
+                ).join(
+                    SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+                ).filter(
+                    SkaterSegment.segment_id.in_(segment_ids)
+                ).group_by(
+                    PcsScorePerJudge.judge_id, Judge.name
+                ).all()
+                
+                # Calculate element stats per judge
+                element_stats = analytics.session.query(
+                    ElementScorePerJudge.judge_id,
+                    Judge.name.label('judge_name'),
+                    func.count().label('total_elements'),
+                    func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label('element_throwouts'),
+                    func.sum(case((func.abs(ElementScorePerJudge.deviation) >= 2.0, 1), else_=0)).label('element_anomalies'),
+                    func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label('element_rule_errors')
+                ).join(
+                    Judge, ElementScorePerJudge.judge_id == Judge.id
+                ).join(
+                    Element, ElementScorePerJudge.element_id == Element.id
+                ).join(
+                    SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+                ).filter(
+                    SkaterSegment.segment_id.in_(segment_ids)
+                ).group_by(
+                    ElementScorePerJudge.judge_id, Judge.name
+                ).all()
+                
+                # Combine into summary
+                pcs_dict = {s.judge_id: s for s in pcs_stats}
+                elem_dict = {s.judge_id: s for s in element_stats}
+                all_judge_ids = set(pcs_dict.keys()) | set(elem_dict.keys())
+                
+                summary_rows = []
+                for judge_id in all_judge_ids:
+                    pcs = pcs_dict.get(judge_id)
+                    elem = elem_dict.get(judge_id)
+                    
+                    judge_name = pcs.judge_name if pcs else elem.judge_name
+                    
+                    total_pcs = pcs.total_pcs if pcs else 0
+                    pcs_throwouts = pcs.pcs_throwouts if pcs else 0
+                    pcs_anomalies = pcs.pcs_anomalies if pcs else 0
+                    pcs_rule_errors = pcs.pcs_rule_errors if pcs else 0
+                    
+                    total_elements = elem.total_elements if elem else 0
+                    elem_throwouts = elem.element_throwouts if elem else 0
+                    elem_anomalies = elem.element_anomalies if elem else 0
+                    elem_rule_errors = elem.element_rule_errors if elem else 0
+                    
+                    total_scores = total_pcs + total_elements
+                    total_throwouts = pcs_throwouts + elem_throwouts
+                    total_anomalies = pcs_anomalies + elem_anomalies
+                    total_rule_errors = pcs_rule_errors + elem_rule_errors
+                    
+                    summary_rows.append({
+                        'Judge': judge_name,
+                        'PCS Scores': total_pcs,
+                        'PCS Throwout %': round(pcs_throwouts / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Anomaly %': round(pcs_anomalies / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'Element Scores': total_elements,
+                        'Elem Throwout %': round(elem_throwouts / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Anomaly %': round(elem_anomalies / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Total Throwout %': round((pcs_throwouts + elem_throwouts) / (total_pcs + total_elements) * 100, 2) if (total_pcs + total_elements) > 0 else 0,
+                        'Total Anomaly %': round((pcs_anomalies + elem_anomalies) / (total_pcs + total_elements) * 100, 2) if (total_pcs + total_elements) > 0 else 0
+                    })
+                
+                if summary_rows:
+                    summary_df = pd.DataFrame(summary_rows)
+                    summary_df = summary_df.sort_values('Total Throwout %', ascending=False)
+                    st.dataframe(summary_df, use_container_width=True)
+                    
+                    # Per-segment breakdown toggle
+                    if st.checkbox("Show per-segment breakdown"):
+                        st.subheader("Judge Performance by Segment")
+                        
+                        for seg_id, seg_info in segment_info.items():
+                            with st.expander(f"{seg_info['discipline']} - {seg_info['name']}"):
+                                # PCS stats for this segment
+                                seg_pcs = analytics.session.query(
+                                    Judge.name.label('judge_name'),
+                                    func.count().label('total'),
+                                    func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label('throwouts'),
+                                    func.sum(case((func.abs(PcsScorePerJudge.deviation) >= 1.5, 1), else_=0)).label('anomalies')
+                                ).join(
+                                    Judge, PcsScorePerJudge.judge_id == Judge.id
+                                ).join(
+                                    SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
+                                ).filter(
+                                    SkaterSegment.segment_id == seg_id
+                                ).group_by(Judge.name).all()
+                                
+                                # Element stats for this segment
+                                seg_elem = analytics.session.query(
+                                    Judge.name.label('judge_name'),
+                                    func.count().label('total'),
+                                    func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label('throwouts'),
+                                    func.sum(case((func.abs(ElementScorePerJudge.deviation) >= 2.0, 1), else_=0)).label('anomalies')
+                                ).join(
+                                    Judge, ElementScorePerJudge.judge_id == Judge.id
+                                ).join(
+                                    Element, ElementScorePerJudge.element_id == Element.id
+                                ).join(
+                                    SkaterSegment, Element.skater_segment_id == SkaterSegment.id
+                                ).filter(
+                                    SkaterSegment.segment_id == seg_id
+                                ).group_by(Judge.name).all()
+                                
+                                pcs_dict_seg = {r.judge_name: r for r in seg_pcs}
+                                elem_dict_seg = {r.judge_name: r for r in seg_elem}
+                                all_judges_seg = set(pcs_dict_seg.keys()) | set(elem_dict_seg.keys())
+                                
+                                seg_rows = []
+                                for jn in all_judges_seg:
+                                    p = pcs_dict_seg.get(jn)
+                                    e = elem_dict_seg.get(jn)
+                                    
+                                    pcs_total = p.total if p else 0
+                                    pcs_throw = p.throwouts if p else 0
+                                    pcs_anom = p.anomalies if p else 0
+                                    elem_total = e.total if e else 0
+                                    elem_throw = e.throwouts if e else 0
+                                    elem_anom = e.anomalies if e else 0
+                                    
+                                    seg_rows.append({
+                                        'Judge': jn,
+                                        'PCS Scores': pcs_total,
+                                        'PCS Throwout %': round(pcs_throw / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Anomaly %': round(pcs_anom / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'Elem Scores': elem_total,
+                                        'Elem Throwout %': round(elem_throw / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Anomaly %': round(elem_anom / elem_total * 100, 2) if elem_total > 0 else 0
+                                    })
+                                
+                                if seg_rows:
+                                    seg_df = pd.DataFrame(seg_rows)
+                                    seg_df = seg_df.sort_values('PCS Throwout %', ascending=False)
+                                    st.dataframe(seg_df, use_container_width=True)
+                else:
+                    st.info("No judge performance data available for this competition")
+            else:
+                st.info("No segments found for this competition")
 
 elif page == "Multi-Judge Comparison":
     st.header("Multi-Judge Comparison")
