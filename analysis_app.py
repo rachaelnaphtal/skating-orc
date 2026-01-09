@@ -1761,13 +1761,18 @@ elif page == "Competition Analysis":
             segment_info = {s.id: {'name': s.name, 'discipline': s.discipline} for s in segments}
             
             if segment_ids:
-                # Calculate PCS stats per judge
+                # Calculate PCS stats per judge with high/low breakdown
+                from sqlalchemy import and_
                 pcs_stats = analytics.session.query(
                     PcsScorePerJudge.judge_id,
                     Judge.name.label('judge_name'),
                     func.count().label('total_pcs'),
                     func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label('pcs_throwouts'),
+                    func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation > 0), 1), else_=0)).label('pcs_throwouts_high'),
+                    func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation < 0), 1), else_=0)).label('pcs_throwouts_low'),
                     func.sum(case((func.abs(PcsScorePerJudge.deviation) >= 1.5, 1), else_=0)).label('pcs_anomalies'),
+                    func.sum(case((PcsScorePerJudge.deviation >= 1.5, 1), else_=0)).label('pcs_anomalies_high'),
+                    func.sum(case((PcsScorePerJudge.deviation <= -1.5, 1), else_=0)).label('pcs_anomalies_low'),
                     func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label('pcs_rule_errors')
                 ).join(
                     Judge, PcsScorePerJudge.judge_id == Judge.id
@@ -1779,13 +1784,17 @@ elif page == "Competition Analysis":
                     PcsScorePerJudge.judge_id, Judge.name
                 ).all()
                 
-                # Calculate element stats per judge
+                # Calculate element stats per judge with high/low breakdown
                 element_stats = analytics.session.query(
                     ElementScorePerJudge.judge_id,
                     Judge.name.label('judge_name'),
                     func.count().label('total_elements'),
                     func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label('element_throwouts'),
+                    func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation > 0), 1), else_=0)).label('element_throwouts_high'),
+                    func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation < 0), 1), else_=0)).label('element_throwouts_low'),
                     func.sum(case((func.abs(ElementScorePerJudge.deviation) >= 2.0, 1), else_=0)).label('element_anomalies'),
+                    func.sum(case((ElementScorePerJudge.deviation >= 2.0, 1), else_=0)).label('element_anomalies_high'),
+                    func.sum(case((ElementScorePerJudge.deviation <= -2.0, 1), else_=0)).label('element_anomalies_low'),
                     func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label('element_rule_errors')
                 ).join(
                     Judge, ElementScorePerJudge.judge_id == Judge.id
@@ -1813,34 +1822,41 @@ elif page == "Competition Analysis":
                     
                     total_pcs = pcs.total_pcs if pcs else 0
                     pcs_throwouts = pcs.pcs_throwouts if pcs else 0
+                    pcs_throwouts_high = pcs.pcs_throwouts_high if pcs else 0
+                    pcs_throwouts_low = pcs.pcs_throwouts_low if pcs else 0
                     pcs_anomalies = pcs.pcs_anomalies if pcs else 0
-                    pcs_rule_errors = pcs.pcs_rule_errors if pcs else 0
+                    pcs_anomalies_high = pcs.pcs_anomalies_high if pcs else 0
+                    pcs_anomalies_low = pcs.pcs_anomalies_low if pcs else 0
                     
                     total_elements = elem.total_elements if elem else 0
                     elem_throwouts = elem.element_throwouts if elem else 0
+                    elem_throwouts_high = elem.element_throwouts_high if elem else 0
+                    elem_throwouts_low = elem.element_throwouts_low if elem else 0
                     elem_anomalies = elem.element_anomalies if elem else 0
-                    elem_rule_errors = elem.element_rule_errors if elem else 0
-                    
-                    total_scores = total_pcs + total_elements
-                    total_throwouts = pcs_throwouts + elem_throwouts
-                    total_anomalies = pcs_anomalies + elem_anomalies
-                    total_rule_errors = pcs_rule_errors + elem_rule_errors
+                    elem_anomalies_high = elem.element_anomalies_high if elem else 0
+                    elem_anomalies_low = elem.element_anomalies_low if elem else 0
                     
                     summary_rows.append({
                         'Judge': judge_name,
                         'PCS Scores': total_pcs,
-                        'PCS Throwout %': round(pcs_throwouts / total_pcs * 100, 2) if total_pcs > 0 else 0,
-                        'PCS Anomaly %': round(pcs_anomalies / total_pcs * 100, 2) if total_pcs > 0 else 0,
-                        'Element Scores': total_elements,
-                        'Elem Throwout %': round(elem_throwouts / total_elements * 100, 2) if total_elements > 0 else 0,
-                        'Elem Anomaly %': round(elem_anomalies / total_elements * 100, 2) if total_elements > 0 else 0,
-                        'Total Throwout %': round((pcs_throwouts + elem_throwouts) / (total_pcs + total_elements) * 100, 2) if (total_pcs + total_elements) > 0 else 0,
-                        'Total Anomaly %': round((pcs_anomalies + elem_anomalies) / (total_pcs + total_elements) * 100, 2) if (total_pcs + total_elements) > 0 else 0
+                        'PCS Throw %': round(pcs_throwouts / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Throw High %': round(pcs_throwouts_high / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Throw Low %': round(pcs_throwouts_low / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Anom %': round(pcs_anomalies / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Anom High %': round(pcs_anomalies_high / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'PCS Anom Low %': round(pcs_anomalies_low / total_pcs * 100, 2) if total_pcs > 0 else 0,
+                        'Elem Scores': total_elements,
+                        'Elem Throw %': round(elem_throwouts / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Throw High %': round(elem_throwouts_high / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Throw Low %': round(elem_throwouts_low / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Anom %': round(elem_anomalies / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Anom High %': round(elem_anomalies_high / total_elements * 100, 2) if total_elements > 0 else 0,
+                        'Elem Anom Low %': round(elem_anomalies_low / total_elements * 100, 2) if total_elements > 0 else 0
                     })
                 
                 if summary_rows:
                     summary_df = pd.DataFrame(summary_rows)
-                    summary_df = summary_df.sort_values('Total Throwout %', ascending=False)
+                    summary_df = summary_df.sort_values('PCS Throw %', ascending=False)
                     st.dataframe(summary_df, use_container_width=True)
                     
                     # Per-segment breakdown toggle
@@ -1849,12 +1865,15 @@ elif page == "Competition Analysis":
                         
                         for seg_id, seg_info in segment_info.items():
                             with st.expander(f"{seg_info['discipline']} - {seg_info['name']}"):
-                                # PCS stats for this segment
+                                # PCS stats for this segment with high/low
+                                from sqlalchemy import and_
                                 seg_pcs = analytics.session.query(
                                     Judge.name.label('judge_name'),
                                     func.count().label('total'),
-                                    func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label('throwouts'),
-                                    func.sum(case((func.abs(PcsScorePerJudge.deviation) >= 1.5, 1), else_=0)).label('anomalies')
+                                    func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation > 0), 1), else_=0)).label('throw_high'),
+                                    func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation < 0), 1), else_=0)).label('throw_low'),
+                                    func.sum(case((PcsScorePerJudge.deviation >= 1.5, 1), else_=0)).label('anom_high'),
+                                    func.sum(case((PcsScorePerJudge.deviation <= -1.5, 1), else_=0)).label('anom_low')
                                 ).join(
                                     Judge, PcsScorePerJudge.judge_id == Judge.id
                                 ).join(
@@ -1863,12 +1882,14 @@ elif page == "Competition Analysis":
                                     SkaterSegment.segment_id == seg_id
                                 ).group_by(Judge.name).all()
                                 
-                                # Element stats for this segment
+                                # Element stats for this segment with high/low
                                 seg_elem = analytics.session.query(
                                     Judge.name.label('judge_name'),
                                     func.count().label('total'),
-                                    func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label('throwouts'),
-                                    func.sum(case((func.abs(ElementScorePerJudge.deviation) >= 2.0, 1), else_=0)).label('anomalies')
+                                    func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation > 0), 1), else_=0)).label('throw_high'),
+                                    func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation < 0), 1), else_=0)).label('throw_low'),
+                                    func.sum(case((ElementScorePerJudge.deviation >= 2.0, 1), else_=0)).label('anom_high'),
+                                    func.sum(case((ElementScorePerJudge.deviation <= -2.0, 1), else_=0)).label('anom_low')
                                 ).join(
                                     Judge, ElementScorePerJudge.judge_id == Judge.id
                                 ).join(
@@ -1889,25 +1910,41 @@ elif page == "Competition Analysis":
                                     e = elem_dict_seg.get(jn)
                                     
                                     pcs_total = p.total if p else 0
-                                    pcs_throw = p.throwouts if p else 0
-                                    pcs_anom = p.anomalies if p else 0
+                                    pcs_throw_h = p.throw_high if p else 0
+                                    pcs_throw_l = p.throw_low if p else 0
+                                    pcs_anom_h = p.anom_high if p else 0
+                                    pcs_anom_l = p.anom_low if p else 0
                                     elem_total = e.total if e else 0
-                                    elem_throw = e.throwouts if e else 0
-                                    elem_anom = e.anomalies if e else 0
+                                    elem_throw_h = e.throw_high if e else 0
+                                    elem_throw_l = e.throw_low if e else 0
+                                    elem_anom_h = e.anom_high if e else 0
+                                    elem_anom_l = e.anom_low if e else 0
+                                    
+                                    pcs_throw_total = pcs_throw_h + pcs_throw_l
+                                    pcs_anom_total = pcs_anom_h + pcs_anom_l
+                                    elem_throw_total = elem_throw_h + elem_throw_l
+                                    elem_anom_total = elem_anom_h + elem_anom_l
                                     
                                     seg_rows.append({
                                         'Judge': jn,
                                         'PCS Scores': pcs_total,
-                                        'PCS Throwout %': round(pcs_throw / pcs_total * 100, 2) if pcs_total > 0 else 0,
-                                        'PCS Anomaly %': round(pcs_anom / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Throw %': round(pcs_throw_total / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Throw High %': round(pcs_throw_h / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Throw Low %': round(pcs_throw_l / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Anom %': round(pcs_anom_total / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Anom High %': round(pcs_anom_h / pcs_total * 100, 2) if pcs_total > 0 else 0,
+                                        'PCS Anom Low %': round(pcs_anom_l / pcs_total * 100, 2) if pcs_total > 0 else 0,
                                         'Elem Scores': elem_total,
-                                        'Elem Throwout %': round(elem_throw / elem_total * 100, 2) if elem_total > 0 else 0,
-                                        'Elem Anomaly %': round(elem_anom / elem_total * 100, 2) if elem_total > 0 else 0
+                                        'Elem Throw %': round(elem_throw_total / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Throw High %': round(elem_throw_h / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Throw Low %': round(elem_throw_l / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Anom %': round(elem_anom_total / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Anom High %': round(elem_anom_h / elem_total * 100, 2) if elem_total > 0 else 0,
+                                        'Elem Anom Low %': round(elem_anom_l / elem_total * 100, 2) if elem_total > 0 else 0
                                     })
                                 
                                 if seg_rows:
                                     seg_df = pd.DataFrame(seg_rows)
-                                    seg_df = seg_df.sort_values('PCS Throwout %', ascending=False)
                                     st.dataframe(seg_df, use_container_width=True)
                 else:
                     st.info("No judge performance data available for this competition")
