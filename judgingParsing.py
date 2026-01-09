@@ -806,25 +806,23 @@ def match_skater_fsm(line):
         ^
         (\d+)                                           # 1- Skate order
         \s+
-        ([A-Za-z0-9-'/]+(?:\s+[A-Za-z0-9-'/]+)*)          # 2- Name
-        # (.+?) 
-         \s+
-        # ([A-Z]{3})?                                      # 3- Country
-        # \s+
-        (\d+)                                           # 4- Start order
+        ([A-Za-z0-9\-'/\.]+(?:\s+[A-Za-z0-9\-'/\.]+)*)  # 2- Name / club
         \s+
-        (-?\d+(?:\.\d+)?)                               # 5- Total
+        (\d+)                                           # 3- Start order
         \s+
-        (-?\d+(?:\.\d+)?)                               # 6- TES
+        (-?\d+\.\d+)                                   # 4- Total
         \s+
-        (-?\d+(?:\.\d+)?)                               # 7- PCS
+        (-?\d+\.\d+)                                   # 5- TES
         \s+
-        (-?\d+(?:\.\d+)?)                               # 8- Deductions
+        (-?\d+\.\d+)                                   # 6- PCS
+        \s+
+        (-?\d+\.\d+)                                   # 7- Deductions
         $
         """,
         line,
         re.VERBOSE,
     )
+
 
 def get_allowed_errors(num_skaters: int):
     if num_skaters <= 10:

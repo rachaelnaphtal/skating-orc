@@ -1050,5 +1050,5 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36369',
     #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
-           '2026_US_Championships_Senior', write_to_database=False, pdf_folder=pdf_folder, year=2526, isFSM=True)
+           '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
     # loadInfoForExistingCompetitions()

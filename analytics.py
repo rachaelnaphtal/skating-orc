@@ -700,7 +700,7 @@ class JudgeAnalytics:
         ).join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
         ).join(Segment, SkaterSegment.segment_id == Segment.id
         ).join(Competition, Segment.competition_id == Competition.id)
-        
+
         # Apply filters
         if year_filter:
             pcs_query = pcs_query.filter(Competition.year == year_filter)
@@ -708,7 +708,7 @@ class JudgeAnalytics:
             pcs_query = pcs_query.filter(Competition.id.in_(competition_ids))
         if discipline_type_ids:
             pcs_query = pcs_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
-            
+
         pcs_stats = self.session.execute(pcs_query.group_by(PcsScorePerJudge.judge_id)).all()
         pcs_dict = {judge_id: dict(total=pcs_total, throwouts=pcs_thr,
                                 anomalies=pcs_anom, rule_errors=pcs_rules)
@@ -726,7 +726,7 @@ class JudgeAnalytics:
         ).join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id
         ).join(Segment, SkaterSegment.segment_id == Segment.id
         ).join(Competition, Segment.competition_id == Competition.id)
-        
+
         # Apply filters
         if year_filter:
             elem_query = elem_query.filter(Competition.year == year_filter)
@@ -734,7 +734,7 @@ class JudgeAnalytics:
             elem_query = elem_query.filter(Competition.id.in_(competition_ids))
         if discipline_type_ids:
             elem_query = elem_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
-            
+
         elem_stats = self.session.execute(elem_query.group_by(ElementScorePerJudge.judge_id)).all()
         elem_dict = {judge_id: dict(total=elem_total, throwouts=elem_thr,
                                     anomalies=elem_anom, rule_errors=elem_rules)
@@ -755,15 +755,39 @@ class JudgeAnalytics:
             if not pcs and not elem:
                 continue
 
-            total_scores = pcs.get("total", 0) + elem.get("total", 0)
-            throwouts = pcs.get("throwouts", 0) + elem.get("throwouts", 0)
-            anomalies = pcs.get("anomalies", 0) + elem.get("anomalies", 0)
-            rule_errors = pcs.get("rule_errors", 0) + elem.get("rule_errors", 0)
+            # Apply score_type filtering
+            if score_type == 'pcs':
+                total_scores = pcs.get("total", 0)
+                throwouts = pcs.get("throwouts", 0)
+                anomalies = pcs.get("anomalies", 0)
+                rule_errors = pcs.get("rule_errors", 0)
+                pcs_scores = pcs.get("total", 0)
+                element_scores = 0
+            elif score_type == 'element':
+                total_scores = elem.get("total", 0)
+                throwouts = elem.get("throwouts", 0)
+                anomalies = elem.get("anomalies", 0)
+                rule_errors = elem.get("rule_errors", 0)
+                pcs_scores = 0
+                element_scores = elem.get("total", 0)
+            else:  # 'both'
+                total_scores = pcs.get("total", 0) + elem.get("total", 0)
+                throwouts = pcs.get("throwouts", 0) + elem.get("throwouts", 0)
+                anomalies = pcs.get("anomalies", 0) + elem.get("anomalies", 0)
+                rule_errors = pcs.get("rule_errors", 0) + elem.get("rule_errors", 0)
+                pcs_scores = pcs.get("total", 0)
+                element_scores = elem.get("total", 0)
+
+            # Skip if no scores for selected type
+            if total_scores == 0:
+                continue
 
             if metric == 'throwout_rate':
                 value = (throwouts / total_scores * 100) if total_scores else 0
             elif metric == 'anomaly_rate':
                 value = (anomalies / total_scores * 100) if total_scores else 0
+            elif metric == 'rule_error_rate':
+                value = (rule_errors / total_scores * 100) if total_scores else 0
             elif metric == 'rule_errors':
                 value = rule_errors
                 if value == 0:
@@ -778,7 +802,9 @@ class JudgeAnalytics:
             heatmap_data.append({
                 'judge_name': judge_name,
                 'metric_value': round(value, 2) if isinstance(value, (int, float)) else value,
-                'total_scores': total_scores
+                'total_scores': total_scores,
+                'pcs_scores': pcs_scores,
+                'element_scores': element_scores
             })
 
         return pd.DataFrame(heatmap_data)
@@ -851,15 +877,33 @@ class JudgeAnalytics:
                 if not pcs and not elem:
                     continue
 
-                total_scores = pcs.get("total", 0) + elem.get("total", 0)
-                throwouts = pcs.get("throwouts", 0) + elem.get("throwouts", 0)
-                anomalies = pcs.get("anomalies", 0) + elem.get("anomalies", 0)
-                rule_errors = pcs.get("rule_errors", 0) + elem.get("rule_errors", 0)
+                # Apply score_type filtering
+                if score_type == 'pcs':
+                    total_scores = pcs.get("total", 0)
+                    throwouts = pcs.get("throwouts", 0)
+                    anomalies = pcs.get("anomalies", 0)
+                    rule_errors = pcs.get("rule_errors", 0)
+                elif score_type == 'element':
+                    total_scores = elem.get("total", 0)
+                    throwouts = elem.get("throwouts", 0)
+                    anomalies = elem.get("anomalies", 0)
+                    rule_errors = elem.get("rule_errors", 0)
+                else:  # 'both'
+                    total_scores = pcs.get("total", 0) + elem.get("total", 0)
+                    throwouts = pcs.get("throwouts", 0) + elem.get("throwouts", 0)
+                    anomalies = pcs.get("anomalies", 0) + elem.get("anomalies", 0)
+                    rule_errors = pcs.get("rule_errors", 0) + elem.get("rule_errors", 0)
+
+                # Skip if no scores for selected type
+                if total_scores == 0:
+                    continue
 
                 if metric == 'throwout_rate':
                     value = (throwouts / total_scores * 100) if total_scores else 0
                 elif metric == 'anomaly_rate':
                     value = (anomalies / total_scores * 100) if total_scores else 0
+                elif metric == 'rule_error_rate':
+                    value = (rule_errors / total_scores * 100) if total_scores else 0
                 elif metric == 'rule_errors':
                     value = rule_errors
                     if value == 0:
@@ -976,7 +1020,7 @@ class JudgeAnalytics:
         segments = [segment[0] for segment in segments_raw]
 
         rule_errors_per_judge = defaultdict(int)
-        
+
         for segment in segments:
             # Get PCS rule errors for this segment
             if score_type in ['pcs', 'both']:
@@ -989,7 +1033,7 @@ class JudgeAnalytics:
                     SkaterSegment.segment_id == segment.id,
                     PcsScorePerJudge.is_rule_error == True
                 ).group_by(PcsScorePerJudge.judge_id).all()
-                
+
                 for judge_id, count in pcs_rule_errors:
                     rule_errors_per_judge[judge_id] += count
 
@@ -1006,7 +1050,7 @@ class JudgeAnalytics:
                     SkaterSegment.segment_id == segment.id,
                     ElementScorePerJudge.is_rule_error == True
                 ).group_by(ElementScorePerJudge.judge_id).all()
-                
+
                 for judge_id, count in element_rule_errors:
                     rule_errors_per_judge[judge_id] += count
 
