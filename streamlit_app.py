@@ -291,7 +291,7 @@ def generate_full_competition_report():
                 mime="application/vnd.ms-excel",
             )
         if generate_analysis_sheet:
-            analysis_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}_Additional_Analysis.xlsx"
+            analysis_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}_OutOfRangeAnalysis.xlsx"
             with open(analysis_path, "rb") as file:
                 st.download_button(
                     label=f"Download Competition Summary Report- {report_name_value} Additional Analysis",

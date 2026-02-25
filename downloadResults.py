@@ -1039,8 +1039,12 @@ if __name__ == "__main__":
     #        '2025_Stars_And_Stripes_Synchro_Classic', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36463',
     #        '2025_Capital_Ice_Synchro_Classic', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
-    #        '2026_US_Champs_Junior', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34247',
+    #        '2026_Eastern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34248',
+           '2026_Midwestern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34251',
+           '2026_Pacific_Coast_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     
     #FSM testing
     # scrape('https://www.fisg.it/upload/result/6869/online',
@@ -1049,6 +1053,6 @@ if __name__ == "__main__":
     #        '2024_Four_Continents', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36369',
     #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
-           '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
+    #        '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
     # loadInfoForExistingCompetitions()
