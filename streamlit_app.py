@@ -341,7 +341,7 @@ def generate_trial_judge_report():
         folder_path=base_file_path,
     )
     add_download_link_gcp(
-        f"{report_name_for_directory}_AdditionalAnalysis",
+        f"{report_name_for_directory}_OutOfRangeAnalysis",
         "Trial Judge Report",
         extension="xlsx",
         folder_path=base_file_path,
