@@ -1041,10 +1041,10 @@ if __name__ == "__main__":
     #        '2025_Capital_Ice_Synchro_Classic', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34247',
     #        '2026_Eastern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34248',
-           '2026_Midwestern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34251',
-           '2026_Pacific_Coast_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34248',
+    #        '2026_Midwestern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34238',
+           '2026_US_Synchronized_Skating_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     
     #FSM testing
     # scrape('https://www.fisg.it/upload/result/6869/online',

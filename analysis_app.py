@@ -10,6 +10,7 @@ from database import get_db_session, test_connection
 from analytics import JudgeAnalytics
 from models import Segment, DisciplineType, Judge, PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment
 from sqlalchemy import text, func, case
+from report_html import build_judge_report_html
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -1357,6 +1358,24 @@ if page == "Individual Judge Analysis":
             st.dataframe(segment_display_with_totals, use_container_width=True)
         else:
             st.info("No segment data found for selected filters")
+
+        # Download Report
+        st.divider()
+        st.subheader("Download Judge Report")
+        st.write(
+            "Download a report for this judge containing only their data — "
+            "safe to share without exposing other judges' information."
+        )
+
+        safe_name = selected_judge_display.replace(' ', '_').replace('/', '_')
+        html_bytes = build_judge_report_html(selected_judge_display, stats,
+                                             pcs_df, element_df, segment_df)
+        st.download_button(
+            label="Download Interactive HTML Report",
+            data=html_bytes,
+            file_name=f"judge_report_{safe_name}.html",
+            mime="text/html",
+        )
 
 elif page == "Rule Errors Analysis":
     st.header("Rule Errors Analysis")
