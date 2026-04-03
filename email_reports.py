@@ -179,10 +179,10 @@ def send_report_email(smtp_config: dict, to_email: str, judge_name: str,
     if port == 465:
         with smtplib.SMTP_SSL(smtp_config["host"], port) as server:
             server.login(smtp_config["user"], smtp_config["password"])
-            server.sendmail(smtp_config["user"], to_email, msg.as_string())
+            server.send_message(msg)
     else:
         with smtplib.SMTP(smtp_config["host"], port) as server:
             server.ehlo()
             server.starttls()
             server.login(smtp_config["user"], smtp_config["password"])
-            server.sendmail(smtp_config["user"], to_email, msg.as_string())
+            server.send_message(msg)
