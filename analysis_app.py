@@ -98,8 +98,8 @@ _nav_pages = [
     "Judge Performance Heatmap", "Temporal Trend Analysis",
     "Rule Errors Analysis", "Competition Analysis",
 ]
-# if _os.path.exists("downloadResults.py"):
-#     _nav_pages.append("Load Competition")
+if _os.path.exists("downloadResults.py"):
+    _nav_pages.append("Load Competition")
 _nav_pages.append("Admin Tools")
 
 page = st.sidebar.selectbox("Select Analysis Type", _nav_pages)
@@ -2215,6 +2215,21 @@ elif page == "Temporal Trend Analysis":
 elif page == "Admin Tools":
     st.header("Admin Tools")
 
+    # --- Password gate ---
+    _admin_pw = _os.environ.get("ADMIN_PASSWORD", "")
+    if _admin_pw and not st.session_state.get("admin_authenticated"):
+        st.info("This section is password protected.")
+        _entered = st.text_input("Admin password", type="password",
+                                 key="admin_pw_input")
+        if st.button("Unlock", key="admin_pw_btn"):
+            if _entered == _admin_pw:
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
+    # --- End password gate ---
+
     st.subheader("Merge Judges")
     st.write(
         "Use this when the same judge appears under two different names. "
@@ -2510,24 +2525,72 @@ elif page == "Admin Tools":
                         "password": _smtp_pass.strip(),
                         "from_name": _smtp_from_name.strip() or "Figure Skating Officials",
                     }
+                    import traceback as _tb
+
+                    # Pre-flight: show any non-ASCII in the strings we're about to use
+                    def _find_nonascii(label, s):
+                        hits = [(i, repr(ch), f'U+{ord(ch):04X}')
+                                for i, ch in enumerate(str(s)) if ord(ch) > 127]
+                        return hits
+
+                    _debug_lines = []
+                    for _lbl, _val in [
+                        ("subject template", _email_subject),
+                        ("body template",    _email_body),
+                        ("from_name",        _smtp_from_name),
+                        ("competition name", selected_comp_name),
+                        ("SMTP username",    _smtp_user),
+                    ]:
+                        _hits = _find_nonascii(_lbl, _val)
+                        if _hits:
+                            _debug_lines.append(
+                                f"⚠️ Non-ASCII in **{_lbl}**: " +
+                                ", ".join(f"pos {p}: {ch} ({cp})" for p, ch, cp in _hits)
+                            )
+                    # Check password without revealing its value
+                    _pass_hits = _find_nonascii("password", _smtp_pass)
+                    if _pass_hits:
+                        _debug_lines.append(
+                            f"⚠️ Non-ASCII character(s) found in **password** at "
+                            f"{len(_pass_hits)} position(s) — these will be automatically "
+                            f"replaced with regular spaces. This commonly happens when "
+                            f"copy-pasting a Gmail App Password from a browser."
+                        )
+                    for _jrow in matched:
+                        _hits = _find_nonascii("judge name", _jrow["Judge"])
+                        if _hits:
+                            _debug_lines.append(
+                                f"⚠️ Non-ASCII in judge **{_jrow['Judge']}**: " +
+                                ", ".join(f"pos {p}: {ch} ({cp})" for p, ch, cp in _hits)
+                            )
+
+                    if _debug_lines:
+                        with st.expander("Non-ASCII characters detected (may cause errors)"):
+                            for _dl in _debug_lines:
+                                st.markdown(_dl)
+
                     _analytics = get_analytics_safe()
                     results = []
                     prog = st.progress(0)
                     for i, row in enumerate(matched):
+                        _step = "building report"
                         try:
                             html_bytes, _ = build_report_for_judge(
                                 _analytics, int(row["judge_id"]),
                                 int(selected_comp_id)
                             )
+                            _step = "sending email"
                             send_report_email(
                                 _smtp_cfg, row["Email"], row["Judge"],
                                 selected_comp_name, html_bytes,
                                 subject_template=_email_subject,
                                 body_template=_email_body,
                             )
-                            results.append((row["Judge"], row["Email"], True, ""))
+                            results.append((row["Judge"], row["Email"], True, "", ""))
                         except Exception as _exc:
-                            results.append((row["Judge"], row["Email"], False, str(_exc)))
+                            results.append((row["Judge"], row["Email"], False,
+                                            f"[{_step}] {_exc}",
+                                            _tb.format_exc()))
                         prog.progress((i + 1) / len(matched))
 
                     sent = [r for r in results if r[2]]
@@ -2536,8 +2599,10 @@ elif page == "Admin Tools":
                         st.success(f"Sent {len(sent)} report(s) successfully.")
                     if failed:
                         st.error(f"{len(failed)} failed to send:")
-                        for name, addr, _, err in failed:
+                        for name, addr, _, err, tb in failed:
                             st.write(f"- **{name}** ({addr}): {err}")
+                            with st.expander(f"Full traceback — {name}"):
+                                st.code(tb)
                 elif not _smtp_ready:
                     st.caption("Fill in the email server settings above to enable sending.")
 
