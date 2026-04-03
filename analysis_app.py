@@ -98,8 +98,8 @@ _nav_pages = [
     "Judge Performance Heatmap", "Temporal Trend Analysis",
     "Rule Errors Analysis", "Competition Analysis",
 ]
-if _os.path.exists("downloadResults.py"):
-    _nav_pages.append("Load Competition")
+# if _os.path.exists("downloadResults.py"):
+#     _nav_pages.append("Load Competition")
 _nav_pages.append("Admin Tools")
 
 page = st.sidebar.selectbox("Select Analysis Type", _nav_pages)

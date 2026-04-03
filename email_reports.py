@@ -6,10 +6,9 @@ HTML reports via SMTP.
 """
 
 import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
+import unicodedata
+import email.policy
+from email.message import EmailMessage
 
 import pandas as pd
 from sqlalchemy import text as sqlt
@@ -126,7 +125,7 @@ def build_report_for_judge(analytics, judge_id: int, competition_id: int):
 # ── SMTP sending ──────────────────────────────────────────────────────────────
 
 
-DEFAULT_EMAIL_SUBJECT = "Judge Performance Report – {competition_name}"
+DEFAULT_EMAIL_SUBJECT = "Judge Performance Report - {competition_name}"
 
 DEFAULT_EMAIL_BODY = (
     "Hello {judge_name},\n\n"
@@ -137,15 +136,21 @@ DEFAULT_EMAIL_BODY = (
 )
 
 
+def _ascii_filename(s: str) -> str:
+    """Reduce a string to ASCII-safe characters for use in filenames."""
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(c if ord(c) < 128 else "_" for c in nfkd)
+
+
 def send_report_email(smtp_config: dict, to_email: str, judge_name: str,
                       competition_name: str, html_bytes: bytes,
                       subject_template: str = DEFAULT_EMAIL_SUBJECT,
                       body_template: str = DEFAULT_EMAIL_BODY):
     """
-    Send one judge report via SMTP.
-    html_bytes is the report content; it is sent as an HTML attachment.
-    subject_template and body_template support {judge_name}, {competition_name},
-    and {from_name} placeholders.
+    Send one judge report via SMTP using the modern EmailMessage API,
+    which handles Unicode subjects, bodies, and names natively.
+    subject_template and body_template support {judge_name},
+    {competition_name}, and {from_name} placeholders.
     Raises smtplib exceptions on failure.
     """
     subs = {
@@ -156,33 +161,39 @@ def send_report_email(smtp_config: dict, to_email: str, judge_name: str,
     subject = subject_template.format(**subs)
     body_text = body_template.format(**subs)
 
-    msg = MIMEMultipart("mixed")
-    from_addr = f"{smtp_config['from_name']} <{smtp_config['user']}>"
-    msg["From"] = from_addr
-    msg["To"] = to_email
-    msg["Subject"] = subject
-
-    body = MIMEText(body_text, "plain")
-    msg.attach(body)
-
-    safe_name = judge_name.replace(" ", "_").replace("/", "_")
-    safe_comp = competition_name.replace(" ", "_").replace("/", "_")
+    safe_name = _ascii_filename(judge_name).replace(" ", "_").replace("/", "_")
+    safe_comp = _ascii_filename(competition_name).replace(" ", "_").replace("/", "_")
     filename = f"judge_report_{safe_name}_{safe_comp}.html"
 
-    attachment = MIMEBase("text", "html")
-    attachment.set_payload(html_bytes)
-    encoders.encode_base64(attachment)
-    attachment.add_header("Content-Disposition", "attachment", filename=filename)
-    msg.attach(attachment)
+    msg = EmailMessage(policy=email.policy.SMTP)
+    msg["From"] = f"{smtp_config['from_name']} <{smtp_config['user']}>"
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body_text, charset="utf-8")
+    msg.add_attachment(
+        html_bytes,
+        maintype="text",
+        subtype="html",
+        filename=filename,
+    )
+
+    # Normalise credentials: replace non-breaking spaces / other Unicode
+    # whitespace variants that may appear when copy-pasting (e.g. Gmail App
+    # Passwords show groups separated by \xa0 in the browser).
+    def _ascii_cred(s: str) -> str:
+        return unicodedata.normalize("NFKC", s).replace("\xa0", " ").replace("\u2011", "-")
+
+    smtp_user = _ascii_cred(smtp_config["user"])
+    smtp_pass = _ascii_cred(smtp_config["password"])
 
     port = smtp_config["port"]
     if port == 465:
         with smtplib.SMTP_SSL(smtp_config["host"], port) as server:
-            server.login(smtp_config["user"], smtp_config["password"])
+            server.login(smtp_user, smtp_pass)
             server.send_message(msg)
     else:
         with smtplib.SMTP(smtp_config["host"], port) as server:
             server.ehlo()
             server.starttls()
-            server.login(smtp_config["user"], smtp_config["password"])
+            server.login(smtp_user, smtp_pass)
             server.send_message(msg)
