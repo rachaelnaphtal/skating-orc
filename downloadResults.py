@@ -472,7 +472,7 @@ def scrape(
     base_url,
     report_name,
     excel_folder="",
-    pdf_folder="",
+    pdf_folder="/Users/rachaelnaphtal/Documents/JudgingAnalysis_Results/Easterns/Results/",
     event_regex="",
     only_rule_errors=False,
     use_gcp=False,
@@ -1043,8 +1043,8 @@ if __name__ == "__main__":
     #        '2026_Eastern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34248',
     #        '2026_Midwestern_Synchronized_Sectional_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
-    scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/34238',
-           '2026_US_Synchronized_Skating_Championships', write_to_database=True, pdf_folder=pdf_folder, year=2526)
+    # scrape('https://ijs.usfigureskating.org/leaderboard/results/2025/36459',
+    #        '2025_Porter_Synchro_Classic', write_to_database=True, pdf_folder=pdf_folder, year=2526, specific_exclude=".*Unified Teams.*")
     
     #FSM testing
     # scrape('https://www.fisg.it/upload/result/6869/online',
@@ -1055,4 +1055,4 @@ if __name__ == "__main__":
     #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
     #        '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
-    # loadInfoForExistingCompetitions()
+    loadInfoForExistingCompetitions()

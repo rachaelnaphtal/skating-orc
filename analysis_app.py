@@ -92,11 +92,17 @@ def get_analytics_safe():
 st.title("⛸️ Figure Skating Judge Performance Analytics")
 
 # Navigation
-page = st.sidebar.selectbox("Select Analysis Type", [
-    "Individual Judge Analysis", "Multi-Judge Comparison", 
+import os as _os
+_nav_pages = [
+    "Individual Judge Analysis", "Multi-Judge Comparison",
     "Judge Performance Heatmap", "Temporal Trend Analysis",
-    "Rule Errors Analysis", "Competition Analysis"
-])
+    "Rule Errors Analysis", "Competition Analysis",
+]
+if _os.path.exists("downloadResults.py"):
+    _nav_pages.append("Load Competition")
+_nav_pages.append("Admin Tools")
+
+page = st.sidebar.selectbox("Select Analysis Type", _nav_pages)
 
 
 def judge_performance_heatmap():
@@ -2205,6 +2211,436 @@ elif page == "Judge Performance Heatmap":
 
 elif page == "Temporal Trend Analysis":
     temporal_trend_analysis()
+
+elif page == "Admin Tools":
+    st.header("Admin Tools")
+
+    st.subheader("Merge Judges")
+    st.write(
+        "Use this when the same judge appears under two different names. "
+        "All scores from the **duplicate** will be reassigned to the **judge to keep**, "
+        "then the duplicate record will be deleted. This cannot be undone."
+    )
+
+    analytics = get_analytics_safe()
+    judges = analytics.get_judges()
+    if not judges:
+        st.error("No judges found in database.")
+        st.stop()
+
+    judge_options = {name: judge_id for judge_id, name, location in judges}
+    judge_names = list(judge_options.keys())
+
+    col1, col2 = st.columns(2)
+    with col1:
+        keep_name = st.selectbox("Judge to keep (primary)", judge_names,
+                                 key="merge_keep")
+    with col2:
+        dupe_options = [n for n in judge_names if n != keep_name]
+        dupe_name = st.selectbox("Judge to merge & remove (duplicate)",
+                                 dupe_options, key="merge_dupe")
+
+    keep_id = judge_options[keep_name]
+    dupe_id = judge_options[dupe_name]
+
+    # Preview counts
+    session = analytics.session
+    from sqlalchemy import text as sqlt
+
+    pcs_count = session.execute(
+        sqlt("SELECT COUNT(*) FROM pcs_score_per_judge WHERE judge_id = :id"),
+        {"id": dupe_id}).scalar()
+    elem_count = session.execute(
+        sqlt("SELECT COUNT(*) FROM element_score_per_judge WHERE judge_id = :id"),
+        {"id": dupe_id}).scalar()
+
+    st.markdown("---")
+    st.write("**Preview — scores that will be reassigned:**")
+    preview_col1, preview_col2 = st.columns(2)
+    with preview_col1:
+        st.metric("PCS scores", pcs_count)
+    with preview_col2:
+        st.metric("Element scores", elem_count)
+
+    if pcs_count == 0 and elem_count == 0:
+        st.warning(
+            f"**{dupe_name}** has no scores in the database. "
+            "Only the judge record itself will be deleted."
+        )
+
+    st.markdown("---")
+    confirmed = st.checkbox(
+        f'I understand this will permanently merge "{dupe_name}" into "{keep_name}" '
+        f'and delete the "{dupe_name}" record.')
+
+    if st.button("Execute Merge", disabled=not confirmed, type="primary"):
+        try:
+            session.execute(
+                sqlt("UPDATE pcs_score_per_judge SET judge_id = :keep WHERE judge_id = :dupe"),
+                {"keep": keep_id, "dupe": dupe_id})
+            session.execute(
+                sqlt("UPDATE element_score_per_judge SET judge_id = :keep WHERE judge_id = :dupe"),
+                {"keep": keep_id, "dupe": dupe_id})
+            # Clear precomputed cache rows for both judges if the tables exist
+            for tbl in ("judge_excess_anomalies_cache", "judge_summary_cache"):
+                try:
+                    session.execute(sqlt("SAVEPOINT merge_cache"))
+                    session.execute(
+                        sqlt(f"DELETE FROM {tbl} WHERE judge_id IN (:keep, :dupe)"),
+                        {"keep": keep_id, "dupe": dupe_id})
+                    session.execute(sqlt("RELEASE SAVEPOINT merge_cache"))
+                except Exception:
+                    session.execute(sqlt("ROLLBACK TO SAVEPOINT merge_cache"))
+            session.execute(
+                sqlt("DELETE FROM judge WHERE id = :dupe"),
+                {"dupe": dupe_id})
+            session.commit()
+            st.cache_resource.clear()
+            st.success(
+                f"Done! **{pcs_count}** PCS scores and **{elem_count}** element scores "
+                f"have been moved to **{keep_name}**. "
+                f'The record for "{dupe_name}" has been deleted.'
+            )
+        except Exception as e:
+            session.rollback()
+            st.error(f"Merge failed and was rolled back: {e}")
+
+    # ── Manage Judge Emails ────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Manage Judge Emails")
+    st.write(
+        "Upload a spreadsheet (CSV or Excel) with two columns: **Name** and **Email**. "
+        "Existing entries are updated by name; new entries are added. "
+        "Column headers must be exactly `Name` and `Email`."
+    )
+
+    from email_reports import (ensure_email_table, get_email_list,
+                                upsert_email_list, delete_email_entry)
+
+    _em_session = get_analytics_safe().session
+    ensure_email_table(_em_session)
+
+    uploaded_email_file = st.file_uploader(
+        "Upload Name/Email spreadsheet", type=["csv", "xlsx", "xls"],
+        key="email_list_upload"
+    )
+    if uploaded_email_file:
+        try:
+            if uploaded_email_file.name.endswith(".csv"):
+                email_upload_df = pd.read_csv(uploaded_email_file)
+            else:
+                email_upload_df = pd.read_excel(uploaded_email_file)
+
+            # Flexible column detection (map existing col name -> target name)
+            col_map = {}
+            for col in email_upload_df.columns:
+                if col.strip().lower() == "name":
+                    col_map[col] = "judge_name"
+                elif col.strip().lower() == "email":
+                    col_map[col] = "email"
+
+            if "judge_name" not in col_map.values() or "email" not in col_map.values():
+                st.error(
+                    f"Could not find 'Name' and 'Email' columns. "
+                    f"Found: {list(email_upload_df.columns)}"
+                )
+            else:
+                email_upload_df = email_upload_df.rename(columns=col_map)[
+                    ["judge_name", "email"]
+                ]
+                ins, upd = upsert_email_list(_em_session, email_upload_df)
+                st.success(f"Done — {ins} new entries added, {upd} updated.")
+        except Exception as _e:
+            st.error(f"Failed to read file: {_e}")
+
+    email_list_df = get_email_list(_em_session)
+    if email_list_df.empty:
+        st.info("No judge emails stored yet. Upload a spreadsheet above to get started.")
+    else:
+        st.write(f"**{len(email_list_df)} judges** in email list:")
+        st.dataframe(email_list_df.rename(columns={"judge_name": "Name", "email": "Email"}),
+                     use_container_width=True, hide_index=True)
+
+        with st.expander("Remove an entry"):
+            del_name = st.selectbox("Select judge to remove",
+                                    email_list_df["judge_name"].tolist(),
+                                    key="del_email_name")
+            if st.button("Remove", key="del_email_btn"):
+                delete_email_entry(_em_session, del_name)
+                st.success(f'Removed "{del_name}" from the email list.')
+                st.rerun()
+
+    # ── Email Competition Reports ──────────────────────────────────────────────
+    st.divider()
+    st.subheader("Email Competition Reports")
+    st.write(
+        "Select a competition and send each judge their individual HTML report by email. "
+        "Judges not in the email list will be listed so you can decide what to do — "
+        "their reports are still generated but won't be sent."
+    )
+
+    from email_reports import (match_judge_to_email, build_report_for_judge,
+                                send_report_email, DEFAULT_EMAIL_SUBJECT,
+                                DEFAULT_EMAIL_BODY)
+
+    _all_comps = get_analytics_safe().get_competitions()
+    if not _all_comps:
+        st.info("No competitions found in the database.")
+    else:
+        comp_options = {f"{name} ({year})": cid for cid, name, year in _all_comps}
+        selected_comp_label = st.selectbox("Competition", list(comp_options.keys()),
+                                           key="email_comp_select")
+        selected_comp_id = comp_options[selected_comp_label]
+        selected_comp_name = selected_comp_label
+
+        _email_list_df = get_email_list(_em_session)
+
+        # Find judges who scored in this competition
+        _comp_df = get_analytics_safe().get_competition_segment_statistics(
+            int(selected_comp_id)
+        )
+        _judge_map = {}  # judge_id -> judge_name
+        if not _comp_df.empty and "judge_id" in _comp_df.columns:
+            for _, _jrow in _comp_df[["judge_id", "judge_name"]].drop_duplicates().iterrows():
+                _judge_map[_jrow["judge_id"]] = _jrow["judge_name"]
+
+        if not _judge_map:
+            st.info("No judges found for this competition.")
+        else:
+            # Build match preview
+            matched, unmatched = [], []
+            for jid, jname in _judge_map.items():
+                em = match_judge_to_email(jname, _email_list_df)
+                if em:
+                    matched.append({"Judge": jname, "Email": em, "judge_id": jid})
+                else:
+                    unmatched.append({"Judge": jname})
+
+            col_m, col_u = st.columns(2)
+            with col_m:
+                st.write(f"**Will send ({len(matched)})**")
+                if matched:
+                    st.dataframe(pd.DataFrame(matched)[["Judge", "Email"]],
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.info("None matched — upload an email list above first.")
+            with col_u:
+                st.write(f"**No email — skip ({len(unmatched)})**")
+                if unmatched:
+                    st.dataframe(pd.DataFrame(unmatched),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.info("All judges matched!")
+
+            if matched:
+                st.markdown("---")
+                with st.expander("Email server settings", expanded=True):
+                    st.write(
+                        "These credentials are used only for this session and are "
+                        "never stored. For Gmail, use an "
+                        "[App Password](https://myaccount.google.com/apppasswords) "
+                        "rather than your regular password."
+                    )
+                    _sc1, _sc2 = st.columns([3, 1])
+                    with _sc1:
+                        _smtp_host = st.text_input(
+                            "SMTP host",
+                            value=st.session_state.get("smtp_host", ""),
+                            placeholder="smtp.gmail.com",
+                            key="smtp_host_input"
+                        )
+                    with _sc2:
+                        _smtp_port = st.number_input(
+                            "Port", min_value=1, max_value=65535,
+                            value=st.session_state.get("smtp_port", 587),
+                            key="smtp_port_input"
+                        )
+                    _smtp_user = st.text_input(
+                        "From email address",
+                        value=st.session_state.get("smtp_user", ""),
+                        placeholder="yourname@gmail.com",
+                        key="smtp_user_input"
+                    )
+                    _smtp_pass = st.text_input(
+                        "Password / App password",
+                        type="password",
+                        key="smtp_pass_input"
+                    )
+                    _smtp_from_name = st.text_input(
+                        "Sender display name",
+                        value=st.session_state.get("smtp_from_name",
+                                                    "Figure Skating Officials"),
+                        key="smtp_from_name_input"
+                    )
+                    # Persist non-sensitive fields across reruns
+                    st.session_state["smtp_host"] = _smtp_host
+                    st.session_state["smtp_port"] = _smtp_port
+                    st.session_state["smtp_user"] = _smtp_user
+                    st.session_state["smtp_from_name"] = _smtp_from_name
+
+                _smtp_ready = all([_smtp_host.strip(), _smtp_user.strip(),
+                                   _smtp_pass.strip()])
+
+                st.markdown("**Email content**")
+                st.caption(
+                    "Use `{judge_name}`, `{competition_name}`, and `{from_name}` "
+                    "anywhere — they'll be filled in individually for each judge."
+                )
+                _email_subject = st.text_input(
+                    "Subject line",
+                    value=st.session_state.get("email_subject", DEFAULT_EMAIL_SUBJECT),
+                    key="email_subject_input"
+                )
+                _email_body = st.text_area(
+                    "Email body",
+                    value=st.session_state.get("email_body", DEFAULT_EMAIL_BODY),
+                    height=220,
+                    key="email_body_input"
+                )
+                st.session_state["email_subject"] = _email_subject
+                st.session_state["email_body"] = _email_body
+
+                if st.button("Send reports", type="primary",
+                             key="send_reports_btn",
+                             disabled=not _smtp_ready):
+                    _smtp_cfg = {
+                        "host": _smtp_host.strip(),
+                        "port": int(_smtp_port),
+                        "user": _smtp_user.strip(),
+                        "password": _smtp_pass.strip(),
+                        "from_name": _smtp_from_name.strip() or "Figure Skating Officials",
+                    }
+                    _analytics = get_analytics_safe()
+                    results = []
+                    prog = st.progress(0)
+                    for i, row in enumerate(matched):
+                        try:
+                            html_bytes, _ = build_report_for_judge(
+                                _analytics, int(row["judge_id"]),
+                                int(selected_comp_id)
+                            )
+                            send_report_email(
+                                _smtp_cfg, row["Email"], row["Judge"],
+                                selected_comp_name, html_bytes,
+                                subject_template=_email_subject,
+                                body_template=_email_body,
+                            )
+                            results.append((row["Judge"], row["Email"], True, ""))
+                        except Exception as _exc:
+                            results.append((row["Judge"], row["Email"], False, str(_exc)))
+                        prog.progress((i + 1) / len(matched))
+
+                    sent = [r for r in results if r[2]]
+                    failed = [r for r in results if not r[2]]
+                    if sent:
+                        st.success(f"Sent {len(sent)} report(s) successfully.")
+                    if failed:
+                        st.error(f"{len(failed)} failed to send:")
+                        for name, addr, _, err in failed:
+                            st.write(f"- **{name}** ({addr}): {err}")
+                elif not _smtp_ready:
+                    st.caption("Fill in the email server settings above to enable sending.")
+
+elif page == "Load Competition":
+    st.header("Load Competition")
+    st.write(
+        "Enter the competition details below and click **Run** to scrape and import "
+        "the results directly into the database. This calls `scrape()` from "
+        "`downloadResults.py` with `write_to_database=True`."
+    )
+
+    # Check that downloadResults is importable
+    import importlib.util as _ilu, sys as _sys
+    _spec = _ilu.find_spec("downloadResults")
+    if _spec is None:
+        st.error(
+            "`downloadResults.py` was not found in the project folder. "
+            "Please upload or place it here before using this page."
+        )
+        st.stop()
+
+    # ── Basic fields ────────────────────────────────────────────────────────
+    base_url = st.text_input(
+        "Competition URL",
+        placeholder="https://ijs.usfigureskating.org/leaderboard/results/2026/34238",
+    )
+    report_name = st.text_input(
+        "Report name (used as file prefix)",
+        placeholder="2026_US_Synchronized_Skating_Championships",
+    )
+    year = st.text_input(
+        "Season year code",
+        value="2526",
+        help="e.g. 2526 for the 2025-26 season, 2425 for 2024-25",
+    )
+    pdf_folder = st.text_input(
+        "PDF output folder (leave blank if not saving PDFs)",
+        value="",
+        placeholder="/path/to/pdfs",
+    )
+
+    # ── Advanced options ─────────────────────────────────────────────────────
+    with st.expander("Advanced options"):
+        excel_folder = st.text_input("Excel output folder (leave blank to skip)", value="")
+        event_regex = st.text_input(
+            "Event regex filter",
+            value="",
+            help="Only process events whose names match this regex. Leave blank for all.",
+        )
+        judge_filter = st.text_input(
+            "Judge filter",
+            value="",
+            help="Restrict processing to judges matching this string.",
+        )
+        specific_exclude = st.text_input(
+            "Specific exclude",
+            value="",
+            help="Exclude specific events matching this string.",
+        )
+        only_rule_errors = st.checkbox("Only rule errors", value=False)
+        add_additional_analysis = st.checkbox("Add additional analysis", value=False)
+        use_html = st.checkbox("Use HTML mode", value=True)
+        isFSM = st.checkbox("Is FSM competition", value=False)
+
+    st.markdown("---")
+
+    if st.button("Run", type="primary"):
+        if not base_url.strip():
+            st.error("Please enter a Competition URL.")
+        elif not report_name.strip():
+            st.error("Please enter a Report name.")
+        else:
+            import importlib as _il
+            _mod = _il.import_module("downloadResults")
+            scrape_fn = getattr(_mod, "scrape")
+
+            kwargs = dict(
+                base_url=base_url.strip(),
+                report_name=report_name.strip(),
+                excel_folder=excel_folder.strip(),
+                pdf_folder=pdf_folder.strip(),
+                event_regex=event_regex.strip(),
+                only_rule_errors=only_rule_errors,
+                use_gcp=False,
+                add_additional_analysis=add_additional_analysis,
+                write_to_database=True,
+                year=year.strip(),
+                judge_filter=judge_filter.strip(),
+                specific_exclude=specific_exclude.strip(),
+                use_html=use_html,
+                isFSM=isFSM,
+            )
+
+            status_area = st.empty()
+            status_area.info("Running scrape — this may take a minute or two…")
+            try:
+                scrape_fn(**kwargs)
+                status_area.success(
+                    f"Done! **{report_name.strip()}** has been imported into the database."
+                )
+                st.cache_resource.clear()
+            except Exception as _exc:
+                status_area.error(f"Scrape failed: {_exc}")
 
 else:  # Statistical Bias Detection
     statistical_bias_detection()
