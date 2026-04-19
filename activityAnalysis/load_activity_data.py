@@ -15,7 +15,8 @@ import re
 from datetime import datetime
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.getenv('DATABASE_URL')
+print (DATABASE_URL)
 
 
 # Fix the prefix for SQLAlchemy 1.4+ compatibility
