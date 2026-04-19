@@ -16,6 +16,12 @@ from datetime import datetime
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+# Fix the prefix for SQLAlchemy 1.4+ compatibility
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 engine = create_engine(
     DATABASE_URL,
     echo=False,
