@@ -15,22 +15,18 @@ import re
 from datetime import datetime
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
-DATABASE_URL = os.getenv('DATABASE_URL')
-print (DATABASE_URL)
-print("URL")
-print(repr(DATABASE_URL))
+def get_engine():
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set")
+
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+    return create_engine(DATABASE_URL, echo=False, connect_args={"options": "-csearch_path=officials_analysis"})
 
 
-# Fix the prefix for SQLAlchemy 1.4+ compatibility
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-print (DATABASE_URL)
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args={"options": "-csearch_path=officials_analysis"},
-)
+engine = get_engine()
 
 
 def create_appointment_code_df(file=appointment_codes_file):
