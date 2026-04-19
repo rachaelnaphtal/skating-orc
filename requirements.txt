@@ -63,6 +63,7 @@ requests
 rpds-py==0.26.0
 rsa==4.9.1
 gcsfs
+streamlit-aggrid
 st-files-connection
 google-cloud-storage
 psycopg2-binary
@@ -76,7 +77,7 @@ smmap==5.0.2
 soupsieve==2.7
 sqlacodegen==3.0.0
 SQLAlchemy==2.0.41
-streamlit
+streamlit>=1.56.0
 tenacity==9.1.2
 tld==0.13.1
 toml==0.10.2
