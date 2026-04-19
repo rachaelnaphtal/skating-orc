@@ -1,1 +1,1 @@
-web: sh setup.sh && streamlit run activity_tracker_app.py
+web: sh setup.sh && streamlit run activityAnalysis/activity_tracker_app.py
