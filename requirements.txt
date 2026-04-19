@@ -75,8 +75,8 @@ scramp==1.4.6
 six==1.17.0
 smmap==5.0.2
 soupsieve==2.7
-sqlacodegen==3.0.0
-SQLAlchemy==2.0.41
+sqlacodegen>=3.0.0
+SQLAlchemy>=2.0.41
 streamlit>=1.56.0
 tenacity==9.1.2
 tld==0.13.1
