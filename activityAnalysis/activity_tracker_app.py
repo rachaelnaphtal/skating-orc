@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, select
 from officials_analysis_models import Disciplines, AppointmentTypes, Appointments
 import pandas as pd
-import os
 from datetime import datetime
 
 engine = get_engine()
@@ -253,11 +252,15 @@ if show_other_roles and "official_id" in display.columns:
             continue
         year_int = int(col)
         def mark_cell(row, yr=year_int):
-            if row[str(yr)] == 1:
-                return SELECTED_ROLE_SYMBOL
             key = (int(row["official_id"]), yr)
+            entries = role_lookup.get(key, [])
+            if row[str(yr)] == 1:
+                other = [(r, d) for r, d in entries if r != selected_appt_type]
+                if other:
+                    abbrevs = ", ".join(_role_label(r, d, discipline_id) for r, d in other)
+                    return f"{SELECTED_ROLE_SYMBOL} {OTHER_ROLE_SYMBOL}{abbrevs}"
+                return SELECTED_ROLE_SYMBOL
             if key in any_role_set:
-                entries = role_lookup.get(key, [])
                 abbrevs = ", ".join(
                     _role_label(r, d, discipline_id) for r, d in entries
                 )
