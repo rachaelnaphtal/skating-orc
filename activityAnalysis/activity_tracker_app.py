@@ -1,5 +1,5 @@
 import streamlit as st
-from load_activity_data import get_activity_matrix, get_any_role_years
+from load_activity_data import get_activity_matrix, get_any_role_years, get_engine
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, select
 from officials_analysis_models import Disciplines, AppointmentTypes, Appointments
@@ -7,8 +7,7 @@ import pandas as pd
 import os
 from datetime import datetime
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-engine = create_engine(DATABASE_URL, echo=False, connect_args={"options": "-csearch_path=officials_analysis"})
+engine = get_engine()
 
 NATIONAL_LEVEL_ID = 7
 SYNCHRO_DISCIPLINE_ID = 2
