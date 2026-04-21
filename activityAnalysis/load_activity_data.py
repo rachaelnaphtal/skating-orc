@@ -452,6 +452,13 @@ def build_activity_matrix(qualified_df, activity_df):
         reverse=True
     )
 
+    if year_cols:
+        result["total_championships"] = (
+            result[year_cols].fillna(0).sum(axis=1).astype(int)
+        )
+    else:
+        result["total_championships"] = 0
+
     fixed_cols = [
         "official_id",
         "full_name",
@@ -459,6 +466,7 @@ def build_activity_matrix(qualified_df, activity_df):
         "years_since_last",
         "most_recent_year",
         "never_used",
+        "total_championships",
     ]
     result = result[fixed_cols + year_cols]
 
@@ -528,6 +536,113 @@ def get_any_role_years(official_ids, competition_type_id):
         )
         rows = session.execute(stmt).all()
     return pd.DataFrame(rows, columns=["official_id", "year", "role", "discipline_id"])
+
+
+def get_chief_years(
+    official_ids, discipline_id, appointment_type_id, competition_type_id
+):
+    """
+    Years each official served as chief in the currently selected role/discipline
+    for the selected competition type.
+    Returns: official_id, year
+    """
+    if not official_ids:
+        return pd.DataFrame(columns=["official_id", "year"])
+
+    discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+
+    with Session(engine) as session:
+        filters = [
+            Assignment.appointment_type_id == appointment_type_id,
+            Competition.competition_type_id == competition_type_id,
+            Assignment.official_id.in_(official_ids),
+            Assignment.chief.is_(True),
+        ]
+        if discipline_ids is not None:
+            filters.append(Assignment.discipline_id.in_(discipline_ids))
+
+        stmt = (
+            select(Assignment.official_id, Competition.year)
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(*filters)
+            .distinct()
+            .order_by(Competition.year.desc())
+        )
+        rows = session.execute(stmt).all()
+
+    return pd.DataFrame(rows, columns=["official_id", "year"])
+
+
+def appointment_type_has_chiefs(appointment_type_id):
+    """Whether this appointment type uses chief assignments anywhere in history."""
+    with Session(engine) as session:
+        stmt = (
+            select(Assignment.id)
+            .where(
+                Assignment.appointment_type_id == appointment_type_id,
+                Assignment.chief.is_(True),
+            )
+            .limit(1)
+        )
+        return session.execute(stmt).first() is not None
+
+
+def get_assigned_competition_counts(competition_type_ids):
+    """
+    Return officials with distinct competitions assigned in the given competition types.
+    Output columns: official_id, full_name, competitions_assigned, most_recent_year
+    """
+    if not competition_type_ids:
+        return pd.DataFrame(
+            columns=[
+                "official_id",
+                "full_name",
+                "competitions_assigned",
+                "most_recent_year",
+            ]
+        )
+
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Officials.id.label("official_id"),
+                Officials.full_name,
+                func.count(func.distinct(Competition.id)).label("competitions_assigned"),
+                func.max(Competition.year).label("most_recent_year"),
+            )
+            .join(Assignment, Assignment.official_id == Officials.id)
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(Competition.competition_type_id.in_(competition_type_ids))
+            .group_by(Officials.id, Officials.full_name)
+            .order_by(
+                func.count(func.distinct(Competition.id)).desc(),
+                func.max(Competition.year).desc(),
+                Officials.full_name.asc(),
+            )
+        )
+        rows = session.execute(stmt).all()
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "official_id",
+            "full_name",
+            "competitions_assigned",
+            "most_recent_year",
+        ],
+    )
+
+
+def get_competition_count_for_types(competition_type_ids):
+    """Return number of distinct competitions in the selected competition types."""
+    if not competition_type_ids:
+        return 0
+    with Session(engine) as session:
+        stmt = select(func.count(func.distinct(Competition.id))).where(
+            Competition.competition_type_id.in_(competition_type_ids)
+        )
+        result = session.execute(stmt).scalar()
+    return int(result or 0)
 
 
 def get_activity_matrix(
