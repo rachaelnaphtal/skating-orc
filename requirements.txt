@@ -22,11 +22,11 @@ frozenlist==1.7.0
 gitdb==4.0.12
 GitPython==3.1.44
 google-auth==2.40.3
-htmldate==1.9.3
-idna==3.10
-inflect==7.5.0
-Jinja2==3.1.6
-jsonschema==4.24.0
+htmldate>=1.9.3
+idna>=3.10
+inflect>=7.5.0
+Jinja2>=3.1.6
+jsonschema>=4.24.0
 jsonschema-specifications==2025.4.1
 jusText==3.0.2
 lxml==6.1.0

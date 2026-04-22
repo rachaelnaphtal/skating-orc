@@ -1,15 +1,25 @@
 import os
 import pandas as pd
-from officials_analysis_models import (
-    Officials,
-    Appointments,
-    Assignment,
-    Disciplines,
-    Competition,
-    AppointmentTypes,
-)
+try:
+    from activityAnalysis.officials_analysis_models import (
+        Officials,
+        Appointments,
+        Assignment,
+        Disciplines,
+        Competition,
+        AppointmentTypes,
+    )
+except ModuleNotFoundError:
+    from officials_analysis_models import (
+        Officials,
+        Appointments,
+        Assignment,
+        Disciplines,
+        Competition,
+        AppointmentTypes,
+    )
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, select, func, and_
+from sqlalchemy import create_engine, select, func, and_, or_
 import math
 import re
 from datetime import datetime
@@ -27,6 +37,116 @@ def get_engine():
 
 
 engine = get_engine()
+
+# competition_type.id — identifies US Championships competitions (find/create rows).
+# (Do not confuse with appointment_type ids, which are separate.)
+US_CHAMPIONSHIPS_COMPETITION_TYPE_ID = 4
+REFEREE_APPOINTMENT_TYPE_ID = 4
+NATIONAL_LEVEL_ID = 7
+SECTIONAL_LEVEL_ID = 2
+DISC_DANCE_ID = 4
+DISC_SYNCHRO_ID = 2
+DISC_SINGLES_PAIRS_ID = 9
+
+# Keys must match ``SUMMARY_COMPETITION_TYPES`` labels in ``activity_tracker_app``.
+REF_REPORT_COMP_GROUPS = frozenset(
+    {
+        "US Championships",
+        "US Synchronized Skating Championships",
+        "SPD Sectionals",
+        "Synchronized Sectionals",
+    }
+)
+
+
+def _ref_assignment_discipline_ids(comp_group_name, discipline_id):
+    """Assignment rows counted for this report use these discipline ids."""
+    if discipline_id is not None:
+        return [int(discipline_id)]
+    if comp_group_name in ("US Championships", "SPD Sectionals"):
+        return [DISC_DANCE_ID, DISC_SINGLES_PAIRS_ID]
+    if comp_group_name in (
+        "US Synchronized Skating Championships",
+        "Synchronized Sectionals",
+    ):
+        return [DISC_SYNCHRO_ID]
+    raise ValueError(f"Unknown competition group: {comp_group_name!r}")
+
+
+def _referee_eligibility_where(comp_group_name, discipline_filter_id=None):
+    """SQLAlchemy boolean expression: this official has a qualifying referee appointment."""
+    base = Appointments.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID
+    if comp_group_name == "US Championships":
+        disc_clause = (
+            Appointments.discipline_id == discipline_filter_id
+            if discipline_filter_id is not None
+            else Appointments.discipline_id.in_([DISC_DANCE_ID, DISC_SINGLES_PAIRS_ID])
+        )
+        return and_(base, Appointments.level_id == NATIONAL_LEVEL_ID, disc_clause)
+    if comp_group_name == "US Synchronized Skating Championships":
+        return and_(
+            base,
+            Appointments.level_id == NATIONAL_LEVEL_ID,
+            Appointments.discipline_id
+            == (discipline_filter_id if discipline_filter_id is not None else DISC_SYNCHRO_ID),
+        )
+    if comp_group_name == "SPD Sectionals":
+        disc_clause = (
+            Appointments.discipline_id == discipline_filter_id
+            if discipline_filter_id is not None
+            else Appointments.discipline_id.in_([DISC_DANCE_ID, DISC_SINGLES_PAIRS_ID])
+        )
+        return and_(
+            base,
+            disc_clause,
+            or_(
+                Appointments.level_id == NATIONAL_LEVEL_ID,
+                Appointments.level_id == SECTIONAL_LEVEL_ID,
+            ),
+        )
+    if comp_group_name == "Synchronized Sectionals":
+        return and_(
+            base,
+            Appointments.discipline_id
+            == (discipline_filter_id if discipline_filter_id is not None else DISC_SYNCHRO_ID),
+            or_(
+                Appointments.level_id == NATIONAL_LEVEL_ID,
+                Appointments.level_id == SECTIONAL_LEVEL_ID,
+            ),
+        )
+    raise ValueError(f"Unknown competition group: {comp_group_name!r}")
+
+
+def get_referee_eligible_official_ids(comp_group_name, discipline_id=None):
+    """Official ids with at least one referee appointment matching group eligibility rules."""
+    if comp_group_name not in REF_REPORT_COMP_GROUPS:
+        raise ValueError(f"Unknown competition group: {comp_group_name!r}")
+    where_elig = _referee_eligibility_where(comp_group_name, discipline_id)
+    with Session(engine) as session:
+        stmt = (
+            select(Appointments.official_id)
+            .distinct()
+            .where(where_elig, Appointments.official_id.isnot(None))
+        )
+        rows = session.execute(stmt).all()
+    return sorted({int(r[0]) for r in rows if r[0] is not None})
+
+
+def get_referee_discipline_options_for_comp_group(comp_group_name):
+    """Discipline ids/names offered for 'single discipline' on the referee report."""
+    if comp_group_name not in REF_REPORT_COMP_GROUPS:
+        return pd.DataFrame(columns=["discipline_id", "discipline_name"])
+    ids = _ref_assignment_discipline_ids(comp_group_name, None)
+    if not ids:
+        return pd.DataFrame(columns=["discipline_id", "discipline_name"])
+    with Session(engine) as session:
+        stmt = (
+            select(Disciplines.id, Disciplines.name)
+            .where(Disciplines.id.in_(ids))
+            .order_by(Disciplines.name)
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(rows, columns=["discipline_id", "discipline_name"])
 
 
 def create_appointment_code_df(file=appointment_codes_file):
@@ -330,7 +450,12 @@ def get_qualified_officials(discipline_id, appointment_type_id, level_ids):
             else Appointments.discipline_id == discipline_id
         )
         stmt = (
-            select(Officials.id, Officials.full_name, Appointments.achieved_date)
+            select(
+                Officials.id,
+                Officials.full_name,
+                Officials.region,
+                Appointments.achieved_date,
+            )
             .join(Appointments, Appointments.official_id == Officials.id)
             .where(
                 disc_filter,
@@ -342,7 +467,7 @@ def get_qualified_officials(discipline_id, appointment_type_id, level_ids):
 
         rows = session.execute(stmt).all()
 
-    return pd.DataFrame(rows, columns=["official_id", "full_name", "achieved_date"])
+    return pd.DataFrame(rows, columns=["official_id", "full_name", "region", "achieved_date"])
 
 
 SINGLES_PAIRS_DISCIPLINE_ID = 8
@@ -459,9 +584,16 @@ def build_activity_matrix(qualified_df, activity_df):
     else:
         result["total_championships"] = 0
 
+    loc_meta = (
+        qualified_df.sort_values("achieved_date", ascending=False, na_position="last")
+        .drop_duplicates("official_id", keep="first")[["official_id", "region"]]
+    )
+    result = result.merge(loc_meta, on="official_id", how="left")
+
     fixed_cols = [
         "official_id",
         "full_name",
+        "region",
         "years_in_grade",
         "years_since_last",
         "most_recent_year",
@@ -597,6 +729,7 @@ def get_assigned_competition_counts(competition_type_ids):
             columns=[
                 "official_id",
                 "full_name",
+                "region",
                 "competitions_assigned",
                 "most_recent_year",
             ]
@@ -607,6 +740,7 @@ def get_assigned_competition_counts(competition_type_ids):
             select(
                 Officials.id.label("official_id"),
                 Officials.full_name,
+                func.max(Officials.region).label("region"),
                 func.count(func.distinct(Competition.id)).label("competitions_assigned"),
                 func.max(Competition.year).label("most_recent_year"),
             )
@@ -627,6 +761,7 @@ def get_assigned_competition_counts(competition_type_ids):
         columns=[
             "official_id",
             "full_name",
+            "region",
             "competitions_assigned",
             "most_recent_year",
         ],
@@ -643,6 +778,658 @@ def get_competition_count_for_types(competition_type_ids):
         )
         result = session.execute(stmt).scalar()
     return int(result or 0)
+
+
+def get_referee_disciplines_for_competition_types(competition_type_ids):
+    """Distinct disciplines that appear on referee assignments for the given competition types."""
+    if not competition_type_ids:
+        return pd.DataFrame(columns=["discipline_id", "discipline_name"])
+    with Session(engine) as session:
+        stmt = (
+            select(Disciplines.id.label("discipline_id"), Disciplines.name.label("discipline_name"))
+            .join(Assignment, Assignment.discipline_id == Disciplines.id)
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(
+                Competition.competition_type_id.in_(competition_type_ids),
+                Assignment.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
+            )
+            .distinct()
+            .order_by(Disciplines.name)
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(rows, columns=["discipline_id", "discipline_name"])
+
+
+def get_referee_competition_count_for_types(
+    competition_type_ids, discipline_id=None, comp_group_name=None
+):
+    """
+    Count distinct competitions in ``competition_type_ids`` that have at least one
+    referee (appointment type) assignment.
+
+    When ``discipline_id`` is set, only that assignment discipline counts.
+    When unset and ``comp_group_name`` is set, assignment disciplines follow that
+    group's rules (e.g. dance + singles/pairs for US Championships / SPD).
+    """
+    if not competition_type_ids:
+        return 0
+    filters = [
+        Competition.competition_type_id.in_(competition_type_ids),
+        Assignment.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
+    ]
+    if discipline_id is not None:
+        filters.append(Assignment.discipline_id == discipline_id)
+    elif comp_group_name:
+        filters.append(
+            Assignment.discipline_id.in_(
+                _ref_assignment_discipline_ids(comp_group_name, None)
+            )
+        )
+    with Session(engine) as session:
+        stmt = (
+            select(func.count(func.distinct(Competition.id)))
+            .select_from(Competition)
+            .join(Assignment, Assignment.competition_id == Competition.id)
+            .where(*filters)
+        )
+        result = session.execute(stmt).scalar()
+    return int(result or 0)
+
+
+def get_referee_yearly_activity_report(
+    competition_type_ids,
+    discipline_id=None,
+    window_years=10,
+    comp_group_name=None,
+):
+    """
+    Per-official referee report: everyone eligible for ``comp_group_name`` (see
+    appointment rules in code), plus assignment stats at ``competition_type_ids``.
+
+    - ``discipline_id`` None: overall (group-relevant disciplines combined).
+    - ``window_years``: rolling calendar-year window ending in the current year (inclusive).
+
+    Columns:
+      official_id, full_name, discipline_label, years_served_csv (chief years as ``YYYY (C)``),
+      total_distinct_years, chief_distinct_years, years_last_10, chief_years_last_10,
+      years_in_grade, eligible_years_last_10, normalized_last_10
+      (the ``*_last_10`` names are historical; values use ``window_years``.)
+
+    For **SPD Sectionals** and **Synchronized Sectionals**, ``years_in_grade`` and the
+    normalized-window eligibility use the earliest **sectional** (level 2) referee
+    ``achieved_date`` in the report disciplines; other groups use **national** (level 7).
+    """
+    if not competition_type_ids or not comp_group_name:
+        return pd.DataFrame()
+    if comp_group_name not in REF_REPORT_COMP_GROUPS:
+        raise ValueError(f"Unknown competition group: {comp_group_name!r}")
+
+    window_years = int(window_years)
+    if window_years < 1:
+        window_years = 10
+
+    eligible_ids = get_referee_eligible_official_ids(comp_group_name, discipline_id)
+    if not eligible_ids:
+        return pd.DataFrame()
+
+    assign_disc_ids = _ref_assignment_discipline_ids(comp_group_name, discipline_id)
+
+    with Session(engine) as session:
+        filters = [
+            Competition.competition_type_id.in_(competition_type_ids),
+            Assignment.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
+            Assignment.discipline_id.in_(assign_disc_ids),
+            Officials.id.in_(eligible_ids),
+        ]
+        stmt = (
+            select(
+                Officials.id.label("official_id"),
+                Officials.full_name,
+                Competition.year,
+                Assignment.chief,
+                Assignment.discipline_id,
+                Disciplines.name.label("discipline_name"),
+            )
+            .join(Assignment, Assignment.official_id == Officials.id)
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .join(Disciplines, Assignment.discipline_id == Disciplines.id)
+            .where(*filters)
+        )
+        rows = session.execute(stmt).all()
+
+        name_rows = session.execute(
+            select(Officials.id, Officials.full_name).where(
+                Officials.id.in_(eligible_ids)
+            )
+        ).all()
+        name_map = {int(r[0]): r[1] for r in name_rows}
+
+        single_disc_name = None
+        if discipline_id is not None:
+            single_disc_name = session.execute(
+                select(Disciplines.name).where(Disciplines.id == discipline_id)
+            ).scalar()
+
+        # Years in grade + normalized-window eligibility use national referee date for
+        # championship groups; for sectional *reports*, use sectional referee achieved date.
+        ach_grade_level = (
+            SECTIONAL_LEVEL_ID
+            if comp_group_name in ("SPD Sectionals", "Synchronized Sectionals")
+            else NATIONAL_LEVEL_ID
+        )
+        ach_filters = [
+            Appointments.official_id.in_(eligible_ids),
+            Appointments.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
+            Appointments.level_id == ach_grade_level,
+            Appointments.discipline_id.in_(assign_disc_ids),
+        ]
+        ach_stmt = (
+            select(
+                Appointments.official_id,
+                func.min(Appointments.achieved_date).label("first_achieved"),
+            )
+            .where(*ach_filters)
+            .group_by(Appointments.official_id)
+        )
+        ach_rows = session.execute(ach_stmt).all()
+
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "official_id",
+            "full_name",
+            "year",
+            "chief",
+            "discipline_id",
+            "discipline_name",
+        ],
+    )
+    if not df.empty:
+        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
+        df["chief"] = df["chief"].fillna(False).astype(bool)
+
+    cy = datetime.now().year
+    win_start = cy - window_years + 1
+
+    def _eligible_years_in_window(achieved_year):
+        if achieved_year is None or pd.isna(achieved_year):
+            return max(1, cy - win_start + 1)
+        ay = int(achieved_year)
+        first_eligible = max(win_start, ay)
+        if first_eligible > cy:
+            return 1
+        return cy - first_eligible + 1
+
+    ach_df = pd.DataFrame(ach_rows, columns=["official_id", "first_achieved"])
+    ach_df["achieved_year"] = pd.to_datetime(
+        ach_df["first_achieved"], errors="coerce"
+    ).dt.year
+
+    by_off = {}
+    if not df.empty:
+        for oid, g in df.groupby("official_id"):
+            by_off[int(oid)] = g
+
+    disc_label = "Overall" if discipline_id is None else (single_disc_name or "")
+
+    records = []
+    for oid in eligible_ids:
+        g = by_off.get(oid)
+        name = name_map.get(oid, "")
+        if g is not None:
+            years = sorted(int(y) for y in g["year"].dropna().unique().tolist())
+            chief_years = sorted(
+                int(y) for y in g.loc[g["chief"], "year"].dropna().unique().tolist()
+            )
+            row_disc_label = (
+                disc_label
+                if discipline_id is None
+                else str(g["discipline_name"].iloc[0])
+            )
+        else:
+            years = []
+            chief_years = []
+            row_disc_label = disc_label
+        chief_year_set = set(chief_years)
+        years_csv = ", ".join(
+            f"{y} (C)" if y in chief_year_set else str(y) for y in years
+        )
+        total_y = len(years)
+        chief_distinct = len(chief_year_set)
+        y10 = [y for y in years if win_start <= y <= cy]
+        chief_10 = len(set(chief_years) & set(y10))
+        arow = ach_df.loc[ach_df["official_id"] == oid]
+        achieved_year = (
+            arow["achieved_year"].iloc[0] if len(arow) else None
+        )
+        yig = (
+            int(cy - achieved_year)
+            if achieved_year is not None and not pd.isna(achieved_year)
+            else None
+        )
+        elig = _eligible_years_in_window(achieved_year)
+        norm = (len(y10) / max(1, elig)) if elig else 0.0
+        records.append(
+            {
+                "official_id": oid,
+                "full_name": name,
+                "discipline_label": row_disc_label,
+                "years_served_csv": years_csv,
+                "total_distinct_years": total_y,
+                "chief_distinct_years": chief_distinct,
+                "years_last_10": len(y10),
+                "chief_years_last_10": chief_10,
+                "years_in_grade": yig,
+                "eligible_years_last_10": elig,
+                "normalized_last_10": round(norm, 3),
+            }
+        )
+
+    out = pd.DataFrame(records)
+    out = out.sort_values(
+        by=["total_distinct_years", "years_last_10", "full_name"],
+        ascending=[False, False, True],
+        kind="mergesort",
+    )
+    return out
+
+
+def _parse_chiefed_years(value):
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text or text.upper() == "X":
+        return []
+    years = []
+    for part in re.split(r"[,\s;/]+", text):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit() and len(part) == 4:
+            years.append(int(part))
+    return sorted(set(years))
+
+
+def load_chief_scoring_officials_us_champs(
+    file_path,
+    sheet_name="National Accountants",
+    write_to_database=False,
+    create_missing_competitions=True,
+    create_missing_assignments=True,
+):
+    """
+    Load chief scoring officials for US Championships (competition_type_id=4)
+    from an Excel sheet with columns including:
+      - First Name
+      - Last Name
+      - Chiefed US Champs
+
+    Behavior:
+      - For each (official, year), set chief=True on existing assignments for
+        appointment type "Scoring Official" at US Championships competitions.
+      - If no matching assignment exists, record it in 'missing_assignment'
+        for manual follow-up.
+    """
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    required_cols = {"First Name", "Last Name", "Chiefed US Champs"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns in Excel: {sorted(missing_cols)}")
+
+    stats = {
+        "rows_read": len(df),
+        "years_listed": 0,
+        "updated_to_chief": 0,
+        "already_chief": 0,
+        "missing_official": 0,
+        "missing_competition": 0,
+        "created_competition": 0,
+        "missing_assignment": 0,
+        "created_assignment": 0,
+    }
+    missing_details = []
+
+    with Session(engine) as session:
+        scoring_official_appt = (
+            session.query(AppointmentTypes)
+            .filter(AppointmentTypes.name == "Scoring Official")
+            .one_or_none()
+        )
+        if scoring_official_appt is None:
+            raise ValueError("Could not find appointment type 'Scoring Official'.")
+
+        officials_by_name = {
+            (o.full_name or "").strip().lower(): o.id
+            for o in session.query(Officials).all()
+            if o.full_name
+        }
+
+        competitions = session.query(Competition).filter(
+            Competition.competition_type_id == US_CHAMPIONSHIPS_COMPETITION_TYPE_ID
+        ).all()
+        comp_by_year = {}
+        for comp in competitions:
+            comp_by_year.setdefault(comp.year, []).append(comp)
+
+        for _, row in df.iterrows():
+            first = "" if pd.isna(row["First Name"]) else str(row["First Name"]).strip()
+            last = "" if pd.isna(row["Last Name"]) else str(row["Last Name"]).strip()
+            full_name = f"{first} {last}".strip()
+            if not full_name:
+                continue
+
+            years = _parse_chiefed_years(row["Chiefed US Champs"])
+            stats["years_listed"] += len(years)
+
+            # Ensure listed US Championships years exist, even when the name
+            # does not match an official record.
+            if create_missing_competitions:
+                for yr in years:
+                    if not comp_by_year.get(yr):
+                        comp = get_or_create_competition(
+                            session,
+                            yr,
+                            "US Championships",
+                            US_CHAMPIONSHIPS_COMPETITION_TYPE_ID,
+                        )
+                        stats["created_competition"] += 1
+                        comp_by_year[yr] = [comp]
+
+            official_id = officials_by_name.get(full_name.lower())
+
+            if official_id is None:
+                if years:
+                    stats["missing_official"] += len(years)
+                    for yr in years:
+                        missing_details.append(
+                            {"name": full_name, "year": yr, "reason": "missing_official"}
+                        )
+                continue
+
+            for yr in years:
+                comps = comp_by_year.get(yr, [])
+                if not comps:
+                    if create_missing_competitions:
+                        comp = get_or_create_competition(
+                            session,
+                            yr,
+                            "US Championships",
+                            US_CHAMPIONSHIPS_COMPETITION_TYPE_ID,
+                        )
+                        stats["created_competition"] += 1
+                        comps = [comp]
+                        comp_by_year[yr] = comps
+                    else:
+                        stats["missing_competition"] += 1
+                        missing_details.append(
+                            {"name": full_name, "year": yr, "reason": "missing_competition"}
+                        )
+                        continue
+
+                found_assignment = False
+                for comp in comps:
+                    assignments = (
+                        session.query(Assignment)
+                        .filter(
+                            Assignment.competition_id == comp.id,
+                            Assignment.official_id == official_id,
+                            Assignment.appointment_type_id == scoring_official_appt.id,
+                        )
+                        .all()
+                    )
+                    if not assignments:
+                        if create_missing_assignments:
+                            # Chief accountants are loaded as Scoring Official
+                            # assignments. Discipline is required in schema; use
+                            # discipline id 7 per data model convention.
+                            new_assignment = Assignment(
+                                competition_id=comp.id,
+                                official_id=official_id,
+                                discipline_id=7,
+                                appointment_type_id=scoring_official_appt.id,
+                                chief=True,
+                                lower_levels_only=False,
+                            )
+                            session.add(new_assignment)
+                            stats["created_assignment"] += 1
+                            found_assignment = True
+                        continue
+                    found_assignment = True
+                    for assignment in assignments:
+                        if assignment.chief:
+                            stats["already_chief"] += 1
+                        else:
+                            assignment.chief = True
+                            stats["updated_to_chief"] += 1
+
+                if not found_assignment:
+                    stats["missing_assignment"] += 1
+                    missing_details.append(
+                        {"name": full_name, "year": yr, "reason": "missing_assignment"}
+                    )
+
+        if write_to_database:
+            session.commit()
+        else:
+            session.rollback()
+
+    return {"stats": stats, "missing_details": pd.DataFrame(missing_details)}
+
+
+# US Championships referees (US_Champs_Referees.xlsx)
+# Referee appointment type id: REFEREE_APPOINTMENT_TYPE_ID (module-level).
+US_CHAMPS_REFEREE_DISCIPLINE_DEFAULT = 9
+US_CHAMPS_REFEREE_DISCIPLINE_DANCE = 4
+
+
+def _parse_us_champs_referee_role(role_value):
+    """
+    Map Excel Role to (chief, discipline_id) for US Championships referee panel.
+    Appointment type is always Referee (REFEREE_APPOINTMENT_TYPE_ID).
+    """
+    if pd.isna(role_value):
+        return None
+    r = " ".join(str(role_value).strip().lower().split())
+    if r == "assistant referee dance":
+        return False, US_CHAMPS_REFEREE_DISCIPLINE_DANCE
+    if r == "assistant referee":
+        return False, US_CHAMPS_REFEREE_DISCIPLINE_DEFAULT
+    if r == "chief referee":
+        return True, US_CHAMPS_REFEREE_DISCIPLINE_DEFAULT
+    return None
+
+
+def load_us_champs_referees_assignments(
+    file_path="activityAnalysis/US_Champs_Referees.xlsx",
+    sheet_name=0,
+    write_to_database=False,
+    create_missing_competitions=True,
+):
+    """
+    Load US Championships referee assignments from Excel (Year, Role, Name).
+
+    Competitions are resolved by ``competition_type_id ==
+    US_CHAMPIONSHIPS_COMPETITION_TYPE_ID`` (4). New competitions created for a
+    missing year use that same type.
+
+    Roles (case-insensitive, normalized whitespace):
+      - Chief Referee: chief=True, discipline_id=9, appointment_type_id=4 (Referee)
+      - Assistant Referee: chief=False, discipline_id=9, appointment_type_id=4
+      - Assistant Referee Dance: chief=False, discipline_id=4, appointment_type_id=4
+
+    Skips rows that already have the same (competition, official, discipline, type).
+    """
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    required = {"Year", "Role", "Name"}
+    missing_cols = required - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+
+    stats = {
+        "rows_read": len(df),
+        "inserted": 0,
+        "skipped_duplicate": 0,
+        "skipped_retired": 0,
+        "empty_name": 0,
+        "missing_official": 0,
+        "unknown_role": 0,
+        "bad_year": 0,
+        "created_competition": 0,
+        "missing_competition": 0,
+    }
+    missing_details = []
+
+    retired_path = "activityAnalysis/Retired_officials.xlsx"
+    try:
+        retired_df = pd.read_excel(retired_path)
+        retired_names = {
+            str(n).strip().lower() for n in retired_df["Name"] if pd.notna(n)
+        }
+    except Exception:
+        retired_names = set()
+
+    with Session(engine) as session:
+        referee_row = (
+            session.query(AppointmentTypes)
+            .filter(AppointmentTypes.id == REFEREE_APPOINTMENT_TYPE_ID)
+            .one_or_none()
+        )
+        if referee_row is None:
+            raise ValueError(
+                f"Appointment type id {REFEREE_APPOINTMENT_TYPE_ID} not found."
+            )
+
+        officials_by_name = {
+            (o.full_name or "").strip().lower(): o.id
+            for o in session.query(Officials).all()
+            if o.full_name
+        }
+
+        competitions = (
+            session.query(Competition)
+            .filter(
+                Competition.competition_type_id == US_CHAMPIONSHIPS_COMPETITION_TYPE_ID
+            )
+            .all()
+        )
+        comp_by_year = {}
+        for comp in competitions:
+            if comp.competition_type_id != US_CHAMPIONSHIPS_COMPETITION_TYPE_ID:
+                continue
+            comp_by_year.setdefault(comp.year, []).append(comp)
+
+        for _, row in df.iterrows():
+            name = "" if pd.isna(row["Name"]) else str(row["Name"]).strip()
+            if not name:
+                stats["empty_name"] += 1
+                missing_details.append(
+                    {"name": "", "year": None, "reason": "empty_name", "role": row.get("Role")}
+                )
+                continue
+
+            if name.lower() in retired_names:
+                stats["skipped_retired"] += 1
+                continue
+
+            parsed = _parse_us_champs_referee_role(row.get("Role"))
+            if parsed is None:
+                stats["unknown_role"] += 1
+                missing_details.append(
+                    {
+                        "name": name,
+                        "year": row.get("Year"),
+                        "reason": "unknown_role",
+                        "role": row.get("Role"),
+                    }
+                )
+                continue
+
+            chief, discipline_id = parsed
+
+            if pd.isna(row["Year"]):
+                stats["bad_year"] += 1
+                missing_details.append(
+                    {"name": name, "year": None, "reason": "bad_year", "role": row.get("Role")}
+                )
+                continue
+            try:
+                year = int(float(row["Year"]))
+            except (TypeError, ValueError):
+                stats["bad_year"] += 1
+                missing_details.append(
+                    {"name": name, "year": row.get("Year"), "reason": "bad_year", "role": row.get("Role")}
+                )
+                continue
+
+            if create_missing_competitions and not comp_by_year.get(year):
+                comp = get_or_create_competition(
+                    session,
+                    year,
+                    "US Championships",
+                    US_CHAMPIONSHIPS_COMPETITION_TYPE_ID,
+                )
+                stats["created_competition"] += 1
+                comp_by_year[year] = [comp]
+
+            comps = [
+                c
+                for c in comp_by_year.get(year, [])
+                if c.competition_type_id == US_CHAMPIONSHIPS_COMPETITION_TYPE_ID
+            ]
+            if not comps:
+                stats["missing_competition"] += 1
+                missing_details.append(
+                    {"name": name, "year": year, "reason": "missing_competition", "role": row.get("Role")}
+                )
+                continue
+
+            us_named = [
+                c
+                for c in comps
+                if (c.name or "").strip() == "US Championships"
+            ]
+            comp = us_named[0] if us_named else comps[0]
+
+            official_id = officials_by_name.get(name.lower())
+            if official_id is None:
+                stats["missing_official"] += 1
+                missing_details.append(
+                    {"name": name, "year": year, "reason": "missing_official", "role": row.get("Role")}
+                )
+                continue
+
+            exists = (
+                session.query(Assignment)
+                .filter_by(
+                    competition_id=comp.id,
+                    official_id=official_id,
+                    discipline_id=discipline_id,
+                    appointment_type_id=REFEREE_APPOINTMENT_TYPE_ID,
+                )
+                .first()
+            )
+            if exists:
+                stats["skipped_duplicate"] += 1
+                continue
+
+            session.add(
+                Assignment(
+                    competition_id=comp.id,
+                    official_id=official_id,
+                    discipline_id=discipline_id,
+                    appointment_type_id=REFEREE_APPOINTMENT_TYPE_ID,
+                    chief=chief,
+                    lower_levels_only=False,
+                )
+            )
+            stats["inserted"] += 1
+
+        if write_to_database:
+            session.commit()
+        else:
+            session.rollback()
+
+    return {"stats": stats, "missing_details": pd.DataFrame(missing_details)}
 
 
 def get_activity_matrix(

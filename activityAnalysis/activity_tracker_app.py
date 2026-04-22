@@ -1,3 +1,5 @@
+import re
+
 import streamlit as st
 from load_activity_data import (
     get_assigned_competition_counts,
@@ -7,6 +9,9 @@ from load_activity_data import (
     appointment_type_has_chiefs,
     get_chief_years,
     get_engine,
+    get_referee_competition_count_for_types,
+    get_referee_discipline_options_for_comp_group,
+    get_referee_yearly_activity_report,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, select
@@ -60,13 +65,127 @@ DISC_ABBREV = {
     9: "SP",   # Singles/Pairs
 }
 
+# USFS: `region` in the directory maps to a macro area; each area has sub-sections.
+# Filter uses the macro (Eastern / Midwestern / Pacific Coast); display prefers
+# the subsection label when the stored region matches a known subsection.
+_REGION_TO_MACRO = {
+    "eastern": "Eastern",
+    "new england": "Eastern",
+    "north atlantic": "Eastern",
+    "south atlantic": "Eastern",
+    "midwestern": "Midwestern",
+    "upper great lakes": "Midwestern",
+    "eastern great lakes": "Midwestern",
+    "southwestern": "Midwestern",
+    "pacific coast": "Pacific Coast",
+    "northwest pacific": "Pacific Coast",
+    "central pacific": "Pacific Coast",
+    "southwest pacific": "Pacific Coast",
+}
+
+_SUBSECTION_DISPLAY = {
+    "new england": "New England",
+    "north atlantic": "North Atlantic",
+    "south atlantic": "South Atlantic",
+    "upper great lakes": "Upper Great Lakes",
+    "eastern great lakes": "Eastern Great Lakes",
+    "southwestern": "Southwestern",
+    "northwest pacific": "Northwest Pacific",
+    "central pacific": "Central Pacific",
+    "southwest pacific": "Southwest Pacific",
+}
+
+
+def _normalize_for_region_lookup(region) -> str:
+    """Normalize directory `region` strings for lookup (handles extra words / spacing)."""
+    if region is None or (isinstance(region, float) and pd.isna(region)):
+        return ""
+    s = str(region).strip().lower()
+    if not s or s == "nan":
+        return ""
+    s = re.sub(r"[\s,;/]+", " ", s).strip()
+    for suffix in (" region", " section", " sectional", " sec"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].strip()
+    return s
+
+
+def section_macro_from_region(region) -> str:
+    """Eastern / Midwestern / Pacific Coast / (Other) / (Unspecified) — used for filter + Section column."""
+    nk = _normalize_for_region_lookup(region)
+    if not nk:
+        return "(Unspecified)"
+    if nk in _REGION_TO_MACRO:
+        return _REGION_TO_MACRO[nk]
+    # Subsection phrase embedded in longer label
+    for sub_k in sorted(_SUBSECTION_DISPLAY.keys(), key=len, reverse=True):
+        if sub_k in nk:
+            return _REGION_TO_MACRO[sub_k]
+    return "(Other)"
+
+
+def section_subsection_label(region) -> str:
+    """Canonical subsection name when `region` matches a known subsection; else empty string."""
+    nk = _normalize_for_region_lookup(region)
+    if not nk:
+        return ""
+    if nk in _SUBSECTION_DISPLAY:
+        return _SUBSECTION_DISPLAY[nk]
+    for sub_k in sorted(_SUBSECTION_DISPLAY.keys(), key=len, reverse=True):
+        if sub_k in nk:
+            return _SUBSECTION_DISPLAY[sub_k]
+    return ""
+
+
+def section_display_from_region(region) -> str:
+    """
+    Value for the Section column: macro (Eastern / Midwestern / Pacific Coast),
+    optionally with subsection in parentheses when we can infer it from `region`
+    (so Section is never a blind copy of the raw Region string).
+    """
+    macro = section_macro_from_region(region)
+    if macro in ("(Unspecified)", "(Other)"):
+        return macro
+    sub = section_subsection_label(region)
+    if sub:
+        return f"{macro}"
+    return macro
+
+
+def filter_dataframe_by_section(df: pd.DataFrame, *, widget_key: str) -> pd.DataFrame:
+    """Filter by macro section derived from `region` (Eastern / Midwestern / Pacific Coast)."""
+    if df.empty or "region" not in df.columns:
+        return df
+    df = df.copy()
+    df["_section_key"] = df["region"].map(section_macro_from_region)
+    options = sorted(df["_section_key"].unique())
+    selected = st.multiselect(
+        "Section (from region)",
+        options=options,
+        default=options,
+        help="Regions roll up to Eastern, Midwestern, or Pacific Coast. Clear all to show every section.",
+        key=widget_key,
+    )
+    if len(selected) > 0:
+        df = df[df["_section_key"].isin(selected)]
+    return df.drop(columns=["_section_key"], errors="ignore")
+
+
 st.set_page_config(layout="wide", page_title="Officials Activity Tracker",
                    page_icon="⛸️")
 st.title("Officials Activity Tracker")
 
+REPORT_CHAMPIONSHIPS_DETAILED = "Championships Detailed Activity"
+REPORT_NUMBER_OF_ASSIGNMENTS = "Number of assignments"
+REPORT_REFEREE_SERVICE = "Referee service (by competition type)"
+
 report_mode = st.radio(
-    "Report Type",
-    options=["Activity Tracker", "Assigned Summary"],
+    "Report",
+    options=[
+        REPORT_CHAMPIONSHIPS_DETAILED,
+        REPORT_NUMBER_OF_ASSIGNMENTS,
+        REPORT_REFEREE_SERVICE,
+    ],
     horizontal=True,
 )
 
@@ -181,9 +300,17 @@ if discipline_id is None:
 else:
     competition_type_id = COMPETITION_TYPE_MAP.get(discipline_id, DEFAULT_COMPETITION_TYPE)
 
-show_other_roles = st.checkbox(
-    f"Show attendance in other roles  ({OTHER_ROLE_SYMBOL} = present at competition in a different role)"
-)
+if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
+    show_other_roles = st.checkbox(
+        f"Show attendance in other roles  ({OTHER_ROLE_SYMBOL} = present at competition in a different role)"
+    )
+    show_section_info = st.checkbox(
+        "Add information on section",
+        help="Show Region and Section columns, section filter, and a count summary by section for the current view.",
+    )
+else:
+    show_other_roles = False
+    show_section_info = False
 
 st.divider()
 
@@ -239,7 +366,228 @@ def load_competition_count(competition_type_ids_tuple):
     return get_competition_count_for_types(list(competition_type_ids_tuple))
 
 
-if report_mode == "Assigned Summary":
+@st.cache_data
+def load_referee_discipline_options(comp_group_name):
+    return get_referee_discipline_options_for_comp_group(comp_group_name)
+
+
+@st.cache_data
+def load_referee_competition_count(
+    competition_type_ids_tuple, discipline_id_sentinel, comp_group_name
+):
+    """Competitions in these types that have ≥1 referee assignment (optional discipline)."""
+    did = None if discipline_id_sentinel == -1 else int(discipline_id_sentinel)
+    return get_referee_competition_count_for_types(
+        list(competition_type_ids_tuple),
+        discipline_id=did,
+        comp_group_name=comp_group_name,
+    )
+
+
+@st.cache_data
+def load_referee_yearly_report(
+    competition_type_ids_tuple,
+    discipline_id_sentinel,
+    window_years,
+    comp_group_name,
+):
+    """discipline_id_sentinel: -1 means overall (all disciplines); else discipline id."""
+    did = None if discipline_id_sentinel == -1 else int(discipline_id_sentinel)
+    return get_referee_yearly_activity_report(
+        list(competition_type_ids_tuple),
+        discipline_id=did,
+        window_years=int(window_years),
+        comp_group_name=comp_group_name,
+    )
+
+
+if report_mode == REPORT_REFEREE_SERVICE:
+    comp_group = st.selectbox(
+        "Competition Type Group",
+        options=list(SUMMARY_COMPETITION_TYPES.keys()),
+        index=0,
+        key="referee_report_comp_group",
+    )
+    comp_type_ids = SUMMARY_COMPETITION_TYPES[comp_group]
+
+    window_options = (5, 10, 15, 20)
+    window_years = st.selectbox(
+        "Year window (rolling, through current year)",
+        options=window_options,
+        index=window_options.index(10),
+        key="referee_report_window_years",
+        help="Counts and normalized rate use this many calendar years ending in the current year.",
+    )
+    win_start = CURRENT_YEAR - int(window_years) + 1
+
+    disc_df = load_referee_discipline_options(comp_group)
+    scope = st.radio(
+        "Discipline scope",
+        options=["Overall", "Single discipline"],
+        horizontal=True,
+        key="referee_report_disc_scope",
+    )
+    ref_discipline_sentinel = -1
+    if scope == "Single discipline":
+        if disc_df.empty:
+            ref_cov = load_referee_competition_count(
+                tuple(comp_type_ids), -1, comp_group
+            )
+            st.info(
+                "No discipline options found for this competition group "
+                "(check discipline names in the database)."
+            )
+            st.caption(
+                f"Data coverage: {ref_cov} competitions in this group with at least one referee."
+            )
+            st.stop()
+        by_name = dict(zip(disc_df["discipline_name"], disc_df["discipline_id"]))
+        names = sorted(by_name.keys())
+        picked = st.selectbox(
+            "Discipline",
+            options=names,
+            key="referee_report_discipline",
+        )
+        ref_discipline_sentinel = int(by_name[picked])
+
+    referee_df = load_referee_yearly_report(
+        tuple(comp_type_ids),
+        ref_discipline_sentinel,
+        window_years,
+        comp_group,
+    )
+    ref_competition_count = load_referee_competition_count(
+        tuple(comp_type_ids), ref_discipline_sentinel, comp_group
+    )
+    if referee_df.empty:
+        st.info(
+            "No eligible referees for this competition group and discipline scope "
+            "(see appointment level/discipline rules in the data layer)."
+        )
+        st.caption(
+            f"Data coverage: {ref_competition_count} competitions in this view with at least one referee."
+        )
+        st.stop()
+
+    norm_label = f"Normalized ({window_years} yr)"
+    _sectional_ref_report = comp_group in (
+        "SPD Sectionals",
+        "Synchronized Sectionals",
+    )
+    yig_col = (
+        "Years in grade (sect. ref.)"
+        if _sectional_ref_report
+        else "Years in grade (nat. ref.)"
+    )
+    _grade_caption = (
+        "sectional referee achieved date in the report disciplines"
+        if _sectional_ref_report
+        else "national referee achieved date for the same discipline scope"
+    )
+    st.markdown(
+        f"**{len(referee_df)} eligible officials** — {comp_group} — "
+        f"assignment stats in these competition types — {window_years}-year window: {win_start}–{CURRENT_YEAR}"
+    )
+    st.caption(
+        "Includes everyone eligible as a referee for this report (national and/or sectional "
+        "rules by competition group), even with zero assignments in the selected types. "
+        "Total years = distinct calendar years with at least one referee assignment "
+        "in this competition group. In Years served, (C) after a year marks at least "
+        "one chief assignment that year. Chief columns count distinct chief-years. "
+        f"{norm_label} = years with an assignment in the window ÷ years you "
+        f"could have served in that window after {_grade_caption} "
+        "(unknown date → full window)."
+    )
+    st.caption(
+        f"Data coverage: {ref_competition_count} competitions in this view with at least one referee."
+    )
+
+    display_ref = (
+        referee_df.drop(columns=["discipline_label"], errors="ignore")
+        .rename(
+            columns={
+                "full_name": "Name",
+                "years_served_csv": "Years served",
+                "total_distinct_years": "Total years",
+                "chief_distinct_years": "Chief (all years)",
+                "years_last_10": f"Years ({win_start}–{CURRENT_YEAR})",
+                "chief_years_last_10": f"Chief years ({win_start}–{CURRENT_YEAR})",
+                "years_in_grade": yig_col,
+                "eligible_years_last_10": "Eligible yrs in window",
+                "normalized_last_10": norm_label,
+            }
+        )
+        .drop(columns=["official_id"], errors="ignore")
+    )
+
+    col_order = [
+        c
+        for c in [
+            "Name",
+            "Years served",
+            "Total years",
+            "Chief (all years)",
+            f"Years ({win_start}–{CURRENT_YEAR})",
+            f"Chief years ({win_start}–{CURRENT_YEAR})",
+            yig_col,
+            "Eligible yrs in window",
+            norm_label,
+        ]
+        if c in display_ref.columns
+    ]
+    display_ref = display_ref[col_order]
+
+    def _fmt_years_in_grade(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        return str(int(v))
+
+    _fmt_map = {}
+    if yig_col in display_ref.columns:
+        _fmt_map[yig_col] = _fmt_years_in_grade
+    if norm_label in display_ref.columns:
+        _fmt_map[norm_label] = "{:.3f}"
+    styled_ref = (
+        display_ref.style.format(_fmt_map, na_rep="") if _fmt_map else display_ref.style
+    )
+
+    ref_col_cfg = {"Name": st.column_config.Column(pinned=True)}
+    ref_col_cfg["Years served"] = st.column_config.TextColumn(
+        "Years served",
+        help=(
+            "Calendar years with a referee assignment in this view; "
+            "(C) after a year means at least one chief assignment that year."
+        ),
+        width="large",
+    )
+    for num_col in (
+        "Total years",
+        "Chief (all years)",
+        f"Years ({win_start}–{CURRENT_YEAR})",
+        f"Chief years ({win_start}–{CURRENT_YEAR})",
+        yig_col,
+        "Eligible yrs in window",
+    ):
+        if num_col in display_ref.columns:
+            ref_col_cfg[num_col] = st.column_config.NumberColumn(num_col, format="%.0f")
+    if norm_label in display_ref.columns:
+        ref_col_cfg[norm_label] = st.column_config.NumberColumn(norm_label, format="%.3f")
+
+    st.dataframe(
+        styled_ref,
+        width="stretch",
+        height=700,
+        hide_index=True,
+        column_config=ref_col_cfg,
+    )
+    appt_date = load_appt_data_date()
+    if appt_date is not None:
+        date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
+        st.caption(f"Appointment data current as of {date_str}")
+    st.stop()
+
+
+if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
     comp_group = st.selectbox(
         "Competition Type Group",
         options=list(SUMMARY_COMPETITION_TYPES.keys()),
@@ -254,13 +602,28 @@ if report_mode == "Assigned Summary":
         st.caption(f"Data coverage: {competition_count} unique competitions in this group.")
         st.stop()
 
-    summary_df = summary_df.rename(
-        columns={
-            "full_name": "Name",
-            "competitions_assigned": "Competitions Assigned",
-            "most_recent_year": "Most Recent",
-        }
-    )
+    if not show_section_info:
+        summary_df = summary_df.drop(columns=["region"], errors="ignore")
+
+    if show_section_info:
+        summary_df["section"] = summary_df["region"].map(section_display_from_region)
+        summary_df = filter_dataframe_by_section(
+            summary_df, widget_key="section_filter_assigned_summary"
+        )
+        if summary_df.empty:
+            st.info("No officials match the current section filter.")
+            st.stop()
+
+    summary_rename = {
+        "full_name": "Name",
+        "competitions_assigned": "Competitions Assigned",
+        "most_recent_year": "Most Recent",
+    }
+    if show_section_info:
+        summary_rename["region"] = "Region"
+        summary_rename["section"] = "Section"
+
+    summary_df = summary_df.rename(columns=summary_rename)
     summary_df["Competitions Assigned"] = (
         pd.to_numeric(summary_df["Competitions Assigned"], errors="coerce")
         .fillna(0)
@@ -276,6 +639,12 @@ if report_mode == "Assigned Summary":
         ascending=[False, False, True],
         kind="mergesort",
     )
+    _order_base = ["Name", "Competitions Assigned", "Most Recent"]
+    if show_section_info:
+        _order_base = ["Name", "Region", "Section", "Competitions Assigned", "Most Recent"]
+    _order = [c for c in _order_base if c in summary_df.columns]
+    _rest = [c for c in summary_df.columns if c not in _order]
+    summary_df = summary_df[_order + _rest]
 
     def _fmt_summary_recent(val):
         return "" if pd.isna(val) or int(val) == SENTINEL_LOW else str(int(val))
@@ -286,19 +655,28 @@ if report_mode == "Assigned Summary":
     )
     st.markdown(f"**{len(summary_df)} officials** — {comp_group}")
     st.caption(f"Data coverage: {competition_count} unique competitions in this group.")
+    summary_col_cfg = {"Name": st.column_config.Column(pinned=True)}
+    if show_section_info:
+        summary_col_cfg["Region"] = st.column_config.TextColumn("Region")
+        summary_col_cfg["Section"] = st.column_config.TextColumn("Section")
+    summary_col_cfg["Competitions Assigned"] = st.column_config.NumberColumn(
+        "Competitions Assigned", format="%.0f"
+    )
+    summary_col_cfg["Most Recent"] = st.column_config.NumberColumn("Most Recent", format="%.0f")
+
     st.dataframe(
         styled_summary,
         width="stretch",
         height=700,
         hide_index=True,
-        column_config={
-            "Name": st.column_config.Column(pinned=True),
-            "Competitions Assigned": st.column_config.NumberColumn(
-                "Competitions Assigned", format="%.0f"
-            ),
-            "Most Recent": st.column_config.NumberColumn("Most Recent", format="%.0f"),
-        },
+        column_config=summary_col_cfg,
     )
+    if show_section_info and "Section" in summary_df.columns:
+        sec_counts = summary_df["Section"].value_counts().sort_index()
+        st.caption(
+            "By section (this view): "
+            + " · ".join(f"{k}: {int(v)}" for k, v in sec_counts.items())
+        )
     appt_date = load_appt_data_date()
     if appt_date is not None:
         date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
@@ -308,10 +686,20 @@ if report_mode == "Assigned Summary":
 
 df = load_matrix(discipline_id, appointment_type_id, competition_type_id)
 df, year_cols = normalize_df(df)
+if show_section_info:
+    df["section"] = df["region"].map(section_display_from_region)
+    df = filter_dataframe_by_section(
+        df, widget_key="section_filter_activity_tracker"
+    )
+else:
+    df = df.drop(columns=["region", "section"], errors="ignore")
 appt_has_chiefs = load_appt_has_chiefs(appointment_type_id)
 
 if df.empty:
-    st.info("No officials found for the selected filters.")
+    st.info(
+        "No officials found for the selected filters"
+        + (" (or no rows match the section filter)." if show_section_info else ".")
+    )
     st.stop()
 
 year_cols_sorted = sorted(year_cols, reverse=True)
@@ -442,6 +830,9 @@ rename = {
     "never_used": "Never Assigned?",
     "total_championships": "# In Role",
 }
+if show_section_info:
+    rename["region"] = "Region"
+    rename["section"] = "Section"
 if show_other_roles:
     rename["any_last_year"] = "Last (Any Role)"
     rename["any_yrs_since"] = "Yrs Since (Any)"
@@ -487,7 +878,7 @@ display = display.drop(columns=["official_id"], errors="ignore")
 
 # ---- MULTI-COLUMN SORT CONTROLS ----
 sortable_cols = list(display.columns)
-default_sort = [c for c in ["Yrs Since Last", "Yrs In Grade"] if c in sortable_cols]
+default_sort = [c for c in ["Yrs Since Last", "Yrs in Grade"] if c in sortable_cols]
 sort_cols = st.multiselect(
     "Sort by (priority left to right)",
     options=sortable_cols,
@@ -531,6 +922,11 @@ styled = display.style.format(fmt_map_filtered, na_rep="")
 
 # ---- RENDER ----
 col_cfg = {"Name": st.column_config.Column(pinned=True)}
+if show_section_info:
+    if "Region" in display.columns:
+        col_cfg["Region"] = st.column_config.TextColumn("Region")
+    if "Section" in display.columns:
+        col_cfg["Section"] = st.column_config.TextColumn("Section")
 if "# In Role" in display.columns:
     col_cfg["# In Role"] = st.column_config.NumberColumn(
         "# In Role",
@@ -546,6 +942,12 @@ if show_other_roles and "# Total" in display.columns:
 
 st.markdown(f"**{len(display)} officials** — National level · {selected_appt_type} · {selected_discipline}")
 st.dataframe(styled, width="stretch", height=700, hide_index=True, column_config=col_cfg)
+if show_section_info and "Section" in display.columns:
+    sec_counts = display["Section"].value_counts().sort_index()
+    st.caption(
+        "By section (this view): "
+        + " · ".join(f"{k}: {int(v)}" for k, v in sec_counts.items())
+    )
 legend_parts = [f"{SELECTED_ROLE_SYMBOL} = Assigned in selected role"]
 if appt_has_chiefs:
     legend_parts.insert(0, "C = Chief in selected role")
