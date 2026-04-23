@@ -2,21 +2,25 @@ import os
 import pandas as pd
 try:
     from activityAnalysis.officials_analysis_models import (
+        Base,
         Officials,
         Appointments,
         Assignment,
         Disciplines,
         Competition,
+        CompetitionType,
         AppointmentTypes,
         Levels,
     )
 except ModuleNotFoundError:
     from officials_analysis_models import (
+        Base,
         Officials,
         Appointments,
         Assignment,
         Disciplines,
         Competition,
+        CompetitionType,
         AppointmentTypes,
         Levels,
     )
@@ -27,15 +31,101 @@ import re
 from datetime import datetime
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
+DEFAULT_ACTIVITY_DB_URL = "sqlite:////tmp/activity_tracker.db"
+
+
+def _resolve_database_url():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        return DEFAULT_ACTIVITY_DB_URL
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql://", 1)
+    return database_url
+
+
+def _build_engine(database_url):
+    engine_kwargs = {"echo": False}
+    if database_url.startswith("sqlite:"):
+        engine_kwargs["execution_options"] = {
+            "schema_translate_map": {"officials_analysis": None}
+        }
+    else:
+        engine_kwargs["connect_args"] = {"options": "-csearch_path=officials_analysis"}
+    return create_engine(database_url, **engine_kwargs)
+
+
+def _seed_local_sqlite_data_if_empty(db_engine):
+    """Seed tiny local data so the Streamlit app can render controls."""
+    with Session(db_engine) as session:
+        existing = session.execute(select(func.count()).select_from(Appointments)).scalar_one()
+        if existing:
+            return
+
+        current_year = datetime.now().year
+        appointment_type = AppointmentTypes(id=1, name="Competition Judge")
+        discipline = Disciplines(id=2, name="Synchronized")
+        level = Levels(id=7, name="National")
+        official = Officials(
+            id=1,
+            mbr_number="LOCAL-1",
+            first_name="Local",
+            last_name="Official",
+            full_name="Local Official",
+            is_coach=False,
+            email=None,
+            phone=None,
+            city="Local",
+            state="NA",
+            region="Pacific Coast",
+        )
+        appointment = Appointments(
+            id=1,
+            official_id=1,
+            appointment_type_id=1,
+            discipline_id=2,
+            level_id=7,
+            achieved_date=datetime(current_year - 2, 1, 1).date(),
+        )
+        competition_type = CompetitionType(
+            id=8, name="US Synchronized Skating Championships"
+        )
+        competition = Competition(
+            id=1,
+            name="Local Seed Competition",
+            year=current_year - 1,
+            competition_type_id=8,
+        )
+        assignment = Assignment(
+            id=1,
+            competition_id=1,
+            official_id=1,
+            discipline_id=2,
+            appointment_type_id=1,
+            chief=False,
+            lower_levels_only=False,
+        )
+        session.add_all(
+            [
+                appointment_type,
+                discipline,
+                level,
+                official,
+                appointment,
+                competition_type,
+                competition,
+                assignment,
+            ]
+        )
+        session.commit()
+
+
 def get_engine():
-    DATABASE_URL = os.environ.get("DATABASE_URL")
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL is not set")
-
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-    return create_engine(DATABASE_URL, echo=False, connect_args={"options": "-csearch_path=officials_analysis"})
+    database_url = _resolve_database_url()
+    db_engine = _build_engine(database_url)
+    if database_url.startswith("sqlite:"):
+        Base.metadata.create_all(db_engine)
+        _seed_local_sqlite_data_if_empty(db_engine)
+    return db_engine
 
 
 engine = get_engine()
