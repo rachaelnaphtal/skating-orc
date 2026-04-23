@@ -12,6 +12,11 @@ from load_activity_data import (
     get_referee_competition_count_for_types,
     get_referee_discipline_options_for_comp_group,
     get_referee_yearly_activity_report,
+    get_officials_with_assignments,
+    get_official_assignment_detail_rows,
+    get_official_appointment_rows,
+    get_competitions_for_report_dropdown,
+    get_competition_assignment_rows,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, select
@@ -64,6 +69,117 @@ DISC_ABBREV = {
     8: "P",    # Pairs
     9: "SP",   # Singles/Pairs
 }
+
+
+def _competition_type_sort_key(competition_type_id) -> int:
+    """Within a calendar year: US Synchro Champs, US Champs, SYS sectionals, SPD sectionals."""
+    tid = int(competition_type_id)
+    if tid == 8:
+        return 0
+    if tid == 4:
+        return 1
+    if tid in (5, 6, 7, 9):
+        return 2
+    if tid in (1, 2, 3):
+        return 3
+    return 99
+
+
+# For per-person / per-competition assignment text: omit discipline suffix when this id.
+_ASSIGNMENT_LABEL_OMIT_DISCIPLINE_ID = 7
+
+
+def _discipline_id_int(discipline_id):
+    if discipline_id is None or (isinstance(discipline_id, float) and pd.isna(discipline_id)):
+        return None
+    try:
+        return int(discipline_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def assignment_label_for_tables(
+    appt_name: str, discipline_name: str, discipline_id, chief: bool
+) -> str:
+    """Full appointment type name for per-person / per-competition assignment columns."""
+    an = (appt_name or "").strip()
+    if chief:
+        role = f"Chief {an}" if an else "Chief"
+    else:
+        role = an or "Assignment"
+    disc_id = _discipline_id_int(discipline_id)
+    if disc_id == _ASSIGNMENT_LABEL_OMIT_DISCIPLINE_ID:
+        return role
+    dn = (discipline_name or "").strip()
+    if dn:
+        return f"{role} – {dn}"
+    return role
+
+
+def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
+    """One row per competition; assignments aggregated; sort year then event category."""
+    if detail_df.empty:
+        return pd.DataFrame(columns=["Competition", "Assignments"])
+    d = detail_df.copy()
+    d["label"] = d.apply(
+        lambda r: assignment_label_for_tables(
+            str(r.get("appt_type_name") or ""),
+            str(r.get("discipline_name") or "")
+            if pd.notna(r.get("discipline_name"))
+            else "",
+            r.get("discipline_id"),
+            bool(r.get("chief")),
+        ),
+        axis=1,
+    )
+    rows = []
+    for cid, g in d.groupby("competition_id", sort=False):
+        r0 = g.iloc[0]
+        year = int(r0["year"])
+        cname = str(r0["competition_name"] or "")
+        ctid = int(r0["competition_type_id"])
+        labels = sorted(g["label"].unique().tolist(), key=str.lower)
+        rows.append(
+            {
+                "_year": year,
+                "_ctid": ctid,
+                "_o": _competition_type_sort_key(ctid),
+                "Competition": f"{year} {cname}".strip(),
+                "Assignments": ", ".join(labels),
+            }
+        )
+    out = pd.DataFrame(rows)
+    out = out.sort_values(
+        by=["_year", "_o", "_ctid", "Competition"],
+        ascending=[False, True, True, True],
+        kind="mergesort",
+    )
+    return out[["Competition", "Assignments"]].reset_index(drop=True)
+
+
+def build_competition_assignments_display(roster_df: pd.DataFrame) -> pd.DataFrame:
+    """One row per official with combined assignment descriptions (full role names)."""
+    if roster_df.empty:
+        return pd.DataFrame(columns=["Official", "Assignments"])
+    d = roster_df.copy()
+    d["label"] = d.apply(
+        lambda r: assignment_label_for_tables(
+            str(r.get("appt_type_name") or ""),
+            str(r.get("discipline_name") or "")
+            if pd.notna(r.get("discipline_name"))
+            else "",
+            r.get("discipline_id"),
+            bool(r.get("chief")),
+        ),
+        axis=1,
+    )
+    parts = []
+    for name, g in d.groupby("full_name", sort=False):
+        labels = sorted(g["label"].unique().tolist(), key=str.lower)
+        parts.append({"Official": name, "Assignments": ", ".join(labels)})
+    out = pd.DataFrame(parts)
+    return out.sort_values("Official", kind="mergesort").reset_index(drop=True)
+
 
 # USFS: `region` in the directory maps to a macro area; each area has sub-sections.
 # Filter uses the macro (Eastern / Midwestern / Pacific Coast); display prefers
@@ -178,6 +294,8 @@ st.title("Officials Activity Tracker")
 REPORT_CHAMPIONSHIPS_DETAILED = "Championships Detailed Activity"
 REPORT_NUMBER_OF_ASSIGNMENTS = "Number of assignments"
 REPORT_REFEREE_SERVICE = "Referee service (by competition type)"
+REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
+REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
 
 report_mode = st.radio(
     "Report",
@@ -185,6 +303,8 @@ report_mode = st.radio(
         REPORT_CHAMPIONSHIPS_DETAILED,
         REPORT_NUMBER_OF_ASSIGNMENTS,
         REPORT_REFEREE_SERVICE,
+        REPORT_PERSON_ASSIGNMENTS,
+        REPORT_COMPETITION_ASSIGNMENTS,
     ],
     horizontal=True,
 )
@@ -259,46 +379,61 @@ def load_disciplines_for_appt_type(appointment_type_id):
     return result
 
 
-# ---- MAIN PAGE FILTERS ----
-col1, col2 = st.columns(2)
-
+# ---- MAIN PAGE FILTERS (Championships detailed report only) ----
 appt_types_map = load_all_appt_types()
 
-with col1:
-    appt_options = list(appt_types_map.keys())
-    default_appt = "Competition Judge" if "Competition Judge" in appt_options else appt_options[0]
-    selected_appt_type = st.selectbox(
-        "Official Type",
-        options=appt_options,
-        index=appt_options.index(default_appt),
-    )
+if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
+    col1, col2 = st.columns(2)
+    with col1:
+        appt_options = list(appt_types_map.keys())
+        default_appt = (
+            "Competition Judge" if "Competition Judge" in appt_options else appt_options[0]
+        )
+        selected_appt_type = st.selectbox(
+            "Official Type",
+            options=appt_options,
+            index=appt_options.index(default_appt),
+        )
 
-appointment_type_id = appt_types_map[selected_appt_type]
-disciplines_map = load_disciplines_for_appt_type(appointment_type_id)
+    appointment_type_id = appt_types_map[selected_appt_type]
+    disciplines_map = load_disciplines_for_appt_type(appointment_type_id)
 
-with col2:
-    disc_options = list(disciplines_map.keys())
-    if not disc_options:
-        st.info("No disciplines found for this official type.")
-        st.stop()
-    default_disc = "Synchronized" if "Synchronized" in disc_options else disc_options[0]
-    selected_discipline = st.selectbox(
-        "Discipline",
-        options=disc_options,
-        index=disc_options.index(default_disc) if default_disc in disc_options else 0,
-    )
+    with col2:
+        disc_options = list(disciplines_map.keys())
+        if not disc_options:
+            st.info("No disciplines found for this official type.")
+            st.stop()
+        default_disc = "Synchronized" if "Synchronized" in disc_options else disc_options[0]
+        selected_discipline = st.selectbox(
+            "Discipline",
+            options=disc_options,
+            index=disc_options.index(default_disc) if default_disc in disc_options else 0,
+        )
 
-discipline_id = disciplines_map[selected_discipline]
+    discipline_id = disciplines_map[selected_discipline]
 
-if discipline_id is None:
-    comp_choice = st.radio(
-        "Competition",
-        options=["US Championships", "US Synchro Championships"],
-        horizontal=True,
-    )
-    competition_type_id = 8 if comp_choice == "US Synchro Championships" else DEFAULT_COMPETITION_TYPE
+    if discipline_id is None:
+        comp_choice = st.radio(
+            "Competition",
+            options=["US Championships", "US Synchro Championships"],
+            horizontal=True,
+        )
+        competition_type_id = (
+            8 if comp_choice == "US Synchro Championships" else DEFAULT_COMPETITION_TYPE
+        )
+    else:
+        competition_type_id = COMPETITION_TYPE_MAP.get(
+            discipline_id, DEFAULT_COMPETITION_TYPE
+        )
 else:
-    competition_type_id = COMPETITION_TYPE_MAP.get(discipline_id, DEFAULT_COMPETITION_TYPE)
+    # Unused on other reports (each branch stops); placeholders keep names defined.
+    appointment_type_id = (
+        appt_types_map["Competition Judge"]
+        if "Competition Judge" in appt_types_map
+        else next(iter(appt_types_map.values()))
+    )
+    discipline_id = SYNCHRO_DISCIPLINE_ID
+    competition_type_id = DEFAULT_COMPETITION_TYPE
 
 if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
     show_other_roles = st.checkbox(
@@ -401,6 +536,31 @@ def load_referee_yearly_report(
     )
 
 
+@st.cache_data
+def load_officials_with_assignments():
+    return get_officials_with_assignments()
+
+
+@st.cache_data
+def load_person_assignment_rows(official_id: int):
+    return get_official_assignment_detail_rows(int(official_id))
+
+
+@st.cache_data
+def load_person_appointment_rows(official_id: int):
+    return get_official_appointment_rows(int(official_id))
+
+
+@st.cache_data
+def load_competitions_report_dropdown():
+    return get_competitions_for_report_dropdown()
+
+
+@st.cache_data
+def load_competition_assignment_rows(competition_id: int):
+    return get_competition_assignment_rows(int(competition_id))
+
+
 if report_mode == REPORT_REFEREE_SERVICE:
     comp_group = st.selectbox(
         "Competition Type Group",
@@ -475,15 +635,23 @@ if report_mode == REPORT_REFEREE_SERVICE:
         "Synchronized Sectionals",
     )
     yig_col = (
-        "Years in grade (sect. ref.)"
+        "Years in grade"
         if _sectional_ref_report
         else "Years in grade (nat. ref.)"
     )
-    _grade_caption = (
-        "sectional referee achieved date in the report disciplines"
-        if _sectional_ref_report
-        else "national referee achieved date for the same discipline scope"
-    )
+    if comp_group == "SPD Sectionals" and scope == "Overall":
+        _grade_caption = (
+            "the date that gives the longest time in grade between Dance and Singles/Pairs "
+            "(for each, sectional referee achieved date when you have one there, "
+            "otherwise national referee there)"
+        )
+    else:
+        _grade_caption = (
+            "your earliest sectional referee achieved date in the report disciplines when you "
+            "have one, otherwise your earliest national referee date there"
+            if _sectional_ref_report
+            else "national referee achieved date for the same discipline scope"
+        )
     st.markdown(
         f"**{len(referee_df)} eligible officials** — {comp_group} — "
         f"assignment stats in these competition types — {window_years}-year window: {win_start}–{CURRENT_YEAR}"
@@ -584,6 +752,100 @@ if report_mode == REPORT_REFEREE_SERVICE:
     if appt_date is not None:
         date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
         st.caption(f"Appointment data current as of {date_str}")
+    st.stop()
+
+
+if report_mode == REPORT_PERSON_ASSIGNMENTS:
+    officials_df = load_officials_with_assignments()
+    if officials_df.empty:
+        st.info("No officials with assignments were found.")
+        st.stop()
+    id_to_name = dict(
+        zip(officials_df["official_id"].astype(int), officials_df["full_name"])
+    )
+    oid_list = sorted(id_to_name.keys(), key=lambda i: (str(id_to_name[i]).lower(), i))
+    pick_oid = st.selectbox(
+        "Official",
+        options=oid_list,
+        format_func=lambda i: id_to_name.get(int(i), str(i)),
+        key="per_person_official_select",
+    )
+    pick_oid = int(pick_oid)
+    detail = load_person_assignment_rows(pick_oid)
+    display_assign = build_person_assignments_display(detail)
+    st.subheader("Assignments")
+    if display_assign.empty:
+        st.info("No assignments for this official.")
+    else:
+        st.dataframe(
+            display_assign,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Competition": st.column_config.TextColumn(
+                    "Competition",
+                    help="Year and competition name (newest year first; within a year: "
+                    "US Synchronized Championships, US Championships, synchronized sectionals, "
+                    "then singles/pairs & dance sectionals).",
+                    width="large",
+                ),
+                "Assignments": st.column_config.TextColumn(
+                    "Assignments",
+                    width="large",
+                    help="Full appointment type names; discipline omitted when not applicable.",
+                ),
+            },
+        )
+    appts = load_person_appointment_rows(pick_oid)
+    st.subheader("Appointments")
+    if appts.empty:
+        st.info("No appointment records for this official.")
+    else:
+        appts_show = appts.copy()
+        if "achieved_date" in appts_show.columns:
+            appts_show["achieved_date"] = pd.to_datetime(
+                appts_show["achieved_date"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        st.dataframe(appts_show, width="stretch", hide_index=True)
+    st.stop()
+
+
+if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
+    comps_df = load_competitions_report_dropdown()
+    if comps_df.empty:
+        st.info("No competitions found in the database.")
+        st.stop()
+    label_map = {
+        int(row["competition_id"]): f"{int(row['year'])} — {row['name']}"
+        for _, row in comps_df.iterrows()
+    }
+    cid_list = [int(x) for x in comps_df["competition_id"].tolist()]
+    pick_cid = st.selectbox(
+        "Competition",
+        options=cid_list,
+        format_func=lambda cid: label_map.get(int(cid), str(cid)),
+        key="per_competition_select",
+    )
+    pick_cid = int(pick_cid)
+    comp_assign_rows = load_competition_assignment_rows(pick_cid)
+    display_comp_assign = build_competition_assignments_display(comp_assign_rows)
+    st.subheader("Assignments")
+    if display_comp_assign.empty:
+        st.info("No assignments at this competition.")
+    else:
+        st.dataframe(
+            display_comp_assign,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Official": st.column_config.TextColumn("Official", pinned=True),
+                "Assignments": st.column_config.TextColumn(
+                    "Assignments",
+                    width="large",
+                    help="Full appointment type names; discipline omitted when not applicable.",
+                ),
+            },
+        )
     st.stop()
 
 

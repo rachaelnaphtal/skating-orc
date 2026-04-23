@@ -8,6 +8,7 @@ try:
         Disciplines,
         Competition,
         AppointmentTypes,
+        Levels,
     )
 except ModuleNotFoundError:
     from officials_analysis_models import (
@@ -17,9 +18,10 @@ except ModuleNotFoundError:
         Disciplines,
         Competition,
         AppointmentTypes,
+        Levels,
     )
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, select, func, and_, or_
+from sqlalchemy import create_engine, select, func, and_, or_, case
 import math
 import re
 from datetime import datetime
@@ -855,9 +857,14 @@ def get_referee_yearly_activity_report(
       years_in_grade, eligible_years_last_10, normalized_last_10
       (the ``*_last_10`` names are historical; values use ``window_years``.)
 
-    For **SPD Sectionals** and **Synchronized Sectionals**, ``years_in_grade`` and the
-    normalized-window eligibility use the earliest **sectional** (level 2) referee
-    ``achieved_date`` in the report disciplines; other groups use **national** (level 7).
+    For **SPD Sectionals** (overall, Dance + Singles/Pairs), ``years_in_grade`` and the
+    normalized-window eligibility use whichever of Dance vs Singles/Pairs yields the
+    **longer** tenure: per discipline, sectional referee ``achieved_date`` when present,
+    otherwise national there; then the **earliest** of those two effective dates
+    (same as max years in grade across the two).
+
+    For **Synchronized Sectionals**, sectional-first then national fallback in
+    synchronized only. Other groups use national only.
     """
     if not competition_type_ids or not comp_group_name:
         return pd.DataFrame()
@@ -910,28 +917,82 @@ def get_referee_yearly_activity_report(
                 select(Disciplines.name).where(Disciplines.id == discipline_id)
             ).scalar()
 
-        # Years in grade + normalized-window eligibility use national referee date for
-        # championship groups; for sectional *reports*, use sectional referee achieved date.
-        ach_grade_level = (
-            SECTIONAL_LEVEL_ID
-            if comp_group_name in ("SPD Sectionals", "Synchronized Sectionals")
-            else NATIONAL_LEVEL_ID
-        )
-        ach_filters = [
+        ach_filters_base = [
             Appointments.official_id.in_(eligible_ids),
             Appointments.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
-            Appointments.level_id == ach_grade_level,
             Appointments.discipline_id.in_(assign_disc_ids),
         ]
-        ach_stmt = (
-            select(
-                Appointments.official_id,
-                func.min(Appointments.achieved_date).label("first_achieved"),
-            )
-            .where(*ach_filters)
-            .group_by(Appointments.official_id)
+        sectional_report = comp_group_name in (
+            "SPD Sectionals",
+            "Synchronized Sectionals",
         )
-        ach_rows = session.execute(ach_stmt).all()
+        spd_overall_tig = (
+            comp_group_name == "SPD Sectionals" and discipline_id is None
+        )
+        sec_rows_4 = nat_rows_4 = sec_rows_9 = nat_rows_9 = None
+        if sectional_report and spd_overall_tig:
+
+            def _spd_sec_nat_rows(disc_id):
+                bf = [
+                    Appointments.official_id.in_(eligible_ids),
+                    Appointments.appointment_type_id == REFEREE_APPOINTMENT_TYPE_ID,
+                    Appointments.discipline_id == disc_id,
+                ]
+                sstmt = (
+                    select(
+                        Appointments.official_id,
+                        func.min(Appointments.achieved_date).label("first_achieved"),
+                    )
+                    .where(*bf, Appointments.level_id == SECTIONAL_LEVEL_ID)
+                    .group_by(Appointments.official_id)
+                )
+                nstmt = (
+                    select(
+                        Appointments.official_id,
+                        func.min(Appointments.achieved_date).label("first_achieved"),
+                    )
+                    .where(*bf, Appointments.level_id == NATIONAL_LEVEL_ID)
+                    .group_by(Appointments.official_id)
+                )
+                return (
+                    session.execute(sstmt).all(),
+                    session.execute(nstmt).all(),
+                )
+
+            sec_rows_4, nat_rows_4 = _spd_sec_nat_rows(DISC_DANCE_ID)
+            sec_rows_9, nat_rows_9 = _spd_sec_nat_rows(DISC_SINGLES_PAIRS_ID)
+            sec_rows = nat_rows = ach_rows = None
+        elif sectional_report:
+            sec_stmt = (
+                select(
+                    Appointments.official_id,
+                    func.min(Appointments.achieved_date).label("first_achieved"),
+                )
+                .where(*ach_filters_base, Appointments.level_id == SECTIONAL_LEVEL_ID)
+                .group_by(Appointments.official_id)
+            )
+            nat_stmt = (
+                select(
+                    Appointments.official_id,
+                    func.min(Appointments.achieved_date).label("first_achieved"),
+                )
+                .where(*ach_filters_base, Appointments.level_id == NATIONAL_LEVEL_ID)
+                .group_by(Appointments.official_id)
+            )
+            sec_rows = session.execute(sec_stmt).all()
+            nat_rows = session.execute(nat_stmt).all()
+            ach_rows = None
+        else:
+            ach_stmt = (
+                select(
+                    Appointments.official_id,
+                    func.min(Appointments.achieved_date).label("first_achieved"),
+                )
+                .where(*ach_filters_base, Appointments.level_id == NATIONAL_LEVEL_ID)
+                .group_by(Appointments.official_id)
+            )
+            ach_rows = session.execute(ach_stmt).all()
+            sec_rows = nat_rows = None
 
     df = pd.DataFrame(
         rows,
@@ -960,10 +1021,39 @@ def get_referee_yearly_activity_report(
             return 1
         return cy - first_eligible + 1
 
-    ach_df = pd.DataFrame(ach_rows, columns=["official_id", "first_achieved"])
-    ach_df["achieved_year"] = pd.to_datetime(
-        ach_df["first_achieved"], errors="coerce"
-    ).dt.year
+    def _achieved_year_lookup(rows):
+        if not rows:
+            return {}
+        adf = pd.DataFrame(rows, columns=["official_id", "first_achieved"])
+        adf["achieved_year"] = pd.to_datetime(
+            adf["first_achieved"], errors="coerce"
+        ).dt.year
+        out = {}
+        for _, r in adf.iterrows():
+            y = r["achieved_year"]
+            if pd.notna(y):
+                out[int(r["official_id"])] = int(y)
+        return out
+
+    if sectional_report and spd_overall_tig:
+        sec_map_4 = _achieved_year_lookup(sec_rows_4)
+        nat_map_4 = _achieved_year_lookup(nat_rows_4)
+        sec_map_9 = _achieved_year_lookup(sec_rows_9)
+        nat_map_9 = _achieved_year_lookup(nat_rows_9)
+        sec_ach_map = nat_ach_map = None
+        ach_df = None
+    elif sectional_report:
+        sec_ach_map = _achieved_year_lookup(sec_rows)
+        nat_ach_map = _achieved_year_lookup(nat_rows)
+        sec_map_4 = nat_map_4 = sec_map_9 = nat_map_9 = None
+        ach_df = None
+    else:
+        ach_df = pd.DataFrame(ach_rows, columns=["official_id", "first_achieved"])
+        ach_df["achieved_year"] = pd.to_datetime(
+            ach_df["first_achieved"], errors="coerce"
+        ).dt.year
+        sec_ach_map = nat_ach_map = None
+        sec_map_4 = nat_map_4 = sec_map_9 = nat_map_9 = None
 
     by_off = {}
     if not df.empty:
@@ -998,10 +1088,35 @@ def get_referee_yearly_activity_report(
         chief_distinct = len(chief_year_set)
         y10 = [y for y in years if win_start <= y <= cy]
         chief_10 = len(set(chief_years) & set(y10))
-        arow = ach_df.loc[ach_df["official_id"] == oid]
-        achieved_year = (
-            arow["achieved_year"].iloc[0] if len(arow) else None
-        )
+        if sectional_report and spd_overall_tig:
+
+            def _eff_disc(sec_m, nat_m, o):
+                ys = sec_m.get(o)
+                yn = nat_m.get(o)
+                if ys is not None:
+                    return ys
+                if yn is not None:
+                    return yn
+                return None
+
+            eff4 = _eff_disc(sec_map_4, nat_map_4, oid)
+            eff9 = _eff_disc(sec_map_9, nat_map_9, oid)
+            cands = [y for y in (eff4, eff9) if y is not None]
+            achieved_year = min(cands) if cands else None
+        elif sectional_report:
+            ay_s = sec_ach_map.get(oid)
+            ay_n = nat_ach_map.get(oid)
+            if ay_s is not None:
+                achieved_year = ay_s
+            elif ay_n is not None:
+                achieved_year = ay_n
+            else:
+                achieved_year = None
+        else:
+            arow = ach_df.loc[ach_df["official_id"] == oid]
+            achieved_year = (
+                arow["achieved_year"].iloc[0] if len(arow) else None
+            )
         yig = (
             int(cy - achieved_year)
             if achieved_year is not None and not pd.isna(achieved_year)
@@ -1032,6 +1147,161 @@ def get_referee_yearly_activity_report(
         kind="mergesort",
     )
     return out
+
+
+def get_officials_with_assignments():
+    """Officials who have at least one assignment (id + display name)."""
+    with Session(engine) as session:
+        stmt = (
+            select(Officials.id, Officials.full_name)
+            .join(Assignment, Assignment.official_id == Officials.id)
+            .distinct()
+            .order_by(Officials.full_name.asc())
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(rows, columns=["official_id", "full_name"])
+
+
+def get_official_assignment_detail_rows(official_id: int):
+    """
+    One row per assignment for ``official_id`` with fields needed for display/sort.
+    Columns: competition_id, year, competition_name, competition_type_id,
+    appt_type_name, discipline_id, discipline_name, chief
+    """
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Competition.id.label("competition_id"),
+                Competition.year,
+                Competition.name.label("competition_name"),
+                Competition.competition_type_id,
+                AppointmentTypes.name.label("appt_type_name"),
+                Assignment.discipline_id,
+                Disciplines.name.label("discipline_name"),
+                Assignment.chief,
+            )
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
+            .join(Disciplines, Assignment.discipline_id == Disciplines.id)
+            .where(Assignment.official_id == int(official_id))
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "competition_id",
+            "year",
+            "competition_name",
+            "competition_type_id",
+            "appt_type_name",
+            "discipline_id",
+            "discipline_name",
+            "chief",
+        ],
+    )
+
+
+def get_official_appointment_rows(official_id: int):
+    """All appointments for directory display (type, discipline, level, achieved).
+
+    Sorted by appointment type name (A–Z), then achieved date (newest first, blanks last).
+    """
+    with Session(engine) as session:
+        stmt = (
+            select(
+                AppointmentTypes.name.label("appointment_type"),
+                Disciplines.name.label("discipline"),
+                Levels.name.label("level"),
+                Appointments.achieved_date,
+            )
+            .join(AppointmentTypes, Appointments.appointment_type_id == AppointmentTypes.id)
+            .outerjoin(Disciplines, Appointments.discipline_id == Disciplines.id)
+            .outerjoin(Levels, Appointments.level_id == Levels.id)
+            .where(Appointments.official_id == int(official_id))
+            .order_by(
+                AppointmentTypes.name.asc(),
+                Appointments.achieved_date.desc().nulls_last(),
+            )
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows,
+        columns=["appointment_type", "discipline", "level", "achieved_date"],
+    )
+
+
+def _competition_type_group_order_expr():
+    """Sort key: US Synchro Champs, US Champs, SYS sectionals, SPD sectionals, then other."""
+    return case(
+        (Competition.competition_type_id == 8, 0),
+        (Competition.competition_type_id == 4, 1),
+        (Competition.competition_type_id.in_((5, 6, 7, 9)), 2),
+        (Competition.competition_type_id.in_((1, 2, 3)), 3),
+        else_=99,
+    )
+
+
+def get_competitions_for_report_dropdown():
+    """All competitions for per-competition report select (newest / priority order)."""
+    ord_type = _competition_type_group_order_expr()
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Competition.id,
+                Competition.year,
+                Competition.name,
+                Competition.competition_type_id,
+            )
+            .order_by(
+                Competition.year.desc(),
+                ord_type,
+                Competition.competition_type_id.asc(),
+                Competition.name.asc(),
+            )
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "competition_id",
+            "year",
+            "name",
+            "competition_type_id",
+        ],
+    )
+
+
+def get_competition_assignment_rows(competition_id: int):
+    """
+    All assignments at ``competition_id`` with fields for per-competition assignment display.
+    Columns: full_name, appt_type_name, discipline_id, discipline_name, chief
+    """
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Officials.full_name,
+                AppointmentTypes.name.label("appt_type_name"),
+                Assignment.discipline_id,
+                Disciplines.name.label("discipline_name"),
+                Assignment.chief,
+            )
+            .join(Officials, Assignment.official_id == Officials.id)
+            .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
+            .join(Disciplines, Assignment.discipline_id == Disciplines.id)
+            .where(Assignment.competition_id == int(competition_id))
+            .order_by(Officials.full_name.asc())
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "full_name",
+            "appt_type_name",
+            "discipline_id",
+            "discipline_name",
+            "chief",
+        ],
+    )
 
 
 def _parse_chiefed_years(value):
