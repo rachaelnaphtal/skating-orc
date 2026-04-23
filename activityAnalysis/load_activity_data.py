@@ -490,13 +490,75 @@ def _resolve_discipline_ids(discipline_id, appointment_type_id):
     return [discipline_id] if discipline_id is not None else None
 
 
+def _normalize_competition_type_ids(competition_type_id):
+    """Single id or iterable → list of ints for SQL ``IN``."""
+    if isinstance(competition_type_id, (list, tuple, set)):
+        return [int(x) for x in competition_type_id]
+    return [int(competition_type_id)]
+
+
+# SPD sectionals (1–3) + synchronized sectionals (5–7, 9), aggregated by calendar year.
+SECTIONAL_ACTIVITY_COMPETITION_TYPES = (1, 2, 3, 5, 6, 7, 9)
+
+# Other-role rows for sectionals: same competition types as the matrix (sectionals only;
+# type 8 US Sync Championships is not a sectional and is excluded).
+SECTIONAL_ANY_ROLE_COMPETITION_TYPES = (1, 2, 3, 5, 6, 7, 9)
+
+SPD_SECTIONAL_BUCKET_TYPES = frozenset({1, 2, 3})
+SYNCHRO_SECTIONAL_BUCKET_TYPES = frozenset({5, 6, 7, 9})
+
+
+def sectional_epm_letters_from_competition_type_id(competition_type_id) -> list[str]:
+    """
+    E / M / P suffix letters from USFS ``competition_type_id`` (not competition name).
+    Type 9 (Midwestern/Pacific Synchro Sectional) contributes both M and P.
+    """
+    t = int(competition_type_id)
+    if t in (1, 5):
+        return ["E"]
+    if t in (2, 6):
+        return ["M"]
+    if t in (3, 7):
+        return ["P"]
+    if t == 9:
+        return ["M", "P"]
+    return []
+
+
+def build_sectional_year_allowed_type_map(
+    primary_df: pd.DataFrame,
+) -> dict:
+    """
+    From selected-role sectional rows (official_id, year, competition_type_id),
+    map (official_id, year) to allowed competition_type_ids for "other roles"
+    in the same bucket: SPD types {1,2,3} vs synchro sectionals {5,6,7,9}.
+    """
+    if primary_df is None or primary_df.empty:
+        return {}
+    need = {"official_id", "year", "competition_type_id"}
+    if not need.issubset(primary_df.columns):
+        return {}
+    out = {}
+    for (oid, yr), g in primary_df.groupby(["official_id", "year"], sort=False):
+        u = {int(x) for x in g["competition_type_id"].dropna().unique()}
+        allowed = set()
+        if u & SPD_SECTIONAL_BUCKET_TYPES:
+            allowed |= SPD_SECTIONAL_BUCKET_TYPES
+        if u & SYNCHRO_SECTIONAL_BUCKET_TYPES:
+            allowed |= SYNCHRO_SECTIONAL_BUCKET_TYPES
+        if allowed:
+            out[(int(oid), int(yr))] = frozenset(allowed)
+    return out
+
+
 def get_assignment_years(discipline_id, appointment_type_id, competition_type_id):
     discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+    ct_ids = _normalize_competition_type_ids(competition_type_id)
 
     with Session(engine) as session:
         filters = [
             Assignment.appointment_type_id == appointment_type_id,
-            Competition.competition_type_id == competition_type_id,
+            Competition.competition_type_id.in_(ct_ids),
         ]
         if discipline_ids is not None:
             filters.append(Assignment.discipline_id.in_(discipline_ids))
@@ -646,30 +708,54 @@ def clean_activity_df(df):
 def get_any_role_years(official_ids, competition_type_id):
     """
     Years each official attended the competition in ANY appointment type / discipline.
-    Returns official_id, year, and role name so callers can show which role(s) they had.
-    Used to mark cells where the person was present in a different role (○).
+    Returns official_id, year, competition ids/types, and role name so callers can show
+    which role(s) they had. Used to mark cells where the person was present in a different role (○).
+
+    ``competition_type_id`` may be a single id or an iterable (e.g. all sectional types).
     """
     if not official_ids:
-        return pd.DataFrame(columns=["official_id", "year", "role", "discipline_id"])
+        return pd.DataFrame(
+            columns=[
+                "official_id",
+                "year",
+                "competition_id",
+                "competition_type_id",
+                "role",
+                "discipline_id",
+            ]
+        )
+    ct_ids = _normalize_competition_type_ids(competition_type_id)
     with Session(engine) as session:
         stmt = (
             select(
                 Assignment.official_id,
                 Competition.year,
+                Competition.id.label("competition_id"),
+                Competition.competition_type_id,
                 AppointmentTypes.name.label("role"),
                 Assignment.discipline_id,
             )
             .join(Competition, Assignment.competition_id == Competition.id)
             .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
             .where(
-                Competition.competition_type_id == competition_type_id,
+                Competition.competition_type_id.in_(ct_ids),
                 Assignment.official_id.in_(official_ids),
             )
             .distinct()
             .order_by(Competition.year.desc(), AppointmentTypes.name)
         )
         rows = session.execute(stmt).all()
-    return pd.DataFrame(rows, columns=["official_id", "year", "role", "discipline_id"])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "official_id",
+            "year",
+            "competition_id",
+            "competition_type_id",
+            "role",
+            "discipline_id",
+        ],
+    )
 
 
 def get_chief_years(
@@ -677,18 +763,21 @@ def get_chief_years(
 ):
     """
     Years each official served as chief in the currently selected role/discipline
-    for the selected competition type.
+    for the selected competition type(s).
     Returns: official_id, year
+
+    ``competition_type_id`` may be a single id or an iterable.
     """
     if not official_ids:
         return pd.DataFrame(columns=["official_id", "year"])
 
     discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+    ct_ids = _normalize_competition_type_ids(competition_type_id)
 
     with Session(engine) as session:
         filters = [
             Assignment.appointment_type_id == appointment_type_id,
-            Competition.competition_type_id == competition_type_id,
+            Competition.competition_type_id.in_(ct_ids),
             Assignment.official_id.in_(official_ids),
             Assignment.chief.is_(True),
         ]
@@ -1702,6 +1791,56 @@ def load_us_champs_referees_assignments(
     return {"stats": stats, "missing_details": pd.DataFrame(missing_details)}
 
 
+def get_sectional_in_role_distinct_competition_counts(
+    discipline_id, appointment_type_id, official_ids
+):
+    """
+    Per official: sum over calendar years of (distinct ``competition_id`` count) for the
+    selected appointment type at sectional activity types. Used as "# In Role" for the
+    sectionals matrix when multiple competitions occur in the same year.
+    """
+    if not official_ids:
+        return pd.DataFrame(columns=["official_id", "total_championships"])
+    discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+    with Session(engine) as session:
+        filters = [
+            Assignment.official_id.in_(list(official_ids)),
+            Assignment.appointment_type_id == appointment_type_id,
+            Competition.competition_type_id.in_(SECTIONAL_ACTIVITY_COMPETITION_TYPES),
+        ]
+        if discipline_ids is not None:
+            filters.append(Assignment.discipline_id.in_(discipline_ids))
+        stmt = (
+            select(
+                Assignment.official_id,
+                Competition.year,
+                Competition.id.label("competition_id"),
+            )
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(*filters)
+            .distinct()
+        )
+        rows = session.execute(stmt).all()
+    df = pd.DataFrame(rows, columns=["official_id", "year", "competition_id"])
+    base = pd.DataFrame({"official_id": official_ids}).drop_duplicates()
+    if df.empty:
+        base["total_championships"] = 0
+        return base.astype({"total_championships": int})
+    per_year = (
+        df.groupby(["official_id", "year"])["competition_id"]
+        .nunique()
+        .reset_index(name="_n")
+    )
+    summed = (
+        per_year.groupby("official_id")["_n"]
+        .sum()
+        .reset_index(name="total_championships")
+    )
+    return base.merge(summed, on="official_id", how="left").fillna(
+        {"total_championships": 0}
+    ).astype({"total_championships": int})
+
+
 def get_activity_matrix(
     discipline_id, appointment_type_id, level_ids, competition_type_id
 ):
@@ -1716,6 +1855,75 @@ def get_activity_matrix(
     result = build_activity_matrix(qualified_df, activity_df)
     # result = clean_activity_df(result)
     return result
+
+
+def get_activity_matrix_sectionals(discipline_id, appointment_type_id):
+    """
+    Activity matrix for **sectionals**: SPD (types 1–3) and synchronized sectionals
+    (5–7, 9), combined in one year column per calendar year.
+
+    Qualified officials have a **sectional or national** appointment in the selected
+    role and discipline (same appointment-type filter as championships view).
+    """
+    level_ids = [SECTIONAL_LEVEL_ID, NATIONAL_LEVEL_ID]
+    qualified_df = get_qualified_officials(
+        discipline_id, appointment_type_id, level_ids
+    )
+    qualified_df = qualified_df.sort_values(
+        "achieved_date", ascending=True, na_position="last"
+    ).drop_duplicates(subset=["official_id"], keep="first")
+    activity_df = get_assignment_years(
+        discipline_id,
+        appointment_type_id,
+        SECTIONAL_ACTIVITY_COMPETITION_TYPES,
+    )
+    result = build_activity_matrix(qualified_df, activity_df)
+    extra = get_sectional_in_role_distinct_competition_counts(
+        discipline_id,
+        appointment_type_id,
+        result["official_id"].astype(int).tolist(),
+    )
+    result = result.drop(columns=["total_championships"], errors="ignore").merge(
+        extra, on="official_id", how="left"
+    )
+    result["total_championships"] = (
+        pd.to_numeric(result["total_championships"], errors="coerce").fillna(0).astype(int)
+    )
+    return result
+
+
+def get_sectional_assignment_region_rows(
+    discipline_id, appointment_type_id, official_ids
+):
+    """
+    Selected-role assignments at sectional activity types for **E / M / P** suffixes
+    and same-bucket "other role" filtering. Columns: official_id, year, competition_type_id.
+    """
+    if not official_ids:
+        return pd.DataFrame(columns=["official_id", "year", "competition_type_id"])
+    discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+    with Session(engine) as session:
+        filters = [
+            Assignment.official_id.in_(list(official_ids)),
+            Assignment.appointment_type_id == appointment_type_id,
+            Competition.competition_type_id.in_(SECTIONAL_ACTIVITY_COMPETITION_TYPES),
+        ]
+        if discipline_ids is not None:
+            filters.append(Assignment.discipline_id.in_(discipline_ids))
+        stmt = (
+            select(
+                Assignment.official_id,
+                Competition.year,
+                Competition.competition_type_id,
+            )
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(*filters)
+            .distinct()
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows, columns=["official_id", "year", "competition_type_id"]
+    )
 
 
 # load_history(write_to_database=True)

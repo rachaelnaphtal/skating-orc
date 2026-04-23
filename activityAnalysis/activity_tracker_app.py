@@ -5,6 +5,12 @@ from load_activity_data import (
     get_assigned_competition_counts,
     get_competition_count_for_types,
     get_activity_matrix,
+    get_activity_matrix_sectionals,
+    get_sectional_assignment_region_rows,
+    SECTIONAL_ACTIVITY_COMPETITION_TYPES,
+    SECTIONAL_ANY_ROLE_COMPETITION_TYPES,
+    build_sectional_year_allowed_type_map,
+    sectional_epm_letters_from_competition_type_id,
     get_any_role_years,
     appointment_type_has_chiefs,
     get_chief_years,
@@ -292,6 +298,7 @@ st.set_page_config(layout="wide", page_title="Officials Activity Tracker",
 st.title("Officials Activity Tracker")
 
 REPORT_CHAMPIONSHIPS_DETAILED = "Championships Detailed Activity"
+REPORT_SECTIONALS_DETAILED = "Sectionals detailed activity"
 REPORT_NUMBER_OF_ASSIGNMENTS = "Number of assignments"
 REPORT_REFEREE_SERVICE = "Referee service (by competition type)"
 REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
@@ -301,6 +308,7 @@ report_mode = st.radio(
     "Report",
     options=[
         REPORT_CHAMPIONSHIPS_DETAILED,
+        REPORT_SECTIONALS_DETAILED,
         REPORT_NUMBER_OF_ASSIGNMENTS,
         REPORT_REFEREE_SERVICE,
         REPORT_PERSON_ASSIGNMENTS,
@@ -382,7 +390,7 @@ def load_disciplines_for_appt_type(appointment_type_id):
 # ---- MAIN PAGE FILTERS (Championships detailed report only) ----
 appt_types_map = load_all_appt_types()
 
-if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
+if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
     col1, col2 = st.columns(2)
     with col1:
         appt_options = list(appt_types_map.keys())
@@ -435,7 +443,7 @@ else:
     discipline_id = SYNCHRO_DISCIPLINE_ID
     competition_type_id = DEFAULT_COMPETITION_TYPE
 
-if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
+if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
     show_other_roles = st.checkbox(
         f"Show attendance in other roles  ({OTHER_ROLE_SYMBOL} = present at competition in a different role)"
     )
@@ -470,19 +478,35 @@ def load_matrix(discipline_id, appointment_type_id, competition_type_id):
 
 
 @st.cache_data
-def load_any_role_data(official_ids_tuple, competition_type_id):
-    return get_any_role_years(list(official_ids_tuple), competition_type_id)
+def load_matrix_sectionals(discipline_id, appointment_type_id):
+    return get_activity_matrix_sectionals(discipline_id, appointment_type_id)
+
+
+@st.cache_data
+def load_sectional_region_rows(
+    discipline_id, appointment_type_id, official_ids_tuple
+):
+    return get_sectional_assignment_region_rows(
+        discipline_id,
+        appointment_type_id,
+        list(official_ids_tuple),
+    )
+
+
+@st.cache_data
+def load_any_role_data(official_ids_tuple, competition_scope):
+    return get_any_role_years(list(official_ids_tuple), competition_scope)
 
 
 @st.cache_data
 def load_chief_data(
-    official_ids_tuple, discipline_id, appointment_type_id, competition_type_id
+    official_ids_tuple, discipline_id, appointment_type_id, competition_scope
 ):
     return get_chief_years(
         list(official_ids_tuple),
         discipline_id,
         appointment_type_id,
-        competition_type_id,
+        competition_scope,
     )
 
 
@@ -946,8 +970,30 @@ if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
     st.stop()
 
 
-df = load_matrix(discipline_id, appointment_type_id, competition_type_id)
+is_sectionals_detailed = report_mode == REPORT_SECTIONALS_DETAILED
+matrix_competition_scope = (
+    SECTIONAL_ACTIVITY_COMPETITION_TYPES
+    if is_sectionals_detailed
+    else competition_type_id
+)
+any_role_competition_scope = (
+    SECTIONAL_ANY_ROLE_COMPETITION_TYPES
+    if is_sectionals_detailed
+    else matrix_competition_scope
+)
+
+if is_sectionals_detailed:
+    df = load_matrix_sectionals(discipline_id, appointment_type_id)
+else:
+    df = load_matrix(discipline_id, appointment_type_id, competition_type_id)
 df, year_cols = normalize_df(df)
+if is_sectionals_detailed:
+    st.caption(
+        "Year columns combine singles/pairs & dance sectionals and synchronized sectionals "
+        "in the same calendar year. After the checkmark, E, M, and P show which macro section "
+        "each assignment is for (Eastern, Midwestern, or Pacific Coast). Combined "
+        "Midwestern/Pacific synchro sectionals list both M and P."
+    )
 if show_section_info:
     df["section"] = df["region"].map(section_display_from_region)
     df = filter_dataframe_by_section(
@@ -972,6 +1018,7 @@ display = df[[c for c in meta_cols + year_cols_sorted if c in df.columns]].copy(
 # role_lookup maps (official_id, year_int) -> sorted list of (role_name, disc_id) tuples
 role_lookup: dict = {}
 chief_year_set = set()
+region_letter_sets: dict[tuple[int, int], set] = {}
 
 
 def _role_label(role: str, disc_id, selected_disc_id) -> str:
@@ -988,7 +1035,10 @@ def _role_label(role: str, disc_id, selected_disc_id) -> str:
 if "official_id" in display.columns:
     official_ids = display["official_id"].dropna().astype(int).tolist()
     chief_df = load_chief_data(
-        tuple(official_ids), discipline_id, appointment_type_id, competition_type_id
+        tuple(official_ids),
+        discipline_id,
+        appointment_type_id,
+        matrix_competition_scope,
     )
     chief_year_set = {
         (int(row["official_id"]), int(row["year"])) for _, row in chief_df.iterrows()
@@ -1001,8 +1051,55 @@ if "official_id" in display.columns:
         )
         display = display.merge(chief_recent, on="official_id", how="left")
 
+    if is_sectionals_detailed:
+        reg_df = load_sectional_region_rows(
+            discipline_id,
+            appointment_type_id,
+            tuple(sorted(set(official_ids))),
+        )
+        for _, row in reg_df.iterrows():
+            rk = (int(row["official_id"]), int(row["year"]))
+            ctid = pd.to_numeric(row.get("competition_type_id"), errors="coerce")
+            if pd.isna(ctid):
+                continue
+            for letter in sectional_epm_letters_from_competition_type_id(int(ctid)):
+                region_letter_sets.setdefault(rk, set()).add(letter)
+
+
+def _region_suffix(key: tuple) -> str:
+    letters = region_letter_sets.get(key)
+    if not letters:
+        return ""
+    order = {"E": 0, "M": 1, "P": 2}
+    return " " + ",".join(sorted(letters, key=lambda x: order.get(x, 9)))
+
+
 if show_other_roles and "official_id" in display.columns:
-    any_role_df = load_any_role_data(tuple(official_ids), competition_type_id)
+    any_role_df = load_any_role_data(
+        tuple(official_ids), any_role_competition_scope
+    )
+    if is_sectionals_detailed:
+        prim = load_sectional_region_rows(
+            discipline_id,
+            appointment_type_id,
+            tuple(sorted(set(official_ids))),
+        )
+        allowed_by_year = build_sectional_year_allowed_type_map(prim)
+        if not any_role_df.empty:
+            oids = any_role_df["official_id"].astype(int)
+            yrs = any_role_df["year"].astype(int)
+            cts = pd.to_numeric(
+                any_role_df["competition_type_id"], errors="coerce"
+            ).fillna(-1).astype(int)
+            mask = [
+                (allowed_by_year.get((int(o), int(y))) is not None)
+                and (
+                    int(ct)
+                    in allowed_by_year.get((int(o), int(y)), frozenset())
+                )
+                for o, y, ct in zip(oids, yrs, cts)
+            ]
+            any_role_df = any_role_df.loc[mask].reset_index(drop=True)
 
     # Build (official_id, year) -> deduplicated sorted list of (role, disc_id)
     seen: dict = {}
@@ -1029,12 +1126,45 @@ if show_other_roles and "official_id" in display.columns:
         lambda v: CURRENT_YEAR - int(v) if pd.notna(v) else None
     )
 
-    # Distinct championship years with any role at this competition type
-    total_any = (
-        any_role_df.groupby("official_id")["year"]
-        .nunique()
-        .reset_index(name="total_any_championships")
-    )
+    # Totals: championships use distinct years; sectionals use sum over years of distinct
+    # competition counts (same-bucket other roles only).
+    base_off = pd.DataFrame({"official_id": official_ids}).drop_duplicates()
+    if is_sectionals_detailed:
+        if any_role_df.empty:
+            total_any = base_off.assign(total_any_championships=0)
+        else:
+            per_y = (
+                any_role_df.groupby(["official_id", "year"])["competition_id"]
+                .nunique()
+                .reset_index(name="_n")
+            )
+            summed = (
+                per_y.groupby("official_id")["_n"]
+                .sum()
+                .reset_index(name="total_any_championships")
+            )
+            total_any = base_off.merge(summed, on="official_id", how="left").fillna(
+                {"total_any_championships": 0}
+            )
+        total_any["total_any_championships"] = (
+            pd.to_numeric(total_any["total_any_championships"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+    else:
+        total_any = (
+            any_role_df.groupby("official_id")["year"]
+            .nunique()
+            .reset_index(name="total_any_championships")
+        )
+        total_any = base_off.merge(total_any, on="official_id", how="left").fillna(
+            {"total_any_championships": 0}
+        )
+        total_any["total_any_championships"] = (
+            pd.to_numeric(total_any["total_any_championships"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
     display = display.merge(total_any, on="official_id", how="left")
     display["total_any_championships"] = (
         pd.to_numeric(display["total_any_championships"], errors="coerce")
@@ -1059,8 +1189,8 @@ if show_other_roles and "official_id" in display.columns:
                 other = [(r, d) for r, d in entries if r != selected_appt_type]
                 if other:
                     abbrevs = ", ".join(_role_label(r, d, discipline_id) for r, d in other)
-                    return f"{selected_symbol} {OTHER_ROLE_SYMBOL}{abbrevs}"
-                return selected_symbol
+                    return f"{selected_symbol} {OTHER_ROLE_SYMBOL}{abbrevs}{_region_suffix(key)}"
+                return f"{selected_symbol}{_region_suffix(key)}"
             if key in any_role_set:
                 abbrevs = ", ".join(
                     _role_label(r, d, discipline_id) for r, d in entries
@@ -1076,11 +1206,12 @@ else:
                 if row[str(yr)] != 1:
                     return ""
                 key = (int(row["official_id"]), yr)
-                return (
+                sym = (
                     f"C {SELECTED_ROLE_SYMBOL}"
                     if key in chief_year_set
                     else SELECTED_ROLE_SYMBOL
                 )
+                return f"{sym}{_region_suffix(key)}"
             display[col] = display.apply(mark_in_role, axis=1)
 
 # ---- RENAME COLUMNS ----
@@ -1192,13 +1323,23 @@ if show_section_info:
 if "# In Role" in display.columns:
     col_cfg["# In Role"] = st.column_config.NumberColumn(
         "# In Role",
-        help="Years assigned in the selected official type at this championship (once per year)",
+        help=(
+            "Per calendar year, how many distinct sectional competitions in the selected role; "
+            "summed across years (singles/pairs & dance sectionals and synchro sectionals share the same year columns)."
+            if is_sectionals_detailed
+            else "Years assigned in the selected official type at this championship (once per year)"
+        ),
         format="%.0f",
     )
 if show_other_roles and "# Total" in display.columns:
     col_cfg["# Total"] = st.column_config.NumberColumn(
         "# Total",
-        help="Distinct years at this championship type counting any appointment type / discipline",
+        help=(
+            "Per calendar year, distinct sectional competitions in any role, same macro "
+            "section family as your selected-role work that year (summed across years)."
+            if is_sectionals_detailed
+            else "Distinct years at this championship type counting any appointment type / discipline"
+        ),
         format="%.0f",
     )
 
