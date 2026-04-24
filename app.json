@@ -1,0 +1,9 @@
+{
+  "environments": {
+    "test": {
+      "scripts": {
+        "test": "pytest tests/test_activity_load_activity_data.py -q"
+      }
+    }
+  }
+}
