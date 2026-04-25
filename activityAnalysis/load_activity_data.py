@@ -136,6 +136,11 @@ US_CHAMPIONSHIPS_COMPETITION_TYPE_ID = 4
 REFEREE_APPOINTMENT_TYPE_ID = 4
 NATIONAL_LEVEL_ID = 7
 SECTIONAL_LEVEL_ID = 2
+# USFS "level 2" in the directory for these roles; other appointment types use ``SECTIONAL_LEVEL_ID`` (2) for sectionals.
+SCORING_SECTIONAL_LEVEL2_ID = 8
+APPOINTMENT_TYPES_SCORING_SECTIONAL_LEVEL2 = frozenset(
+    ("Scoring Official", "Scoring System Technician")
+)
 DISC_DANCE_ID = 4
 DISC_SYNCHRO_ID = 2
 DISC_SINGLES_PAIRS_ID = 9
@@ -534,20 +539,25 @@ def get_number_assignments_per_competition_type(competition_types):
         return rows
 
 
-def get_qualified_officials(discipline_id, appointment_type_id, level_ids):
+def get_qualified_officials(
+    discipline_id, appointment_type_id, level_ids, include_appointment_level: bool = False
+):
     with Session(engine) as session:
         disc_filter = (
             Appointments.discipline_id.is_(None)
             if discipline_id is None
             else Appointments.discipline_id == discipline_id
         )
+        select_cols = [
+            Officials.id,
+            Officials.full_name,
+            Officials.region,
+            Appointments.achieved_date,
+        ]
+        if include_appointment_level:
+            select_cols.append(Appointments.level_id)
         stmt = (
-            select(
-                Officials.id,
-                Officials.full_name,
-                Officials.region,
-                Appointments.achieved_date,
-            )
+            select(*select_cols)
             .join(Appointments, Appointments.official_id == Officials.id)
             .where(
                 disc_filter,
@@ -559,7 +569,45 @@ def get_qualified_officials(discipline_id, appointment_type_id, level_ids):
 
         rows = session.execute(stmt).all()
 
-    return pd.DataFrame(rows, columns=["official_id", "full_name", "region", "achieved_date"])
+    out_cols = ["official_id", "full_name", "region", "achieved_date"]
+    if include_appointment_level:
+        out_cols.append("level_id")
+    return pd.DataFrame(rows, columns=out_cols)
+
+
+def _level_id_to_name_map(level_ids) -> dict:
+    """``Levels.id`` → display ``name`` (directory text)."""
+    u = sorted(
+        {int(x) for x in level_ids if x is not None and not (isinstance(x, float) and pd.isna(x))}
+    )
+    if not u:
+        return {}
+    with Session(engine) as session:
+        rows = session.execute(
+            select(Levels.id, Levels.name).where(Levels.id.in_(u))
+        ).all()
+    return {int(r[0]): (r[1] or "").strip() for r in rows}
+
+
+def sectional_qualified_level_ids(appointment_type_id) -> list:
+    """
+    ``level_id`` values that qualify someone for the **sectionals** activity matrix
+    (sectional-level or national). Most roles use ``SECTIONAL_LEVEL_ID`` (2) for
+    sectional; Scoring Official and Scoring System Technician use USFS "level 2"
+    (``SCORING_SECTIONAL_LEVEL2_ID`` = 8) for their sectional work.
+    """
+    try:
+        atid = int(appointment_type_id)
+    except (TypeError, ValueError):
+        return [SECTIONAL_LEVEL_ID, NATIONAL_LEVEL_ID]
+    with Session(engine) as session:
+        name = session.execute(
+            select(AppointmentTypes.name).where(AppointmentTypes.id == atid)
+        ).scalar()
+    n = (name or "").strip()
+    if n in APPOINTMENT_TYPES_SCORING_SECTIONAL_LEVEL2:
+        return [SCORING_SECTIONAL_LEVEL2_ID, NATIONAL_LEVEL_ID]
+    return [SECTIONAL_LEVEL_ID, NATIONAL_LEVEL_ID]
 
 
 SINGLES_PAIRS_DISCIPLINE_ID = 8
@@ -587,8 +635,24 @@ def _normalize_competition_type_ids(competition_type_id):
     return [int(competition_type_id)]
 
 
+def _lower_levels_only_clauses(include_lower_levels) -> list:
+    """
+    Filter ``Assignment`` rows by ``lower_levels_only`` (championships / national work).
+
+    * ``None`` — no extra filter (e.g. sectionals).
+    * ``True`` — no extra filter (championships with “include lower level” work).
+    * ``False`` — only assignments with ``lower_levels_only`` false (hide lower-levels-only).
+    """
+    if include_lower_levels is not False:
+        return []
+    return [Assignment.lower_levels_only.is_(False)]
+
+
 # SPD sectionals (1–3) + synchronized sectionals (5–7, 9), aggregated by calendar year.
 SECTIONAL_ACTIVITY_COMPETITION_TYPES = (1, 2, 3, 5, 6, 7, 9)
+# When “no discipline” is selected on the sectionals view, the matrix can be limited to:
+SECTIONAL_SPD_COMPETITION_TYPES = (1, 2, 3)
+SECTIONAL_SYNCHRO_COMPETITION_TYPES = (5, 6, 7, 9)
 
 # Other-role rows for sectionals: same competition types as the matrix (sectionals only;
 # type 8 US Sync Championships is not a sectional and is excluded).
@@ -641,7 +705,12 @@ def build_sectional_year_allowed_type_map(
     return out
 
 
-def get_assignment_years(discipline_id, appointment_type_id, competition_type_id):
+def get_assignment_years(
+    discipline_id,
+    appointment_type_id,
+    competition_type_id,
+    include_lower_levels=None,
+):
     discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
     ct_ids = _normalize_competition_type_ids(competition_type_id)
 
@@ -652,6 +721,7 @@ def get_assignment_years(discipline_id, appointment_type_id, competition_type_id
         ]
         if discipline_ids is not None:
             filters.append(Assignment.discipline_id.in_(discipline_ids))
+        filters.extend(_lower_levels_only_clauses(include_lower_levels))
 
         stmt = (
             select(Assignment.official_id, Competition.year)
@@ -664,6 +734,58 @@ def get_assignment_years(discipline_id, appointment_type_id, competition_type_id
         rows = session.execute(stmt).all()
 
     return pd.DataFrame(rows, columns=["official_id", "year"])
+
+
+def get_years_all_lower_level_only_in_role(
+    official_ids, discipline_id, appointment_type_id, competition_type_id
+):
+    """
+    Calendar years where every assignment in the selected role / discipline filter
+    for the competition type(s) is ``lower_levels_only`` (at least one assignment).
+    Ignores the championships "Include Lower Levels" UI filter so the mark reflects
+    actual stored flags. Used for an **L** prefix next to the checkmark.
+    """
+    if not official_ids:
+        return pd.DataFrame(columns=["official_id", "year"])
+    discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
+    ct_ids = _normalize_competition_type_ids(competition_type_id)
+
+    with Session(engine) as session:
+        filters = [
+            Assignment.appointment_type_id == appointment_type_id,
+            Competition.competition_type_id.in_(ct_ids),
+            Assignment.official_id.in_(list(official_ids)),
+        ]
+        if discipline_ids is not None:
+            filters.append(Assignment.discipline_id.in_(discipline_ids))
+
+        stmt = (
+            select(
+                Assignment.official_id,
+                Competition.year,
+                Assignment.lower_levels_only,
+            )
+            .join(Competition, Assignment.competition_id == Competition.id)
+            .where(*filters)
+        )
+        rows = session.execute(stmt).all()
+
+    if not rows:
+        return pd.DataFrame(columns=["official_id", "year"])
+
+    dfr = pd.DataFrame(
+        rows, columns=["official_id", "year", "lower_levels_only"]
+    )
+    out_rows = []
+    for (oid, y), g in dfr.groupby(["official_id", "year"], sort=False):
+        if g.empty:
+            continue
+        lo = g["lower_levels_only"]
+        # DB may use bool or 0/1 (e.g. SQLite)
+        t = (lo == True) | (lo == 1) | (lo == 1.0)
+        if t.all() and len(g) > 0:
+            out_rows.append({"official_id": int(oid), "year": int(y)})
+    return pd.DataFrame(out_rows)
 
 
 def build_activity_matrix(qualified_df, activity_df):
@@ -748,6 +870,7 @@ def build_activity_matrix(qualified_df, activity_df):
         "official_id",
         "full_name",
         "region",
+        "achieved_year",  # calendar year of first national appt; used in app for champs cell shading
         "years_in_grade",
         "years_since_last",
         "most_recent_year",
@@ -795,7 +918,7 @@ def clean_activity_df(df):
     return df
 
 
-def get_any_role_years(official_ids, competition_type_id):
+def get_any_role_years(official_ids, competition_type_id, include_lower_levels=None):
     """
     Years each official attended the competition in ANY appointment type / discipline.
     Returns official_id, year, competition ids/types, and role name so callers can show
@@ -816,6 +939,11 @@ def get_any_role_years(official_ids, competition_type_id):
         )
     ct_ids = _normalize_competition_type_ids(competition_type_id)
     with Session(engine) as session:
+        w = [
+            Competition.competition_type_id.in_(ct_ids),
+            Assignment.official_id.in_(official_ids),
+        ]
+        w.extend(_lower_levels_only_clauses(include_lower_levels))
         stmt = (
             select(
                 Assignment.official_id,
@@ -827,10 +955,7 @@ def get_any_role_years(official_ids, competition_type_id):
             )
             .join(Competition, Assignment.competition_id == Competition.id)
             .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
-            .where(
-                Competition.competition_type_id.in_(ct_ids),
-                Assignment.official_id.in_(official_ids),
-            )
+            .where(*w)
             .distinct()
             .order_by(Competition.year.desc(), AppointmentTypes.name)
         )
@@ -849,7 +974,11 @@ def get_any_role_years(official_ids, competition_type_id):
 
 
 def get_chief_years(
-    official_ids, discipline_id, appointment_type_id, competition_type_id
+    official_ids,
+    discipline_id,
+    appointment_type_id,
+    competition_type_id,
+    include_lower_levels=None,
 ):
     """
     Years each official served as chief in the currently selected role/discipline
@@ -873,6 +1002,7 @@ def get_chief_years(
         ]
         if discipline_ids is not None:
             filters.append(Assignment.discipline_id.in_(discipline_ids))
+        filters.extend(_lower_levels_only_clauses(include_lower_levels))
 
         stmt = (
             select(Assignment.official_id, Competition.year)
@@ -1882,7 +2012,7 @@ def load_us_champs_referees_assignments(
 
 
 def get_sectional_in_role_distinct_competition_counts(
-    discipline_id, appointment_type_id, official_ids
+    discipline_id, appointment_type_id, official_ids, sectional_competition_type_ids
 ):
     """
     Per official: sum over calendar years of (distinct ``competition_id`` count) for the
@@ -1891,12 +2021,13 @@ def get_sectional_in_role_distinct_competition_counts(
     """
     if not official_ids:
         return pd.DataFrame(columns=["official_id", "total_championships"])
+    ct_ids = list(sectional_competition_type_ids)
     discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
     with Session(engine) as session:
         filters = [
             Assignment.official_id.in_(list(official_ids)),
             Assignment.appointment_type_id == appointment_type_id,
-            Competition.competition_type_id.in_(SECTIONAL_ACTIVITY_COMPETITION_TYPES),
+            Competition.competition_type_id.in_(ct_ids),
         ]
         if discipline_ids is not None:
             filters.append(Assignment.discipline_id.in_(discipline_ids))
@@ -1932,14 +2063,21 @@ def get_sectional_in_role_distinct_competition_counts(
 
 
 def get_activity_matrix(
-    discipline_id, appointment_type_id, level_ids, competition_type_id
+    discipline_id,
+    appointment_type_id,
+    level_ids,
+    competition_type_id,
+    include_lower_levels=None,
 ):
     qualified_df = get_qualified_officials(
         discipline_id, appointment_type_id, level_ids
     )
 
     activity_df = get_assignment_years(
-        discipline_id, appointment_type_id, competition_type_id
+        discipline_id,
+        appointment_type_id,
+        competition_type_id,
+        include_lower_levels=include_lower_levels,
     )
 
     result = build_activity_matrix(qualified_df, activity_df)
@@ -1947,31 +2085,52 @@ def get_activity_matrix(
     return result
 
 
-def get_activity_matrix_sectionals(discipline_id, appointment_type_id):
+def get_activity_matrix_sectionals(
+    discipline_id, appointment_type_id, sectional_competition_type_ids=SECTIONAL_ACTIVITY_COMPETITION_TYPES
+):
     """
-    Activity matrix for **sectionals**: SPD (types 1–3) and synchronized sectionals
-    (5–7, 9), combined in one year column per calendar year.
+    Activity matrix for **sectionals**: ``sectional_competition_type_ids`` defaults to
+    all SPD and synchro sectionals, or a subset (SPD-only or synchro-only).
 
     Qualified officials have a **sectional or national** appointment in the selected
-    role and discipline (same appointment-type filter as championships view).
+    role and discipline. Sectional level is usually ``SECTIONAL_LEVEL_ID`` (2); Scoring
+    Official and Scoring System Technician use ``SCORING_SECTIONAL_LEVEL2_ID`` (8) for sectional.
     """
-    level_ids = [SECTIONAL_LEVEL_ID, NATIONAL_LEVEL_ID]
+    ct_ids = list(sectional_competition_type_ids)
+    level_ids = sectional_qualified_level_ids(appointment_type_id)
     qualified_df = get_qualified_officials(
-        discipline_id, appointment_type_id, level_ids
+        discipline_id, appointment_type_id, level_ids, include_appointment_level=True
     )
     qualified_df = qualified_df.sort_values(
         "achieved_date", ascending=True, na_position="last"
     ).drop_duplicates(subset=["official_id"], keep="first")
+    _level_names = _level_id_to_name_map(qualified_df["level_id"].tolist())
+    appointment_level_by_official = qualified_df[
+        ["official_id", "level_id"]
+    ].copy()
+    appointment_level_by_official["appointment_level"] = appointment_level_by_official[
+        "level_id"
+    ].map(
+        lambda v: _level_names.get(int(v), "")
+        if v is not None and not (isinstance(v, float) and pd.isna(v))
+        else ""
+    )
+    appointment_level_by_official = appointment_level_by_official[
+        ["official_id", "appointment_level"]
+    ]
+    qualified_df = qualified_df.drop(columns=["level_id"], errors="ignore")
     activity_df = get_assignment_years(
         discipline_id,
         appointment_type_id,
-        SECTIONAL_ACTIVITY_COMPETITION_TYPES,
+        ct_ids,
     )
     result = build_activity_matrix(qualified_df, activity_df)
+    result = result.merge(appointment_level_by_official, on="official_id", how="left")
     extra = get_sectional_in_role_distinct_competition_counts(
         discipline_id,
         appointment_type_id,
         result["official_id"].astype(int).tolist(),
+        tuple(ct_ids),
     )
     result = result.drop(columns=["total_championships"], errors="ignore").merge(
         extra, on="official_id", how="left"
@@ -1983,7 +2142,7 @@ def get_activity_matrix_sectionals(discipline_id, appointment_type_id):
 
 
 def get_sectional_assignment_region_rows(
-    discipline_id, appointment_type_id, official_ids
+    discipline_id, appointment_type_id, official_ids, sectional_competition_type_ids=SECTIONAL_ACTIVITY_COMPETITION_TYPES
 ):
     """
     Selected-role assignments at sectional activity types for **E / M / P** suffixes
@@ -1991,12 +2150,13 @@ def get_sectional_assignment_region_rows(
     """
     if not official_ids:
         return pd.DataFrame(columns=["official_id", "year", "competition_type_id"])
+    ct_ids = list(sectional_competition_type_ids)
     discipline_ids = _resolve_discipline_ids(discipline_id, appointment_type_id)
     with Session(engine) as session:
         filters = [
             Assignment.official_id.in_(list(official_ids)),
             Assignment.appointment_type_id == appointment_type_id,
-            Competition.competition_type_id.in_(SECTIONAL_ACTIVITY_COMPETITION_TYPES),
+            Competition.competition_type_id.in_(ct_ids),
         ]
         if discipline_ids is not None:
             filters.append(Assignment.discipline_id.in_(discipline_ids))

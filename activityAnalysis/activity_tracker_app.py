@@ -8,12 +8,15 @@ from load_activity_data import (
     get_activity_matrix_sectionals,
     get_sectional_assignment_region_rows,
     SECTIONAL_ACTIVITY_COMPETITION_TYPES,
-    SECTIONAL_ANY_ROLE_COMPETITION_TYPES,
+    SECTIONAL_SPD_COMPETITION_TYPES,
+    SECTIONAL_SYNCHRO_COMPETITION_TYPES,
+    sectional_qualified_level_ids,
     build_sectional_year_allowed_type_map,
     sectional_epm_letters_from_competition_type_id,
     get_any_role_years,
     appointment_type_has_chiefs,
     get_chief_years,
+    get_years_all_lower_level_only_in_role,
     get_engine,
     get_referee_competition_count_for_types,
     get_referee_discipline_options_for_comp_group,
@@ -102,6 +105,16 @@ def _discipline_id_int(discipline_id):
         return int(discipline_id)
     except (TypeError, ValueError):
         return None
+
+
+def _is_no_discipline_selection(discipline_id) -> bool:
+    """``(No Discipline)`` in the picklist or stored ``discipline_id`` 7 (not applicable / legacy)."""
+    if discipline_id is None or (isinstance(discipline_id, float) and pd.isna(discipline_id)):
+        return True
+    try:
+        return int(discipline_id) == 7
+    except (TypeError, ValueError):
+        return False
 
 
 def assignment_label_for_tables(
@@ -350,8 +363,21 @@ def load_all_appt_types():
 
 
 @st.cache_data
-def load_disciplines_for_appt_type(appointment_type_id):
+def load_disciplines_for_appt_type(
+    appointment_type_id, include_sectional_appointment_levels: bool
+):
+    """
+    ``include_sectional_appointment_levels`` (sectionals report): include appointments at
+    sectional level (id 2 for most roles, id 8 for Scoring Official / Scoring System Tech)
+    in addition to national, so discipline picklists and no-discipline options match the matrix.
+    """
     from officials_analysis_models import Assignment
+
+    if include_sectional_appointment_levels:
+        level_ids = tuple(sectional_qualified_level_ids(appointment_type_id))
+    else:
+        level_ids = (NATIONAL_LEVEL_ID,)
+
     with Session(engine) as session:
         rows = session.execute(
             select(Disciplines.id, Disciplines.name)
@@ -359,7 +385,7 @@ def load_disciplines_for_appt_type(appointment_type_id):
             .join(Assignment, Assignment.discipline_id == Disciplines.id)
             .where(
                 Appointments.appointment_type_id == appointment_type_id,
-                Appointments.level_id == NATIONAL_LEVEL_ID,
+                Appointments.level_id.in_(level_ids),
                 Assignment.appointment_type_id == appointment_type_id,
             )
             .distinct()
@@ -375,7 +401,7 @@ def load_disciplines_for_appt_type(appointment_type_id):
             select(Appointments.id)
             .where(
                 Appointments.appointment_type_id == appointment_type_id,
-                Appointments.level_id == NATIONAL_LEVEL_ID,
+                Appointments.level_id.in_(level_ids),
                 Appointments.discipline_id.is_(None),
             )
             .limit(1)
@@ -404,14 +430,34 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
         )
 
     appointment_type_id = appt_types_map[selected_appt_type]
-    disciplines_map = load_disciplines_for_appt_type(appointment_type_id)
+    disciplines_map = load_disciplines_for_appt_type(
+        appointment_type_id,
+        report_mode == REPORT_SECTIONALS_DETAILED,
+    )
 
     with col2:
         disc_options = list(disciplines_map.keys())
         if not disc_options:
             st.info("No disciplines found for this official type.")
             st.stop()
-        default_disc = "Synchronized" if "Synchronized" in disc_options else disc_options[0]
+        default_disc = None
+        for candidate in (
+            "Singles/Pairs",
+            "Singles / Pairs",
+            "SP",
+        ):
+            if candidate in disc_options:
+                default_disc = candidate
+                break
+        if default_disc is None:
+            for _lab, _did in disciplines_map.items():
+                if _did is not None and int(_did) in (8, 9) and _lab in disc_options:
+                    default_disc = _lab
+                    break
+        if default_disc is None:
+            default_disc = (
+                "Synchronized" if "Synchronized" in disc_options else disc_options[0]
+            )
         selected_discipline = st.selectbox(
             "Discipline",
             options=disc_options,
@@ -419,20 +465,46 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
         )
 
     discipline_id = disciplines_map[selected_discipline]
-
-    if discipline_id is None:
-        comp_choice = st.radio(
-            "Competition",
-            options=["US Championships", "US Synchro Championships"],
-            horizontal=True,
-        )
-        competition_type_id = (
-            8 if comp_choice == "US Synchro Championships" else DEFAULT_COMPETITION_TYPE
-        )
+    # Sectionals + no real discipline: choose SPD vs Synchro sectionals. Championships + no discipline: Champs.
+    if _is_no_discipline_selection(discipline_id):
+        if report_mode == REPORT_SECTIONALS_DETAILED:
+            comp_choice = st.radio(
+                "Competition",
+                options=[
+                    "Combined (all sectionals)",
+                    "SPD sectionals",
+                    "Synchro sectionals",
+                ],
+                index=0,
+                horizontal=True,
+            )
+            if comp_choice == "Combined (all sectionals)":
+                sectional_competition_type_ids = SECTIONAL_ACTIVITY_COMPETITION_TYPES
+            elif comp_choice == "SPD sectionals":
+                sectional_competition_type_ids = SECTIONAL_SPD_COMPETITION_TYPES
+            else:
+                sectional_competition_type_ids = SECTIONAL_SYNCHRO_COMPETITION_TYPES
+            competition_type_id = DEFAULT_COMPETITION_TYPE
+        else:
+            comp_choice = st.radio(
+                "Competition",
+                options=["US Championships", "US Synchro Championships"],
+                horizontal=True,
+            )
+            competition_type_id = (
+                8
+                if comp_choice == "US Synchro Championships"
+                else DEFAULT_COMPETITION_TYPE
+            )
+            sectional_competition_type_ids = None
     else:
         competition_type_id = COMPETITION_TYPE_MAP.get(
             discipline_id, DEFAULT_COMPETITION_TYPE
         )
+        if report_mode == REPORT_SECTIONALS_DETAILED:
+            sectional_competition_type_ids = SECTIONAL_ACTIVITY_COMPETITION_TYPES
+        else:
+            sectional_competition_type_ids = None
 else:
     # Unused on other reports (each branch stops); placeholders keep names defined.
     appointment_type_id = (
@@ -442,6 +514,7 @@ else:
     )
     discipline_id = SYNCHRO_DISCIPLINE_ID
     competition_type_id = DEFAULT_COMPETITION_TYPE
+    sectional_competition_type_ids = None
 
 if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
     show_other_roles = st.checkbox(
@@ -451,9 +524,19 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
         "Add information on section",
         help="Show Region and Section columns, section filter, and a count summary by section for the current view.",
     )
+    if report_mode == REPORT_CHAMPIONSHIPS_DETAILED:
+        include_lower_levels = st.checkbox(
+            "Include Lower Levels",
+            value=True,
+            help="When checked, all assignments count, including lower-levels-only. "
+            "When unchecked, only assignments that are not lower-levels-only.",
+        )
+    else:
+        include_lower_levels = None
 else:
     show_other_roles = False
     show_section_info = False
+    include_lower_levels = None
 
 st.divider()
 
@@ -468,41 +551,78 @@ def normalize_df(df):
 
 
 @st.cache_data
-def load_matrix(discipline_id, appointment_type_id, competition_type_id):
+def load_matrix(
+    discipline_id, appointment_type_id, competition_type_id, include_lower_levels
+):
     return get_activity_matrix(
         discipline_id,
         appointment_type_id,
         [NATIONAL_LEVEL_ID],
         competition_type_id,
+        include_lower_levels=include_lower_levels,
     )
 
 
 @st.cache_data
-def load_matrix_sectionals(discipline_id, appointment_type_id):
-    return get_activity_matrix_sectionals(discipline_id, appointment_type_id)
+def load_matrix_sectionals(
+    discipline_id, appointment_type_id, sectional_competition_type_ids
+):
+    return get_activity_matrix_sectionals(
+        discipline_id,
+        appointment_type_id,
+        sectional_competition_type_ids,
+    )
 
 
 @st.cache_data
 def load_sectional_region_rows(
-    discipline_id, appointment_type_id, official_ids_tuple
+    discipline_id,
+    appointment_type_id,
+    official_ids_tuple,
+    sectional_competition_type_ids,
 ):
     return get_sectional_assignment_region_rows(
         discipline_id,
         appointment_type_id,
         list(official_ids_tuple),
+        sectional_competition_type_ids,
     )
 
 
 @st.cache_data
-def load_any_role_data(official_ids_tuple, competition_scope):
-    return get_any_role_years(list(official_ids_tuple), competition_scope)
+def load_any_role_data(official_ids_tuple, competition_scope, include_lower_levels):
+    return get_any_role_years(
+        list(official_ids_tuple),
+        competition_scope,
+        include_lower_levels=include_lower_levels,
+    )
 
 
 @st.cache_data
 def load_chief_data(
-    official_ids_tuple, discipline_id, appointment_type_id, competition_scope
+    official_ids_tuple,
+    discipline_id,
+    appointment_type_id,
+    competition_scope,
+    include_lower_levels,
 ):
     return get_chief_years(
+        list(official_ids_tuple),
+        discipline_id,
+        appointment_type_id,
+        competition_scope,
+        include_lower_levels=include_lower_levels,
+    )
+
+
+@st.cache_data
+def load_all_lower_level_only_years(
+    official_ids_tuple,
+    discipline_id,
+    appointment_type_id,
+    competition_scope,
+):
+    return get_years_all_lower_level_only_in_role(
         list(official_ids_tuple),
         discipline_id,
         appointment_type_id,
@@ -971,29 +1091,57 @@ if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
 
 
 is_sectionals_detailed = report_mode == REPORT_SECTIONALS_DETAILED
+is_championships_detailed = report_mode == REPORT_CHAMPIONSHIPS_DETAILED
+championships_lower_levels_filter = (
+    None if is_sectionals_detailed else include_lower_levels
+)
 matrix_competition_scope = (
-    SECTIONAL_ACTIVITY_COMPETITION_TYPES
+    tuple(sectional_competition_type_ids)
     if is_sectionals_detailed
     else competition_type_id
 )
-any_role_competition_scope = (
-    SECTIONAL_ANY_ROLE_COMPETITION_TYPES
-    if is_sectionals_detailed
-    else matrix_competition_scope
-)
+# Same competition-type scope as the matrix (other roles limited to the selected sectional set).
+any_role_competition_scope = matrix_competition_scope
 
 if is_sectionals_detailed:
-    df = load_matrix_sectionals(discipline_id, appointment_type_id)
+    df = load_matrix_sectionals(
+        discipline_id,
+        appointment_type_id,
+        tuple(sectional_competition_type_ids),
+    )
 else:
-    df = load_matrix(discipline_id, appointment_type_id, competition_type_id)
+    df = load_matrix(
+        discipline_id,
+        appointment_type_id,
+        competition_type_id,
+        championships_lower_levels_filter,
+    )
 df, year_cols = normalize_df(df)
 if is_sectionals_detailed:
-    st.caption(
-        "Year columns combine singles/pairs & dance sectionals and synchronized sectionals "
-        "in the same calendar year. After the checkmark, E, M, and P show which macro section "
-        "each assignment is for (Eastern, Midwestern, or Pacific Coast). Combined "
-        "Midwestern/Pacific synchro sectionals list both M and P."
-    )
+    if (
+        _is_no_discipline_selection(discipline_id)
+        and tuple(sectional_competition_type_ids) == tuple(SECTIONAL_SPD_COMPETITION_TYPES)
+    ):
+        _sec_caption = (
+            "This view is **SPD sectionals** only (Eastern, Midwestern, Pacific Coast). "
+            "Year columns are calendar years. After the checkmark, E, M, and P come from event type. "
+        )
+    elif (
+        _is_no_discipline_selection(discipline_id)
+        and tuple(sectional_competition_type_ids) == tuple(SECTIONAL_SYNCHRO_COMPETITION_TYPES)
+    ):
+        _sec_caption = (
+            "This view is **synchro sectionals** only. "
+            "Year columns are calendar years. After the checkmark, E, M, and P come from event type. "
+        )
+    else:
+        _sec_caption = (
+            "Year columns combine singles/pairs & dance sectionals and synchronized sectionals "
+            "in the same calendar year. After the checkmark, E, M, and P show which macro section "
+            "each assignment is for (Eastern, Midwestern, or Pacific Coast). Combined "
+            "Midwestern/Pacific synchro sectionals list both M and P."
+        )
+    st.caption(_sec_caption)
 if show_section_info:
     df["section"] = df["region"].map(section_display_from_region)
     df = filter_dataframe_by_section(
@@ -1017,7 +1165,8 @@ display = df[[c for c in meta_cols + year_cols_sorted if c in df.columns]].copy(
 # ---- OTHER-ROLE ATTENDANCE (optional) ----
 # role_lookup maps (official_id, year_int) -> sorted list of (role_name, disc_id) tuples
 role_lookup: dict = {}
-chief_year_set = set()
+chief_year_set: set = set()
+all_lower_level_year_set: set = set()
 region_letter_sets: dict[tuple[int, int], set] = {}
 
 
@@ -1039,9 +1188,19 @@ if "official_id" in display.columns:
         discipline_id,
         appointment_type_id,
         matrix_competition_scope,
+        championships_lower_levels_filter,
     )
     chief_year_set = {
         (int(row["official_id"]), int(row["year"])) for _, row in chief_df.iterrows()
+    }
+    all_lower_level_year_set = {
+        (int(r["official_id"]), int(r["year"]))
+        for _, r in load_all_lower_level_only_years(
+            tuple(sorted(set(official_ids))),
+            discipline_id,
+            appointment_type_id,
+            matrix_competition_scope,
+        ).iterrows()
     }
     if appt_has_chiefs:
         chief_recent = (
@@ -1056,6 +1215,7 @@ if "official_id" in display.columns:
             discipline_id,
             appointment_type_id,
             tuple(sorted(set(official_ids))),
+            tuple(sectional_competition_type_ids),
         )
         for _, row in reg_df.iterrows():
             rk = (int(row["official_id"]), int(row["year"]))
@@ -1074,15 +1234,28 @@ def _region_suffix(key: tuple) -> str:
     return " " + ",".join(sorted(letters, key=lambda x: order.get(x, 9)))
 
 
+def _chief_lower_prefix(key: tuple) -> str:
+    """Prefix like ``C L `` for chief and/or all-lower-level-only years (championships + sectionals)."""
+    parts = []
+    if key in chief_year_set:
+        parts.append("C")
+    if key in all_lower_level_year_set:
+        parts.append("L")
+    return (" ".join(parts) + " ") if parts else ""
+
+
 if show_other_roles and "official_id" in display.columns:
     any_role_df = load_any_role_data(
-        tuple(official_ids), any_role_competition_scope
+        tuple(official_ids),
+        any_role_competition_scope,
+        championships_lower_levels_filter,
     )
     if is_sectionals_detailed:
         prim = load_sectional_region_rows(
             discipline_id,
             appointment_type_id,
             tuple(sorted(set(official_ids))),
+            tuple(sectional_competition_type_ids),
         )
         allowed_by_year = build_sectional_year_allowed_type_map(prim)
         if not any_role_df.empty:
@@ -1181,11 +1354,7 @@ if show_other_roles and "official_id" in display.columns:
             key = (int(row["official_id"]), yr)
             entries = role_lookup.get(key, [])
             if row[str(yr)] == 1:
-                selected_symbol = (
-                    f"C {SELECTED_ROLE_SYMBOL}"
-                    if key in chief_year_set
-                    else SELECTED_ROLE_SYMBOL
-                )
+                selected_symbol = f"{_chief_lower_prefix(key)}{SELECTED_ROLE_SYMBOL}"
                 other = [(r, d) for r, d in entries if r != selected_appt_type]
                 if other:
                     abbrevs = ", ".join(_role_label(r, d, discipline_id) for r, d in other)
@@ -1206,11 +1375,7 @@ else:
                 if row[str(yr)] != 1:
                     return ""
                 key = (int(row["official_id"]), yr)
-                sym = (
-                    f"C {SELECTED_ROLE_SYMBOL}"
-                    if key in chief_year_set
-                    else SELECTED_ROLE_SYMBOL
-                )
+                sym = f"{_chief_lower_prefix(key)}{SELECTED_ROLE_SYMBOL}"
                 return f"{sym}{_region_suffix(key)}"
             display[col] = display.apply(mark_in_role, axis=1)
 
@@ -1232,8 +1397,16 @@ if show_other_roles:
     rename["total_any_championships"] = "# Total"
 if appt_has_chiefs:
     rename["chief_recent_year"] = "Most Recent as Chief"
+if is_sectionals_detailed and "appointment_level" in display.columns:
+    rename["appointment_level"] = "Level"
 
 display = display.rename(columns={k: v for k, v in rename.items() if k in display.columns})
+
+if is_sectionals_detailed and "Level" in display.columns and "Name" in display.columns:
+    _cols = list(display.columns)
+    _cols.remove("Level")
+    _cols.insert(_cols.index("Name") + 1, "Level")
+    display = display[_cols]
 
 if show_other_roles and "# Total" in display.columns and "# In Role" in display.columns:
     _cols = list(display.columns)
@@ -1292,6 +1465,22 @@ if sort_cols:
             sort_orders.append(order == "Ascending")
     display = display.sort_values(by=sort_cols, ascending=sort_orders, kind="mergesort")
 
+# Championships: light gray in year cells in the appointment year or earlier (calendar year of
+# national appointment; same-year championships count since they were not yet appointed).
+# (`achieved_year` comes from the activity matrix; dropped before render.)
+champs_pre_appointment = None
+if is_championships_detailed and "achieved_year" in display.columns:
+    _ystrs = [str(c) for c in year_cols_sorted if str(c) in display.columns]
+    A = pd.to_numeric(display["achieved_year"], errors="coerce")
+    if _ystrs and A is not None:
+        champs_pre_appointment = pd.DataFrame(
+            {yc: (int(yc) <= A) & A.notna() for yc in _ystrs},
+            index=display.index,
+        )
+    display = display.drop(columns=["achieved_year"], errors="ignore")
+elif "achieved_year" in display.columns:
+    display = display.drop(columns=["achieved_year"], errors="ignore")
+
 # ---- STYLER ----
 def _fmt_hide_high(val):
     return "" if pd.isna(val) or int(val) == SENTINEL_HIGH else str(int(val))
@@ -1313,8 +1502,30 @@ if show_other_roles:
 fmt_map_filtered = {k: v for k, v in fmt_map.items() if k in display.columns}
 styled = display.style.format(fmt_map_filtered, na_rep="")
 
+if champs_pre_appointment is not None and not champs_pre_appointment.empty:
+    _shade_cols = [c for c in champs_pre_appointment.columns if c in display.columns]
+
+    def _shade_championships_pre_appointment_year_col(s):
+        col = s.name
+        if col not in champs_pre_appointment.columns:
+            return [""] * len(s)
+        return [
+            "background-color: #ececec" if bool(champs_pre_appointment.loc[idx, col]) else ""
+            for idx in s.index
+        ]
+
+    if _shade_cols:
+        styled = styled.apply(
+            _shade_championships_pre_appointment_year_col, axis=0, subset=_shade_cols
+        )
+
 # ---- RENDER ----
 col_cfg = {"Name": st.column_config.Column(pinned=True)}
+if is_sectionals_detailed and "Level" in display.columns:
+    col_cfg["Level"] = st.column_config.TextColumn(
+        "Level",
+        help="USFS appointment level for the earliest qualifying national or sectional history row in this report.",
+    )
 if show_section_info:
     if "Region" in display.columns:
         col_cfg["Region"] = st.column_config.TextColumn("Region")
@@ -1343,7 +1554,10 @@ if show_other_roles and "# Total" in display.columns:
         format="%.0f",
     )
 
-st.markdown(f"**{len(display)} officials** — National level · {selected_appt_type} · {selected_discipline}")
+_level_scope = "Sectional and national" if is_sectionals_detailed else "National level"
+st.markdown(
+    f"**{len(display)} officials** — {_level_scope} · {selected_appt_type} · {selected_discipline}"
+)
 st.dataframe(styled, width="stretch", height=700, hide_index=True, column_config=col_cfg)
 if show_section_info and "Section" in display.columns:
     sec_counts = display["Section"].value_counts().sort_index()
@@ -1351,9 +1565,18 @@ if show_section_info and "Section" in display.columns:
         "By section (this view): "
         + " · ".join(f"{k}: {int(v)}" for k, v in sec_counts.items())
     )
-legend_parts = [f"{SELECTED_ROLE_SYMBOL} = Assigned in selected role"]
+legend_parts = []
 if appt_has_chiefs:
-    legend_parts.insert(0, "C = Chief in selected role")
+    legend_parts.append("C = Chief in selected role")
+if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
+    legend_parts.append(
+        "L = In selected role that year, every assignment is lower-levels only"
+    )
+if is_championships_detailed:
+    legend_parts.append(
+        "Gray = Championship year is on or before your appointment year (this role & report)"
+    )
+legend_parts.append(f"{SELECTED_ROLE_SYMBOL} = Assigned in selected role")
 if show_other_roles:
     legend_parts.append(f"{OTHER_ROLE_SYMBOL} = Present in other role(s)")
 st.caption("Legend: " + " · ".join(legend_parts))
