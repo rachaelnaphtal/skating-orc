@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Date, ForeignKeyConstraint, Identity, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKeyConstraint, Identity, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
 
@@ -18,6 +18,7 @@ class AppointmentTypes(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='appointment_type')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='appointment_type')
@@ -32,6 +33,7 @@ class CompetitionType(Base):
 
     id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
     name: Mapped[str] = mapped_column(String)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     competition: Mapped[List['Competition']] = relationship('Competition', back_populates='competition_type')
 
@@ -46,6 +48,7 @@ class Disciplines(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='discipline')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='discipline')
@@ -61,6 +64,7 @@ class Levels(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='level')
 
@@ -84,6 +88,7 @@ class Officials(Base):
     city: Mapped[Optional[str]] = mapped_column(Text)
     state: Mapped[Optional[str]] = mapped_column(Text)
     region: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='official')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='official')
@@ -97,11 +102,19 @@ class Appointments(Base):
         ForeignKeyConstraint(['level_id'], ['officials_analysis.levels.id'], name='appointments_level_id_fkey'),
         ForeignKeyConstraint(['official_id'], ['officials_analysis.officials.id'], name='appointments_official_id_fkey'),
         PrimaryKeyConstraint('id', name='appointments_pkey'),
-        UniqueConstraint('official_id', 'appointment_type_id', 'discipline_id', 'level_id', name='appointments_unique'),
+        UniqueConstraint(
+            'official_id',
+            'appointment_type_id',
+            'discipline_id',
+            'level_id',
+            name='appointments_unique',
+            postgresql_nulls_not_distinct=True,
+        ),
         {'schema': 'officials_analysis'}
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text('true'))
     official_id: Mapped[Optional[int]] = mapped_column(Integer)
     appointment_type_id: Mapped[Optional[int]] = mapped_column(Integer)
     discipline_id: Mapped[Optional[int]] = mapped_column(Integer)
@@ -109,6 +122,7 @@ class Appointments(Base):
     appointed_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     achieved_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     mentor: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointment_type: Mapped[Optional['AppointmentTypes']] = relationship('AppointmentTypes', back_populates='appointments')
     discipline: Mapped[Optional['Disciplines']] = relationship('Disciplines', back_populates='appointments')
@@ -121,6 +135,7 @@ class Competition(Base):
     __table_args__ = (
         ForeignKeyConstraint(['competition_type_id'], ['officials_analysis.competition_type.id'], name='competition_competition_type_id_fkey'),
         PrimaryKeyConstraint('id', name='competition_pkey'),
+        UniqueConstraint('year', 'competition_type_id', name='competition_unique'),
         {'schema': 'officials_analysis'}
     )
 
@@ -128,6 +143,7 @@ class Competition(Base):
     name: Mapped[str] = mapped_column(String)
     year: Mapped[int] = mapped_column(Integer)
     competition_type_id: Mapped[int] = mapped_column(Integer)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     competition_type: Mapped['CompetitionType'] = relationship('CompetitionType', back_populates='competition')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='competition')
@@ -152,6 +168,7 @@ class Assignment(Base):
     appointment_type_id: Mapped[int] = mapped_column(Integer)
     chief: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     lower_levels_only: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     appointment_type: Mapped['AppointmentTypes'] = relationship('AppointmentTypes', back_populates='assignment')
     competition: Mapped['Competition'] = relationship('Competition', back_populates='assignment')

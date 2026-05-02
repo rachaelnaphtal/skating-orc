@@ -5,6 +5,8 @@ from load_activity_data import (
     get_assigned_competition_counts,
     get_competition_count_for_types,
     get_activity_matrix,
+    get_official_ids_with_isu_appointment,
+    national_appointment_type_has_isu_mapping,
     get_activity_matrix_sectionals,
     get_sectional_assignment_region_rows,
     SECTIONAL_ACTIVITY_COMPETITION_TYPES,
@@ -28,8 +30,13 @@ from load_activity_data import (
     get_competition_assignment_rows,
 )
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, select
-from officials_analysis_models import Disciplines, AppointmentTypes, Appointments
+from sqlalchemy import create_engine, or_, select
+from officials_analysis_models import (
+    Disciplines,
+    AppointmentTypes,
+    Appointments,
+    Assignment,
+)
 import pandas as pd
 from datetime import datetime
 
@@ -44,6 +51,10 @@ CURRENT_YEAR = datetime.now().year
 
 SENTINEL_HIGH = 9999
 SENTINEL_LOW  = 0
+
+# Championships detailed: attendance as % of eligible years (shown after "# In Role")
+PCT_ELIGIBLE_ATTENDED_COL = "% eligible attended"
+PCT_ELIGIBLE_ATTENDED_HEADER = "% eligible\nattended"
 
 OTHER_ROLE_SYMBOL = "○"
 SELECTED_ROLE_SYMBOL = "✔"
@@ -118,7 +129,11 @@ def _is_no_discipline_selection(discipline_id) -> bool:
 
 
 def assignment_label_for_tables(
-    appt_name: str, discipline_name: str, discipline_id, chief: bool
+    appt_name: str,
+    discipline_name: str,
+    discipline_id,
+    chief: bool,
+    lower_levels_only: bool = False,
 ) -> str:
     """Full appointment type name for per-person / per-competition assignment columns."""
     an = (appt_name or "").strip()
@@ -128,11 +143,27 @@ def assignment_label_for_tables(
         role = an or "Assignment"
     disc_id = _discipline_id_int(discipline_id)
     if disc_id == _ASSIGNMENT_LABEL_OMIT_DISCIPLINE_ID:
-        return role
-    dn = (discipline_name or "").strip()
-    if dn:
-        return f"{role} – {dn}"
-    return role
+        out = role
+    else:
+        dn = (discipline_name or "").strip()
+        if dn:
+            out = f"{role} – {dn}"
+        else:
+            out = role
+    if lower_levels_only:
+        return f"{out} (lower)"
+    return out
+
+
+def _assignment_lower_only_flag(val) -> bool:
+    if val is None:
+        return False
+    try:
+        if pd.isna(val):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(val)
 
 
 def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
@@ -148,6 +179,7 @@ def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
             else "",
             r.get("discipline_id"),
             bool(r.get("chief")),
+            _assignment_lower_only_flag(r.get("lower_levels_only")),
         ),
         axis=1,
     )
@@ -189,6 +221,7 @@ def build_competition_assignments_display(roster_df: pd.DataFrame) -> pd.DataFra
             else "",
             r.get("discipline_id"),
             bool(r.get("chief")),
+            _assignment_lower_only_flag(r.get("lower_levels_only")),
         ),
         axis=1,
     )
@@ -330,6 +363,15 @@ report_mode = st.radio(
     horizontal=True,
 )
 
+active_appointments_only = True
+if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
+    active_appointments_only = st.checkbox(
+        "Active appointments only",
+        value=True,
+        help="When checked, only directory appointments with active = true (current USFS status) are used for who appears in the matrix and for the discipline list. "
+        "Uncheck to include ended or removed roles that are still stored.",
+    )
+
 SUMMARY_COMPETITION_TYPES = {
     "US Championships": [4],
     "US Synchronized Skating Championships": [8],
@@ -350,44 +392,50 @@ def load_appt_data_date():
 
 
 @st.cache_data
-def load_all_appt_types():
+def load_all_appt_types(active_appointments_only: bool = True):
     with Session(engine) as session:
-        rows = session.execute(
+        q = (
             select(AppointmentTypes.id, AppointmentTypes.name)
             .join(Appointments, Appointments.appointment_type_id == AppointmentTypes.id)
             .where(Appointments.level_id == NATIONAL_LEVEL_ID)
-            .distinct()
-            .order_by(AppointmentTypes.name)
+        )
+        if active_appointments_only:
+            q = q.where(Appointments.active.is_(True))
+        rows = session.execute(
+            q.distinct().order_by(AppointmentTypes.name)
         ).all()
     return {name: id_ for id_, name in rows}
 
 
 @st.cache_data
 def load_disciplines_for_appt_type(
-    appointment_type_id, include_sectional_appointment_levels: bool
+    appointment_type_id,
+    include_sectional_appointment_levels: bool,
+    active_appointments_only: bool = True,
 ):
     """
     ``include_sectional_appointment_levels`` (sectionals report): include appointments at
     sectional level (id 2 for most roles, id 8 for Scoring Official / Scoring System Tech)
     in addition to national, so discipline picklists and no-discipline options match the matrix.
     """
-    from officials_analysis_models import Assignment
-
     if include_sectional_appointment_levels:
         level_ids = tuple(sectional_qualified_level_ids(appointment_type_id))
     else:
         level_ids = (NATIONAL_LEVEL_ID,)
 
     with Session(engine) as session:
+        w = [
+            Appointments.appointment_type_id == appointment_type_id,
+            Appointments.level_id.in_(level_ids),
+            Assignment.appointment_type_id == appointment_type_id,
+        ]
+        if active_appointments_only:
+            w.append(Appointments.active.is_(True))
         rows = session.execute(
             select(Disciplines.id, Disciplines.name)
             .join(Appointments, Appointments.discipline_id == Disciplines.id)
             .join(Assignment, Assignment.discipline_id == Disciplines.id)
-            .where(
-                Appointments.appointment_type_id == appointment_type_id,
-                Appointments.level_id.in_(level_ids),
-                Assignment.appointment_type_id == appointment_type_id,
-            )
+            .where(*w)
             .distinct()
             .order_by(Disciplines.name)
         ).all()
@@ -396,15 +444,54 @@ def load_disciplines_for_appt_type(
     for id_, name in rows:
         result[name] = id_
 
-    with Session(engine) as session:
-        null_count = session.execute(
-            select(Appointments.id)
-            .where(
+    # Competition Judge / Referee: directory and assignments may be Singles (1) or
+    # Singles/Pairs (9) on different rows. The join above only sees officials where
+    # appointment and assignment share the *same* discipline_id; add Singles/Pairs to
+    # the list when any official has qualifying activity in {1, 9} for both tables.
+    if include_sectional_appointment_levels and int(appointment_type_id) in (1, 4):
+        with Session(engine) as session:
+            _sw = [
                 Appointments.appointment_type_id == appointment_type_id,
                 Appointments.level_id.in_(level_ids),
+                Appointments.discipline_id.in_((1, 9)),
+                Assignment.discipline_id.in_((1, 9)),
+            ]
+            if active_appointments_only:
+                _sw.append(Appointments.active.is_(True))
+            has_singles_umbrella = session.execute(
+                select(1)
+                .select_from(Appointments)
+                .join(
+                    Assignment,
+                    (Assignment.official_id == Appointments.official_id)
+                    & (Assignment.appointment_type_id == appointment_type_id),
+                )
+                .where(*_sw)
+                .limit(1)
+            ).first()
+        if has_singles_umbrella and 9 not in result.values():
+            with Session(engine) as session:
+                drow = session.execute(
+                    select(Disciplines.id, Disciplines.name).where(Disciplines.id == 9)
+                ).first()
+            if drow:
+                _did, dname = drow[0], drow[1]
+                if dname:
+                    result[str(dname).strip()] = int(_did)
+
+    with Session(engine) as session:
+        _nw = [
+            Appointments.appointment_type_id == appointment_type_id,
+            Appointments.level_id.in_(level_ids),
+            or_(
                 Appointments.discipline_id.is_(None),
-            )
-            .limit(1)
+                Appointments.discipline_id == _ASSIGNMENT_LABEL_OMIT_DISCIPLINE_ID,
+            ),
+        ]
+        if active_appointments_only:
+            _nw.append(Appointments.active.is_(True))
+        null_count = session.execute(
+            select(Appointments.id).where(*_nw).limit(1)
         ).first()
 
     if null_count:
@@ -413,8 +500,8 @@ def load_disciplines_for_appt_type(
     return result
 
 
-# ---- MAIN PAGE FILTERS (Championships detailed report only) ----
-appt_types_map = load_all_appt_types()
+# ---- MAIN PAGE FILTERS (Championships / sectionals activity reports) ----
+appt_types_map = load_all_appt_types(active_appointments_only)
 
 if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
     col1, col2 = st.columns(2)
@@ -433,6 +520,7 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
     disciplines_map = load_disciplines_for_appt_type(
         appointment_type_id,
         report_mode == REPORT_SECTIONALS_DETAILED,
+        active_appointments_only,
     )
 
     with col2:
@@ -451,7 +539,8 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
                 break
         if default_disc is None:
             for _lab, _did in disciplines_map.items():
-                if _did is not None and int(_did) in (8, 9) and _lab in disc_options:
+                # Singles/Pairs directory id is 9 (8 is Pairs as its own discipline).
+                if _did is not None and int(_did) == 9 and _lab in disc_options:
                     default_disc = _lab
                     break
         if default_disc is None:
@@ -552,7 +641,11 @@ def normalize_df(df):
 
 @st.cache_data
 def load_matrix(
-    discipline_id, appointment_type_id, competition_type_id, include_lower_levels
+    discipline_id,
+    appointment_type_id,
+    competition_type_id,
+    include_lower_levels,
+    active_appointments_only: bool,
 ):
     return get_activity_matrix(
         discipline_id,
@@ -560,17 +653,22 @@ def load_matrix(
         [NATIONAL_LEVEL_ID],
         competition_type_id,
         include_lower_levels=include_lower_levels,
+        active_appointments_only=active_appointments_only,
     )
 
 
 @st.cache_data
 def load_matrix_sectionals(
-    discipline_id, appointment_type_id, sectional_competition_type_ids
+    discipline_id,
+    appointment_type_id,
+    sectional_competition_type_ids,
+    active_appointments_only: bool,
 ):
     return get_activity_matrix_sectionals(
         discipline_id,
         appointment_type_id,
         sectional_competition_type_ids,
+        active_appointments_only=active_appointments_only,
     )
 
 
@@ -936,7 +1034,8 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                 "Assignments": st.column_config.TextColumn(
                     "Assignments",
                     width="large",
-                    help="Full appointment type names; discipline omitted when not applicable.",
+                    help="Full appointment type names; discipline omitted when not applicable. "
+                    "Suffix (lower) means the assignment is lower-levels only.",
                 ),
             },
         )
@@ -986,7 +1085,8 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
                 "Assignments": st.column_config.TextColumn(
                     "Assignments",
                     width="large",
-                    help="Full appointment type names; discipline omitted when not applicable.",
+                    help="Full appointment type names; discipline omitted when not applicable. "
+                    "Suffix (lower) means the assignment is lower-levels only.",
                 ),
             },
         )
@@ -1108,6 +1208,7 @@ if is_sectionals_detailed:
         discipline_id,
         appointment_type_id,
         tuple(sectional_competition_type_ids),
+        active_appointments_only,
     )
 else:
     df = load_matrix(
@@ -1115,6 +1216,7 @@ else:
         appointment_type_id,
         competition_type_id,
         championships_lower_levels_filter,
+        active_appointments_only,
     )
 df, year_cols = normalize_df(df)
 if is_sectionals_detailed:
@@ -1402,16 +1504,60 @@ if is_sectionals_detailed and "appointment_level" in display.columns:
 
 display = display.rename(columns={k: v for k, v in rename.items() if k in display.columns})
 
+if (
+    is_championships_detailed
+    and national_appointment_type_has_isu_mapping(appointment_type_id)
+    and "official_id" in display.columns
+    and "Name" in display.columns
+):
+    _oids = display["official_id"].dropna().astype(int).unique().tolist()
+    _isu = get_official_ids_with_isu_appointment(
+        _oids,
+        appointment_type_id,
+        discipline_id,
+        active_appointments_only=active_appointments_only,
+    )
+    display["ISU"] = display["official_id"].map(
+        lambda x: "Yes" if pd.notna(x) and int(x) in _isu else "No"
+    )
+    _cols = list(display.columns)
+    _cols.remove("ISU")
+    _cols.insert(_cols.index("Name") + 1, "ISU")
+    display = display[_cols]
+
 if is_sectionals_detailed and "Level" in display.columns and "Name" in display.columns:
     _cols = list(display.columns)
     _cols.remove("Level")
     _cols.insert(_cols.index("Name") + 1, "Level")
     display = display[_cols]
 
+# Drop internal eligibility column for sectionals; championships get a display metric instead.
+if is_sectionals_detailed:
+    display = display.drop(columns=["eligible_years"], errors="ignore")
+
+if is_championships_detailed and "eligible_years" in display.columns:
+    if "# In Role" not in display.columns:
+        display = display.drop(columns=["eligible_years"], errors="ignore")
+    else:
+        te = pd.to_numeric(display["# In Role"], errors="coerce").fillna(0)
+        el = pd.to_numeric(display["eligible_years"], errors="coerce")
+        valid = el.notna() & (el > 0)
+        display[PCT_ELIGIBLE_ATTENDED_COL] = (
+            (100.0 * te / el).where(valid).clip(upper=100)
+        )
+        display = display.drop(columns=["eligible_years"])
+        _cols = [c for c in display.columns if c != PCT_ELIGIBLE_ATTENDED_COL]
+        if PCT_ELIGIBLE_ATTENDED_COL in display.columns:
+            _cols.insert(_cols.index("# In Role") + 1, PCT_ELIGIBLE_ATTENDED_COL)
+        display = display[_cols]
+
 if show_other_roles and "# Total" in display.columns and "# In Role" in display.columns:
     _cols = list(display.columns)
     _cols.remove("# Total")
-    _insert_at = _cols.index("# In Role") + 1
+    if PCT_ELIGIBLE_ATTENDED_COL in _cols:
+        _insert_at = _cols.index(PCT_ELIGIBLE_ATTENDED_COL) + 1
+    else:
+        _insert_at = _cols.index("# In Role") + 1
     _cols.insert(_insert_at, "# Total")
     display = display[_cols]
 
@@ -1444,12 +1590,18 @@ display = display.drop(columns=["official_id"], errors="ignore")
 
 # ---- MULTI-COLUMN SORT CONTROLS ----
 sortable_cols = list(display.columns)
-default_sort = [c for c in ["Yrs Since Last", "Yrs in Grade"] if c in sortable_cols]
+if is_championships_detailed:
+    default_sort = [
+        c for c in ("Yrs Since Last", "Yrs in Grade") if c in sortable_cols
+    ]
+else:
+    default_sort = [c for c in ("Yrs Since Last", "Yrs in Grade") if c in sortable_cols]
 sort_cols = st.multiselect(
     "Sort by (priority left to right)",
     options=sortable_cols,
     default=default_sort,
-    help="Choose multiple columns to sort. First selection has highest priority.",
+    help="Choose multiple columns to sort. First selection has highest priority. "
+    f"{PCT_ELIGIBLE_ATTENDED_COL} sorts by the numeric percent (higher first when Descending).",
 )
 if sort_cols:
     sort_orders = []
@@ -1463,7 +1615,12 @@ if sort_cols:
                 key=f"sort_order_{col}",
             )
             sort_orders.append(order == "Ascending")
-    display = display.sort_values(by=sort_cols, ascending=sort_orders, kind="mergesort")
+    display = display.sort_values(
+        by=sort_cols,
+        ascending=sort_orders,
+        kind="mergesort",
+        na_position="last",
+    )
 
 # Championships: light gray in year cells in the appointment year or earlier (calendar year of
 # national appointment; same-year championships count since they were not yet appointed).
@@ -1499,6 +1656,14 @@ if show_other_roles:
     fmt_map["Last (Any Role)"] = _fmt_hide_low
     fmt_map["Yrs Since (Any)"] = _fmt_hide_high
 
+
+def _fmt_pct_eligible(val):
+    return "" if pd.isna(val) else f"{int(round(float(val)))}%"
+
+
+if PCT_ELIGIBLE_ATTENDED_COL in display.columns:
+    fmt_map[PCT_ELIGIBLE_ATTENDED_COL] = _fmt_pct_eligible
+
 fmt_map_filtered = {k: v for k, v in fmt_map.items() if k in display.columns}
 styled = display.style.format(fmt_map_filtered, na_rep="")
 
@@ -1521,6 +1686,19 @@ if champs_pre_appointment is not None and not champs_pre_appointment.empty:
 
 # ---- RENDER ----
 col_cfg = {"Name": st.column_config.Column(pinned=True)}
+if is_championships_detailed and "ISU" in display.columns:
+    col_cfg["ISU"] = st.column_config.TextColumn(
+        "ISU",
+        width="small",
+        help=(
+            "Whether this official has an active international (ISU) **appointment type** "
+            "that matches this report: International Judge for Competition Judge, "
+            "International Referee / ITS / ITC for the same national role, or "
+            "**International Data / Video Operator in any discipline** when the report role is Data Operator. "
+            "Any directory **level** qualifies for the international row. "
+            "Discipline otherwise matches the filter (including Singles/Pairs)."
+        ),
+    )
 if is_sectionals_detailed and "Level" in display.columns:
     col_cfg["Level"] = st.column_config.TextColumn(
         "Level",
@@ -1538,9 +1716,26 @@ if "# In Role" in display.columns:
             "Per calendar year, how many distinct sectional competitions in the selected role; "
             "summed across years (singles/pairs & dance sectionals and synchro sectionals share the same year columns)."
             if is_sectionals_detailed
-            else "Years assigned in the selected official type at this championship (once per year)"
+            else (
+                "Years assigned in the selected official type at this championship (once per year); "
+                "the appointment calendar year is excluded (not eligible to have attended that year's event)."
+                if is_championships_detailed
+                else "Years assigned in the selected official type at this championship (once per year)"
+            )
         ),
         format="%.0f",
+    )
+if is_championships_detailed and PCT_ELIGIBLE_ATTENDED_COL in display.columns:
+    col_cfg[PCT_ELIGIBLE_ATTENDED_COL] = st.column_config.NumberColumn(
+        PCT_ELIGIBLE_ATTENDED_HEADER,
+        width="small",
+        help=(
+            "Percent of eligible calendar years—**starting the year after** your national appointment "
+            "(same appointment year is not eligible)—and not before the earliest year in this data, "
+            "in which you were assigned in this role at the selected championship(s). "
+            "Years in **# In Role** exclude the appointment year for the same reason."
+        ),
+        format="%.0f%%",
     )
 if show_other_roles and "# Total" in display.columns:
     col_cfg["# Total"] = st.column_config.NumberColumn(
@@ -1555,8 +1750,9 @@ if show_other_roles and "# Total" in display.columns:
     )
 
 _level_scope = "Sectional and national" if is_sectionals_detailed else "National level"
+_appt_scope = "active directory appointments only" if active_appointments_only else "including inactive directory rows"
 st.markdown(
-    f"**{len(display)} officials** — {_level_scope} · {selected_appt_type} · {selected_discipline}"
+    f"**{len(display)} officials** — {_level_scope} · {selected_appt_type} · {selected_discipline} · {_appt_scope}"
 )
 st.dataframe(styled, width="stretch", height=700, hide_index=True, column_config=col_cfg)
 if show_section_info and "Section" in display.columns:
@@ -1575,6 +1771,10 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
 if is_championships_detailed:
     legend_parts.append(
         "Gray = Championship year is on or before your appointment year (this role & report)"
+    )
+if is_championships_detailed:
+    legend_parts.append(
+        f"{PCT_ELIGIBLE_ATTENDED_COL} = attended ÷ eligible yrs (first eligible yr = year after appointment; aligned with data start)"
     )
 legend_parts.append(f"{SELECTED_ROLE_SYMBOL} = Assigned in selected role")
 if show_other_roles:
