@@ -26,6 +26,7 @@ from load_activity_data import (
     get_officials_with_assignments,
     get_official_assignment_detail_rows,
     get_official_appointment_rows,
+    get_official_segment_official_activity_detail,
     get_competitions_for_report_dropdown,
     get_competition_assignment_rows,
 )
@@ -55,6 +56,9 @@ SENTINEL_LOW  = 0
 # Championships detailed: attendance as % of eligible years (shown after "# In Role")
 PCT_ELIGIBLE_ATTENDED_COL = "% eligible attended"
 PCT_ELIGIBLE_ATTENDED_HEADER = "% eligible\nattended"
+
+# Detailed activity: latest calendar year with chief=True (roles that use chiefs only)
+MOST_RECENT_CHIEF_COL = "Most recent chief"
 
 OTHER_ROLE_SYMBOL = "○"
 SELECTED_ROLE_SYMBOL = "✔"
@@ -116,6 +120,131 @@ def _discipline_id_int(discipline_id):
         return int(discipline_id)
     except (TypeError, ValueError):
         return None
+
+
+def _judging_results_index_url(url: str) -> str:
+    """Ensure IJS results base URL opens the index page (…/index.asp)."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    u = u.rstrip("/")
+    if u.lower().endswith("index.asp"):
+        return u
+    return f"{u}/index.asp"
+
+
+def _segment_official_disciplines_summary(series: pd.Series) -> str:
+    """Comma-separated unique non-empty discipline labels (sorted, case-insensitive)."""
+    parts = sorted(
+        {str(x).strip() for x in series.dropna() if str(x).strip()},
+        key=str.lower,
+    )
+    return ", ".join(parts)
+
+
+def _render_additional_segment_activity_slice(
+    panel_detail: pd.DataFrame,
+    *,
+    section_subheader: str,
+    empty_message: str,
+    expander_widget_key: str,
+) -> None:
+    """Per-competition summary + segment rows for one qualifying slice of protocol activity."""
+    st.subheader(section_subheader)
+    if panel_detail.empty:
+        st.info(empty_message)
+        return
+    summary = (
+        panel_detail.groupby("competition_id", sort=False)
+        .agg(
+            year=("year", "first"),
+            competition_name=("competition_name", "first"),
+            results_url=("results_url", "first"),
+            start_date=("start_date", "first"),
+            end_date=("end_date", "first"),
+            panel_segment_count=("segment_id", "nunique"),
+            discipline=("discipline", _segment_official_disciplines_summary),
+        )
+        .reset_index()
+    )
+    pc = summary.copy()
+    for col in ("start_date", "end_date"):
+        if col in pc.columns:
+            pc[col] = pd.to_datetime(pc[col], errors="coerce").dt.strftime("%Y-%m-%d")
+    pc["results_url"] = pc["results_url"].map(_judging_results_index_url)
+    display_cols = [
+        "competition_name",
+        "year",
+        "start_date",
+        "end_date",
+        "discipline",
+        "panel_segment_count",
+        "results_url",
+    ]
+    pc = pc[[c for c in display_cols if c in pc.columns]]
+    st.dataframe(
+        pc,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "competition_name": st.column_config.TextColumn(
+                "Competition",
+                width="large",
+            ),
+            "year": st.column_config.TextColumn("Season"),
+            "start_date": st.column_config.TextColumn("Start"),
+            "end_date": st.column_config.TextColumn("End"),
+            "discipline": st.column_config.TextColumn(
+                "Discipline",
+                width="medium",
+                help="From segment ``discipline_type`` (public.discipline_type). "
+                "Multiple values if panels span categories at this competition.",
+            ),
+            "panel_segment_count": st.column_config.NumberColumn(
+                "Segments",
+                help="Distinct segments where this official is listed on a panel.",
+                format="%d",
+            ),
+            "results_url": st.column_config.LinkColumn(
+                "Results",
+                display_text="Open",
+                help="IJS results index (index.asp) for this competition.",
+            ),
+        },
+    )
+    with st.expander("Segments by competition", expanded=False, key=expander_widget_key):
+        comp_ids = panel_detail["competition_id"].drop_duplicates().tolist()
+        for idx, cid in enumerate(comp_ids):
+            sub = panel_detail[panel_detail["competition_id"] == cid].copy()
+            sub = sub.sort_values(
+                ["segment_name", "discipline", "role"], kind="mergesort"
+            )
+            title = f"{sub.iloc[0]['competition_name']} ({sub.iloc[0]['year']})"
+            st.markdown(f"**{title}**")
+            sub_show = sub.assign(
+                discipline=sub["discipline"].fillna("").astype(str)
+            )
+            st.dataframe(
+                sub_show[["segment_name", "discipline", "role"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "segment_name": st.column_config.TextColumn(
+                        "Segment",
+                        width="large",
+                    ),
+                    "discipline": st.column_config.TextColumn(
+                        "Discipline",
+                        width="small",
+                    ),
+                    "role": st.column_config.TextColumn(
+                        "Role",
+                        width="medium",
+                    ),
+                },
+            )
+            if idx < len(comp_ids) - 1:
+                st.divider()
 
 
 def _is_no_discipline_selection(discipline_id) -> bool:
@@ -789,6 +918,11 @@ def load_person_assignment_rows(official_id: int):
 
 
 @st.cache_data
+def load_person_segment_official_activity_detail(official_id: int):
+    return get_official_segment_official_activity_detail(int(official_id))
+
+
+@st.cache_data
 def load_person_appointment_rows(official_id: int):
     return get_official_appointment_rows(int(official_id))
 
@@ -1050,6 +1184,34 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                 appts_show["achieved_date"], errors="coerce"
             ).dt.strftime("%Y-%m-%d")
         st.dataframe(appts_show, width="stretch", hide_index=True)
+    panel_detail = load_person_segment_official_activity_detail(pick_oid)
+    st.caption(
+        "Competitions where this official appears on an IJS protocol (judging database "
+        "``segment_official``). Sorted by event dates when present, then season year. "
+        "Independent of USFS directory assignments above. Qualifying vs non-qualifying "
+        "follows ``public.competition.qualifying``."
+    )
+    if panel_detail.empty:
+        st.info(
+            "No protocol/panel rows for this official, or the database is not PostgreSQL "
+            "with judging ``public`` tables available."
+        )
+    else:
+        is_qualifying = panel_detail["qualifying"].fillna(False).astype(bool)
+        qual_detail = panel_detail[is_qualifying]
+        nonqual_detail = panel_detail[~is_qualifying]
+        _render_additional_segment_activity_slice(
+            qual_detail,
+            section_subheader="Additional Qualifying Activity",
+            empty_message="No qualifying protocol activity for this official.",
+            expander_widget_key="person_seg_official_qual_exp",
+        )
+        _render_additional_segment_activity_slice(
+            nonqual_detail,
+            section_subheader="Additional Nonqualifying Activity",
+            empty_message="No non-qualifying protocol activity for this official.",
+            expander_widget_key="person_seg_official_nonqual_exp",
+        )
     st.stop()
 
 
@@ -1498,7 +1660,7 @@ if show_other_roles:
     rename["any_yrs_since"] = "Yrs Since (Any)"
     rename["total_any_championships"] = "# Total"
 if appt_has_chiefs:
-    rename["chief_recent_year"] = "Most Recent as Chief"
+    rename["chief_recent_year"] = MOST_RECENT_CHIEF_COL
 if is_sectionals_detailed and "appointment_level" in display.columns:
     rename["appointment_level"] = "Level"
 
@@ -1561,6 +1723,16 @@ if show_other_roles and "# Total" in display.columns and "# In Role" in display.
     _cols.insert(_insert_at, "# Total")
     display = display[_cols]
 
+if MOST_RECENT_CHIEF_COL in display.columns:
+    _cols = [c for c in display.columns if c != MOST_RECENT_CHIEF_COL]
+    if "Most Recent" in _cols:
+        _cols.insert(_cols.index("Most Recent") + 1, MOST_RECENT_CHIEF_COL)
+    elif "Name" in _cols:
+        _cols.insert(_cols.index("Name") + 1, MOST_RECENT_CHIEF_COL)
+    else:
+        _cols.append(MOST_RECENT_CHIEF_COL)
+    display = display[_cols]
+
 if "Never Assigned?" in display.columns:
     display["Never Assigned?"] = display["Never Assigned?"].map(
         {True: "Yes", False: "", 1: "Yes", 0: ""}
@@ -1574,9 +1746,11 @@ if "Yrs Since Last" in display.columns:
     display["Yrs Since Last"] = _to_num_fill(display["Yrs Since Last"], SENTINEL_HIGH)
 if "Most Recent" in display.columns:
     display["Most Recent"] = _to_num_fill(display["Most Recent"], SENTINEL_LOW)
-if "Most Recent as Chief" in display.columns:
-    display["Most Recent as Chief"] = _to_num_fill(
-        display["Most Recent as Chief"], SENTINEL_LOW
+if MOST_RECENT_CHIEF_COL in display.columns:
+    _v = pd.to_numeric(display[MOST_RECENT_CHIEF_COL], errors="coerce")
+    # No chief / never: show empty (not 0) in the table
+    display[MOST_RECENT_CHIEF_COL] = _v.mask(_v.isna() | (_v == 0), other=pd.NA).astype(
+        "Int64"
     )
 if "Yrs in Grade" in display.columns:
     display["Yrs in Grade"] = _to_num_fill(display["Yrs in Grade"], SENTINEL_HIGH)
@@ -1638,6 +1812,26 @@ if is_championships_detailed and "achieved_year" in display.columns:
 elif "achieved_year" in display.columns:
     display = display.drop(columns=["achieved_year"], errors="ignore")
 
+# Streamlit NumberColumn shows pandas NA as the word "none"; use blank strings + TextColumn.
+if MOST_RECENT_CHIEF_COL in display.columns:
+    def _chief_year_display_cell(x):
+        if x is None:
+            return ""
+        try:
+            if pd.isna(x):
+                return ""
+        except TypeError:
+            pass
+        try:
+            i = int(x)
+        except (TypeError, ValueError):
+            return ""
+        return "" if i <= 0 else str(i)
+
+    display[MOST_RECENT_CHIEF_COL] = display[MOST_RECENT_CHIEF_COL].map(
+        _chief_year_display_cell
+    )
+
 # ---- STYLER ----
 def _fmt_hide_high(val):
     return "" if pd.isna(val) or int(val) == SENTINEL_HIGH else str(int(val))
@@ -1645,13 +1839,12 @@ def _fmt_hide_high(val):
 def _fmt_hide_low(val):
     return "" if pd.isna(val) or int(val) == SENTINEL_LOW else str(int(val))
 
+
 fmt_map = {
     "Yrs in Grade":   _fmt_hide_high,
     "Yrs Since Last": _fmt_hide_high,
     "Most Recent":      _fmt_hide_low,
 }
-if "Most Recent as Chief" in display.columns:
-    fmt_map["Most Recent as Chief"] = _fmt_hide_low
 if show_other_roles:
     fmt_map["Last (Any Role)"] = _fmt_hide_low
     fmt_map["Yrs Since (Any)"] = _fmt_hide_high
@@ -1709,6 +1902,15 @@ if show_section_info:
         col_cfg["Region"] = st.column_config.TextColumn("Region")
     if "Section" in display.columns:
         col_cfg["Section"] = st.column_config.TextColumn("Section")
+if appt_has_chiefs and MOST_RECENT_CHIEF_COL in display.columns:
+    col_cfg[MOST_RECENT_CHIEF_COL] = st.column_config.TextColumn(
+        MOST_RECENT_CHIEF_COL,
+        width="small",
+        help=(
+            "Most recent **calendar year** with **chief** on an assignment in this report’s "
+            "official type, discipline, and competition scope (same rules as the **C** prefix on year cells)."
+        ),
+    )
 if "# In Role" in display.columns:
     col_cfg["# In Role"] = st.column_config.NumberColumn(
         "# In Role",

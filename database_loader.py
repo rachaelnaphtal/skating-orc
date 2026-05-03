@@ -1,17 +1,175 @@
+from __future__ import annotations
+
 import streamlit as st
 from sqlalchemy.sql import text
 import pandas as pd
 from sqlalchemy.orm import Session
-from models import Judge, Competition, Segment, Skater, SkaterSegment, Element, ElementScorePerJudge, PcsScorePerJudge, PcsType, ElementType, DisciplineType
+from models import Judge, Competition, Segment, Skater, SkaterSegment, Element, ElementScorePerJudge, PcsScorePerJudge, PcsType, ElementType, DisciplineType, SegmentOfficial
 from database import get_db_session, test_connection
 
+try:
+    from judge_official_link_core import normalize_name, suggest_matches
+except ImportError:  # pragma: no cover
+    normalize_name = None  # type: ignore[misc, assignment]
+    suggest_matches = None  # type: ignore[misc, assignment]
+
+
+def _normalize_person_name(name: str | None) -> str:
+    """Lowercase + collapse whitespace; matches judge_official_link_core.normalize_name."""
+    if not name:
+        return ""
+    return " ".join(name.lower().split()).strip()
 
 # Initialize connection.
 # conn = st.connection("postgresql", type="sql")
 
+# IJS / USFS results panel role → officials_analysis.appointment_types.id
+# (values from directory; see user specification.)
+APPOINTMENT_TYPE_ID_JUDGE = 1
+APPOINTMENT_TYPE_ID_REFEREE = 4
+APPOINTMENT_TYPE_ID_TECH_SPECIALIST = 9
+APPOINTMENT_TYPE_ID_TECH_CONTROLLER = 11
+
+
+def appointment_type_id_for_ijs_role(role_label: str) -> int | None:
+    r = (role_label or "").strip()
+    if r.startswith("Judge"):
+        return APPOINTMENT_TYPE_ID_JUDGE
+    if "Referee" in r:
+        return APPOINTMENT_TYPE_ID_REFEREE
+    if "Technical Controller" in r:
+        return APPOINTMENT_TYPE_ID_TECH_CONTROLLER
+    if "Assistant Technical Specialist" in r or "Technical Specialist" in r:
+        return APPOINTMENT_TYPE_ID_TECH_SPECIALIST
+    return None
+
+
 class DatabaseLoader:
     def __init__(self, session: Session):
         self.session = session
+
+    def replace_segment_officials(self, segment_id: int, rows: list) -> None:
+        """
+        Persist IJS segment officials. Replaces prior rows for this segment.
+        ``official_id`` is set from (in order): ``judge_official_link`` for the judge
+        row from ``insert_judge``; else ``public.official_name_alias`` on the
+        normalized scraped name; else exact match on ``officials.full_name``;
+        else high-confidence fuzzy match. ``appointment_type_id`` follows role labels.
+        """
+        if not rows:
+            return
+        self.session.query(SegmentOfficial).filter(
+            SegmentOfficial.segment_id == segment_id
+        ).delete(synchronize_session=False)
+        choices_cache: dict[int, str] | None = None
+        for r in rows:
+            official_name = r["name"]
+            role = r["role"]
+            judge_id = self.insert_judge(official_name)
+            appt_type_id = appointment_type_id_for_ijs_role(role)
+            oid = self._official_id_from_judge_id(judge_id)
+            if oid is None:
+                oid = self._official_id_from_name_alias(official_name)
+            if oid is None:
+                oid = self._official_id_from_exact_directory_name(official_name)
+            if oid is None:
+                if choices_cache is None:
+                    choices_cache = self._load_official_directory_choices()
+                oid = self._official_id_from_fuzzy_directory_name(
+                    official_name, choices_cache
+                )
+            self.session.add(
+                SegmentOfficial(
+                    segment_id=segment_id,
+                    official_name=official_name,
+                    official_id=oid,
+                    role=role,
+                    appointment_type_id=appt_type_id,
+                )
+            )
+        self.session.commit()
+
+    def _load_official_directory_choices(self) -> dict[int, str]:
+        try:
+            rows = self.session.execute(
+                text("""
+                    SELECT id, TRIM(full_name) AS full_name
+                    FROM officials_analysis.officials
+                    WHERE full_name IS NOT NULL AND TRIM(full_name) <> ''
+                """)
+            ).mappings().all()
+        except Exception:
+            return {}
+        return {int(r["id"]): str(r["full_name"]) for r in rows}
+
+    def _official_id_from_exact_directory_name(self, official_name: str) -> int | None:
+        norm_fn = normalize_name or _normalize_person_name
+        norm = norm_fn(official_name)
+        if not norm:
+            return None
+        try:
+            rows = self.session.execute(
+                text("""
+                    SELECT id FROM officials_analysis.officials
+                    WHERE full_name IS NOT NULL AND TRIM(full_name) <> ''
+                      AND lower(regexp_replace(trim(full_name), '\\s+', ' ', 'g')) = :norm
+                    LIMIT 2
+                """),
+                {"norm": norm},
+            ).fetchall()
+        except Exception:
+            return None
+        if len(rows) != 1:
+            return None
+        return int(rows[0][0])
+
+    def _official_id_from_fuzzy_directory_name(
+        self, official_name: str, choices: dict[int, str]
+    ) -> int | None:
+        if not suggest_matches or not choices:
+            return None
+        matches = suggest_matches(official_name, choices, top=3, min_score=88)
+        if not matches:
+            return None
+        best_id, best_score, _ = matches[0]
+        if best_score < 92:
+            return None
+        if len(matches) > 1 and (best_score - matches[1][1]) < 3:
+            return None
+        return int(best_id)
+
+    def _official_id_from_judge_id(self, judge_id: int) -> int | None:
+        try:
+            row = self.session.execute(
+                text(
+                    "SELECT official_id FROM judge_official_link "
+                    "WHERE judge_id = :jid AND status = 'linked' LIMIT 1"
+                ),
+                {"jid": judge_id},
+            ).first()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
+
+    def _official_id_from_name_alias(self, official_name: str) -> int | None:
+        norm = _normalize_person_name(official_name)
+        if not norm:
+            return None
+        try:
+            row = self.session.execute(
+                text(
+                    "SELECT official_id FROM public.official_name_alias "
+                    "WHERE alias_normalized = :n LIMIT 1"
+                ),
+                {"n": norm},
+            ).first()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
 
     def getCompetitionUrlsWithNoLocation(self):
         competitions = (self.session.query(Competition).filter(Competition.location == None).all())
@@ -39,9 +197,9 @@ class DatabaseLoader:
         
     def insert_discipline_type(self, segment_name):
         type = "Uncategorized"
-        if "women" in segment_name.lower() or "girl" in segment_name.lower():
+        if "women" in segment_name.lower() or "girl" in segment_name.lower() or "ladies" in segment_name.lower():
             type="Singles"
-        elif "men" in segment_name.lower() or "boy" in segment_name.lower():
+        elif "men" in segment_name.lower() or "boy" in segment_name.lower() or "excel" in segment_name.lower():
             type = "Singles"
         elif "solo" in segment_name.lower() or "shadow" in segment_name.lower():
             type = "Solo Dance"
@@ -53,6 +211,8 @@ class DatabaseLoader:
             type = "Showcase"
         elif "team" in segment_name.lower():
             type="Synchronized"
+        elif "choreographic excercise" in segment_name.lower():
+            type="Theater On Ice"
 
         existing = self.session.query(DisciplineType).filter_by(name=type).first()
         if not existing:

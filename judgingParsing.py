@@ -524,17 +524,31 @@ def extract_skater_element_sections(soup):
     return pairs
 
 
+def ijs_event_label_to_db_segment_name(label: str) -> str:
+    """
+    Normalize an IJS index/cover event label (e.g. ``115_126 Junior Women Grp B / Short Program``)
+    to ``public.segment.name``, using the same rules as ``process_scores_html``.
+    """
+    event_name = (label or "").replace("/", "")
+    event_name = (
+        event_name.replace("/", "")
+        .replace(" ", "_")
+        .replace("__", "_")
+        .replace("-", "_")
+    )
+    event_name = event_name.split("/")[0]
+    event_name = event_name.split(":")[0]
+    return event_name.strip()
+
+
 def process_scores_html(soup, event_regex="", use_gcp=False):
     # Initialize list for storing extracted data
     elements_per_skater = defaultdict(list)
     pcs_per_skater = defaultdict(list)
     skater_details = {}
-    event_name = soup.find_all(class_="catseg")[0].text.replace("/", "")
-    event_name = event_name.replace(
-        "/", "").replace(" ", "_").replace("__", "_").replace("-", "_")
-
-    event_name = event_name.split("/")[0]
-    event_name = event_name.split(":")[0]
+    event_name = ijs_event_label_to_db_segment_name(
+        soup.find_all(class_="catseg")[0].text
+    )
 
     skater_element_pairs = extract_skater_element_sections(soup)
 

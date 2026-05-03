@@ -25,7 +25,7 @@ except ModuleNotFoundError:
         Levels,
     )
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, select, func, and_, or_, case
+from sqlalchemy import create_engine, select, func, and_, or_, case, text
 import math
 import re
 from datetime import datetime
@@ -1734,6 +1734,113 @@ def get_official_appointment_rows(official_id: int):
         rows,
         columns=["appointment_type", "discipline", "level", "achieved_date"],
     )
+
+
+def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFrame:
+    """
+    One row per ``segment_official`` entry for this directory ``official_id``,
+    with competition and segment fields. Rows are ordered by competition (newest first)
+    then segment name and role.
+
+    Returns empty when ``DATABASE_URL`` is not PostgreSQL or the judging tables are
+    unavailable.
+    """
+    cols = [
+        "competition_id",
+        "year",
+        "competition_name",
+        "results_url",
+        "start_date",
+        "end_date",
+        "qualifying",
+        "segment_id",
+        "segment_name",
+        "discipline",
+        "role",
+    ]
+    database_url = _resolve_database_url()
+    if not database_url.startswith("postgresql"):
+        return pd.DataFrame(columns=cols)
+    stmt = text(
+        """
+        SELECT
+            c.id AS competition_id,
+            c.year,
+            c.name AS competition_name,
+            c.results_url,
+            c.start_date,
+            c.end_date,
+            COALESCE(c.qualifying, false) AS qualifying,
+            s.id AS segment_id,
+            s.name AS segment_name,
+            dt.name AS discipline,
+            so.role
+        FROM public.segment_official so
+        INNER JOIN public.segment s ON s.id = so.segment_id
+        INNER JOIN public.competition c ON c.id = s.competition_id
+        LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
+        WHERE so.official_id = :oid
+        ORDER BY
+            COALESCE(c.end_date, c.start_date) DESC NULLS LAST,
+            CASE
+                WHEN c.year ~ '^[0-9]+$' THEN c.year::integer
+                ELSE 0
+            END DESC,
+            c.name ASC,
+            s.name ASC,
+            so.role ASC
+        """
+    )
+    try:
+        with Session(engine) as session:
+            rows = session.execute(stmt, {"oid": int(official_id)}).mappings().all()
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)
+
+
+def get_official_segment_official_competitions(official_id: int) -> pd.DataFrame:
+    """
+    Unique competitions for this official in ``segment_official`` (summary only).
+    Prefer :func:`get_official_segment_official_activity_detail` when segment rows are needed.
+    """
+    detail = get_official_segment_official_activity_detail(official_id)
+    if detail.empty:
+        return pd.DataFrame(
+            columns=[
+                "competition_id",
+                "year",
+                "competition_name",
+                "results_url",
+                "start_date",
+                "end_date",
+                "panel_segment_count",
+                "discipline",
+            ]
+        )
+    def _disciplines_summary(series: pd.Series) -> str:
+        parts = sorted(
+            {str(x).strip() for x in series.dropna() if str(x).strip()},
+            key=str.lower,
+        )
+        return ", ".join(parts)
+
+    summary = (
+        detail.groupby("competition_id", sort=False)
+        .agg(
+            year=("year", "first"),
+            competition_name=("competition_name", "first"),
+            results_url=("results_url", "first"),
+            start_date=("start_date", "first"),
+            end_date=("end_date", "first"),
+            panel_segment_count=("segment_id", "nunique"),
+            discipline=("discipline", _disciplines_summary),
+        )
+        .reset_index()
+    )
+    return summary
 
 
 def _competition_type_group_order_expr():

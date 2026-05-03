@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from sqlalchemy import BigInteger, Boolean, Date, ForeignKeyConstraint, Identity, Integer, Numeric, PrimaryKeyConstraint, String, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKeyConstraint, Identity, Integer, Numeric, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
 import decimal
@@ -29,6 +29,48 @@ class Competition(Base):
     location: Mapped[Optional[str]] = mapped_column(String)
 
     segment: Mapped[List['Segment']] = relationship('Segment', back_populates='competition')
+
+
+class SegmentOfficial(Base):
+    """Officials listed for a segment (IJS results table: Judge 1..n, Referee, TC, TS, …)."""
+
+    __tablename__ = "segment_official"
+    __table_args__ = (
+        ForeignKeyConstraint(["segment_id"], ["segment.id"], name="segment_official_segment_id_fkey", ondelete="CASCADE"),
+        # official_id / appointment_type_id → officials_analysis.* are enforced in PostgreSQL only
+        # (migration 002); they are not ORM ForeignKeys because that schema lives in another Base.
+        UniqueConstraint("segment_id", "role", name="segment_official_segment_role_uniq"),
+        PrimaryKeyConstraint("id", name="segment_official_pkey"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    segment_id: Mapped[int] = mapped_column(Integer)
+    official_name: Mapped[str] = mapped_column(String)
+    official_id: Mapped[Optional[int]] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String)
+    appointment_type_id: Mapped[Optional[int]] = mapped_column(Integer)
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+    segment: Mapped["Segment"] = relationship("Segment", back_populates="segment_official")
+
+
+class OfficialNameAlias(Base):
+    """
+    Protocol / IJS panel name (normalized) → directory ``official_id`` when names differ.
+    Enforced in PostgreSQL; ``official_id`` is not an ORM FK (cross-schema Base).
+    """
+
+    __tablename__ = "official_name_alias"
+    __table_args__ = (
+        UniqueConstraint("alias_normalized", name="official_name_alias_alias_normalized_key"),
+        PrimaryKeyConstraint("id", name="official_name_alias_pkey"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    alias_normalized: Mapped[str] = mapped_column(String)
+    official_id: Mapped[int] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
 class DisciplineType(Base):
@@ -111,6 +153,7 @@ class Segment(Base):
     competition: Mapped['Competition'] = relationship('Competition', back_populates='segment')
     discipline_type: Mapped[Optional['DisciplineType']] = relationship('DisciplineType', back_populates='segment')
     skater_segment: Mapped[List['SkaterSegment']] = relationship('SkaterSegment', back_populates='segment')
+    segment_official: Mapped[List['SegmentOfficial']] = relationship('SegmentOfficial', back_populates='segment')
 
 
 class SkaterSegment(Base):

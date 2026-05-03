@@ -199,6 +199,54 @@ def get_urls_and_names(page_contents):
     names = soup.find_all("td", class_="event tRow bRow")
     return list(dict.fromkeys(links)), names
 
+
+def iter_ijs_index_final_href_and_cover_event(page_contents: str):
+    """
+    For each ``Final`` link on an IJS index.asp, yield ``(href, cover_event_label)``.
+    ``cover_event_label`` is the text of the row's ``<td class="... event ...">`` (short program / free skate).
+    Hrefs are yielded at most once each (document order).
+    """
+    soup = BeautifulSoup(page_contents, "html.parser")
+    seen_href: set[str] = set()
+    for tr in soup.find_all("tr"):
+        final_a = tr.find("a", href=True, string="Final")
+        if not final_a:
+            continue
+        href = (final_a.get("href") or "").strip()
+        if not href or href in seen_href:
+            continue
+        seen_href.add(href)
+        event_td = tr.find("td", class_=lambda c: bool(c) and "event" in c)
+        cover = event_td.get_text(strip=True) if event_td else ""
+        yield href, cover
+
+
+def parse_ijs_segment_officials(page_contents: str) -> list[dict]:
+    """
+    Parse the Officials table on an IJS cat/seg results page (e.g. CAT001SEG001.html).
+    Returns dicts: ``role`` (e.g. Judge 1, Referee), ``name`` (short name before comma; matches judge table usage).
+    """
+    soup = BeautifulSoup(page_contents, "html.parser")
+    table = soup.find("table", class_=lambda c: c and "officials" in str(c).split())
+    if table is None:
+        return []
+    body = table.find("tbody") or table
+    out = []
+    for tr in body.find_all("tr"):
+        if tr.find("th"):
+            continue
+        tds = tr.find_all("td")
+        if len(tds) < 2:
+            continue
+        role = tds[0].get_text(strip=True)
+        name_cell = tds[1].get_text(strip=True)
+        if not role or not name_cell:
+            continue
+        name_only = name_cell.split(",")[0].strip()
+        name_only = name_only.replace("Ms. ", "").replace("Mr. ", "")
+        out.append({"role": role, "name": name_only})
+    return out
+
 def findJudgesNames(soup):
     alltd = soup.find_all("td")
     judges = []
@@ -551,8 +599,16 @@ def scrape(
         else:
             links, names = get_urls_and_names(page_contents)
             for i in range(len(links)):
+                segment_href = links[i]["href"]
+                if write_to_database:
+                    segment_page_url = f"{base_url.rstrip('/')}/{segment_href}"
+                    segment_official_rows = parse_ijs_segment_officials(
+                        get_page_contents(segment_page_url)
+                    )
+                else:
+                    segment_official_rows = None
                 (resultsLink, judgesNames, event_name) = findResultsDetailUrlAndJudgesNames(
-                    base_url, links[i]["href"]
+                    base_url, segment_href
                 )
                 if specific_exclude and (event_name == specific_exclude or re.match(specific_exclude, event_name)):
                     continue
@@ -580,12 +636,13 @@ def scrape(
                     judge_filter=judge_filter,
                     use_html=use_html
                 )
-                agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database, 
-                                                                        judge_filter, agg_all_element_df, agg_all_pcs_df, 
-                                                                        database_obj, competition_id, proccessed_segments, 
-                                                                        judge_errors, event_details, detailed_rule_errors, 
-                                                                        i, judgesNames, event_name, total_errors, num_starts, 
-                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict)
+                agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database,
+                                                                        judge_filter, agg_all_element_df, agg_all_pcs_df,
+                                                                        database_obj, competition_id, proccessed_segments,
+                                                                        judge_errors, event_details, detailed_rule_errors,
+                                                                        i, judgesNames, event_name, total_errors, num_starts,
+                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict,
+                                                                        segment_official_rows=segment_official_rows)
         # Sort sheets
         del workbook["Sheet"]
         workbook._sheets.sort(key=lambda ws: ws.title)
@@ -617,7 +674,7 @@ def scrape(
     print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
     return df_dict, errors_dict_to_return
 
-def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict):
+def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None):
     if total_errors == None:
                     # This is an event to skip per the regex
         return
@@ -670,6 +727,8 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
                         judgesNames, all_element_dict, segment_id, rule_errors)
         database_obj.insert_pcs_scores(
                         judgesNames, all_pcs_dict, segment_id)
+        if segment_official_rows:
+            database_obj.replace_segment_officials(segment_id, segment_official_rows)
     else:
         print(f"Skipping segment {event_name}")
     return agg_all_element_df,agg_all_pcs_df
