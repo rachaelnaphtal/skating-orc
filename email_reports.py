@@ -114,11 +114,23 @@ def build_report_for_judge(analytics, judge_id: int, competition_id: int):
 
     stats = analytics.calculate_judge_summary_stats(pcs_df, elem_df)
 
-    from models import Judge
+    from models import Judge, Competition
     judge = analytics.session.get(Judge, judge_id)
     judge_name = judge.name if judge else f"Judge #{judge_id}"
+    comp = analytics.session.get(Competition, competition_id)
+    single_comp_display = (
+        f"{comp.name} ({comp.year})" if comp and comp.name else None
+    )
 
-    html_bytes = build_judge_report_html(judge_name, stats, pcs_df, elem_df, seg_df)
+    html_bytes = build_judge_report_html(
+        judge_name,
+        stats,
+        pcs_df,
+        elem_df,
+        seg_df,
+        single_competition_display_name=single_comp_display,
+        filter_summary_lines=None,
+    )
     return html_bytes, judge_name
 
 

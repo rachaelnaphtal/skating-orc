@@ -1,5 +1,56 @@
 import datetime
+import html as html_module
 import pandas as pd
+
+
+REPORT_FEEDBACK_EMAIL = "xyx@email.com"
+
+# Tooltip copy for summary stat cards (embedded as HTML text, escaped).
+TOOLTIP_THROWOUT_RATE = html_module.escape(
+    "This is the percentage of time that you are the high or low of the panel. "
+    "If at least three judges give the same score then it will not count as thrown out.",
+)
+TOOLTIP_ANOMALY_RATE = html_module.escape(
+    "Anomalies are scores that are >=2 away from the panel average for GOEs "
+    "and >=1.5 away from the panel average for PCS.",
+)
+TOOLTIP_RULE_ERROR_RATE = html_module.escape(
+    "Marks flagged as impossible under the published judging guidelines for the segment.",
+)
+TOOLTIP_TOTAL_SCORES = html_module.escape(
+    "Count of individual scores in this report after applied filters.",
+)
+
+
+def _filters_block_html(filter_summary_lines):
+    if not filter_summary_lines:
+        return ""
+    items = "".join(
+        f"<li>{html_module.escape(str(line))}</li>" for line in filter_summary_lines
+    )
+    return (
+        '<div class="filters-used">'
+        '<div class="filters-title">Filters applied (from report generator)</div>'
+        f"<ul>{items}</ul></div>"
+    )
+
+
+def _report_instructions_html():
+    return f"""
+<div class="report-instructions">
+  <h2 class="instructions-heading">How to use this report</h2>
+  <p>This report is designed to give you insights into your judging marks, allowing you to explore how your marks compare to other judges and areas to prioritize in your preparation for future events.</p>
+  <p><strong>We recommend prioritizing analysis as follows:</strong></p>
+  <ul>
+    <li><strong>Rule Error Rate:</strong> These represent marks that are not possible based on the judging guidelines (i.e., NHT -5 for a +COMBO in a Singles Short Program). Minimizing Rule Errors is critical to build trust and confidence in our judging panels.</li>
+    <li><strong>Anomaly Rate:</strong> These represent marks considered potential errors in marking guideline application.</li>
+    <li><strong>Throw Out Rate:</strong> These represent marks that are not considered potential errors but help assess where you may be too lenient or critical in marking guideline applications.</li>
+  </ul>
+  <p>Use the <strong>Element Breakdown</strong> and <strong>Segment Statistics</strong> tabs to identify patterns of Rule Errors, Anomalies and Throw Outs. This will help you narrow your focus for continuous learning.</p>
+  <p>Use the <strong>Element Details</strong> and <strong>PCS Details</strong> tabs to pinpoint exact competitors, elements and components for targeted reflection.</p>
+  <p class="feedback-line">Email <a href="mailto:{html_module.escape(REPORT_FEEDBACK_EMAIL)}">{html_module.escape(REPORT_FEEDBACK_EMAIL)}</a> to ask questions and provide feedback on the usefulness of this report.</p>
+</div>
+"""
 
 
 def _html_table(table_id, headers, rows):
@@ -17,8 +68,16 @@ def _html_table(table_id, headers, rows):
             f'<tbody>{trs}</tbody></table>')
 
 
-def build_judge_report_html(judge_name, report_stats, report_pcs_df,
-                            report_elem_df, report_seg_df):
+def build_judge_report_html(
+    judge_name,
+    report_stats,
+    report_pcs_df,
+    report_elem_df,
+    report_seg_df,
+    *,
+    single_competition_display_name=None,
+    filter_summary_lines=None,
+):
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def get_issue_label(row):
@@ -133,27 +192,62 @@ def build_judge_report_html(judge_name, report_stats, report_pcs_df,
 
     today = datetime.date.today().strftime('%Y-%m-%d')
 
+    if single_competition_display_name:
+        doc_title = f"Judge Report- {single_competition_display_name}"
+        h1_text = doc_title
+    else:
+        doc_title = f"Judge Report – {judge_name}"
+        h1_text = "Judge Report"
+    filters_html = _filters_block_html(filter_summary_lines or [])
+    instructions_html = _report_instructions_html()
+    safe_title = html_module.escape(doc_title)
+    safe_h1 = html_module.escape(h1_text)
+    safe_judge = html_module.escape(judge_name)
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Judge Report – {judge_name}</title>
+<title>{safe_title}</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{font-family:'Segoe UI',Arial,sans-serif;background:#f4f6fb;color:#222;padding:24px}}
   h1{{color:#1a3a5c;margin-bottom:4px}}
-  .meta{{color:#666;font-size:0.9em;margin-bottom:28px}}
+  .meta{{color:#666;font-size:0.9em;margin-bottom:12px}}
+  .filters-used{{background:#fff;border-radius:8px;padding:14px 18px;margin-bottom:20px;
+                 box-shadow:0 1px 4px rgba(0,0,0,0.06);border-left:4px solid #3d6ea8}}
+  .filters-title{{font-weight:700;color:#1a3a5c;margin-bottom:8px;font-size:0.95em}}
+  .filters-used ul{{margin:0 0 0 1.2em;padding:0;color:#333;line-height:1.5}}
+  .report-instructions{{background:#fff;border-radius:8px;padding:20px 22px;margin-bottom:24px;
+                        box-shadow:0 2px 8px rgba(0,0,0,0.06);line-height:1.55;color:#333}}
+  .instructions-heading{{font-size:1.15em;color:#1a3a5c;margin:0 0 12px}}
+  .report-instructions ul{{margin:8px 0 12px 1.2em}}
+  .report-instructions p{{margin:0 0 12px}}
+  .feedback-line{{margin-top:16px;margin-bottom:0;font-size:0.95em}}
+  .feedback-line a{{color:#1a3a5c}}
   .tabs{{display:flex;gap:8px;margin-bottom:0;flex-wrap:wrap}}
   .tab{{padding:10px 22px;border:none;border-radius:6px 6px 0 0;cursor:pointer;
         background:#dde4f0;color:#444;font-size:0.95em;font-weight:600;transition:background 0.2s}}
   .tab.active{{background:#1a3a5c;color:#fff}}
   .panel{{display:none;background:#fff;border-radius:0 8px 8px 8px;padding:24px;
-          box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:32px}}
+          box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:32px;overflow:visible}}
   .panel.active{{display:block}}
-  .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:8px}}
-  .stat-card{{background:#f0f4ff;border-radius:8px;padding:16px 20px;border-left:4px solid #1a3a5c}}
-  .stat-card h3{{font-size:0.8em;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}}
+  .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:8px;overflow:visible}}
+  .stat-card{{background:#f0f4ff;border-radius:8px;padding:16px 20px;border-left:4px solid #1a3a5c;position:relative;overflow:visible;cursor:help}}
+  .stat-card:focus{{outline:2px solid #3d6ea8;outline-offset:2px}}
+  .stat-tip-bubble{{position:absolute;left:0;bottom:calc(100% + 8px);margin:0;
+                  padding:11px 14px;background:#1a3a5c;color:#fff;font-size:0.84rem;
+                  line-height:1.45;font-weight:400;text-transform:none;letter-spacing:normal;
+                  border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.22);
+                  width:max-content;max-width:min(360px,calc(100vw - 48px));
+                  z-index:200;opacity:0;visibility:hidden;pointer-events:none;
+                  transition:opacity 0.12s ease,visibility 0.12s ease}}
+  .stat-card.stat-with-tip:hover .stat-tip-bubble,
+  .stat-card.stat-with-tip:focus .stat-tip-bubble,
+  .stat-card.stat-with-tip:focus-within .stat-tip-bubble{{opacity:1;visibility:visible}}
+  .stat-card h3.stat-label{{font-size:0.8em;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;cursor:inherit}}
+  .stat-tip{{opacity:0.55;font-size:0.82em;font-weight:400}}
   .stat-card .val{{font-size:1.6em;font-weight:700;color:#1a3a5c}}
   .section-title{{font-size:1.05em;font-weight:700;color:#1a3a5c;margin:24px 0 12px}}
   .toolbar{{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px}}
@@ -179,32 +273,34 @@ def build_judge_report_html(judge_name, report_stats, report_pcs_df,
 </style>
 </head>
 <body>
-<h1>⛸ Judge Performance Report</h1>
-<div class="meta">{judge_name} &nbsp;·&nbsp; Generated {today}</div>
+<h1>{safe_h1}</h1>
+<div class="meta">{safe_judge} &nbsp;·&nbsp; Generated {today}</div>
+{filters_html}
 
 <div class="tabs">
   <button class="tab active" onclick="showTab('summary',this)">Summary</button>
   <button class="tab" onclick="showTab('breakdown',this)">Element Breakdown</button>
   <button class="tab" onclick="showTab('segments',this)">Segment Statistics</button>
-  <button class="tab" onclick="showTab('elements',this)">Element Issues</button>
-  <button class="tab" onclick="showTab('pcs',this)">PCS Issues</button>
+  <button class="tab" onclick="showTab('elements',this)">Element Details</button>
+  <button class="tab" onclick="showTab('pcs',this)">PCS Details</button>
 </div>
 
 <!-- SUMMARY -->
 <div id="summary" class="panel active">
+{instructions_html}
   <div class="section-title">PCS Statistics</div>
   <div class="stats-grid">
-    <div class="stat-card"><h3>Total PCS Scores</h3><div class="val">{report_stats['pcs_total_scores']}</div></div>
-    <div class="stat-card"><h3>Throwout Rate</h3><div class="val">{report_stats['pcs_throwout_rate']:.1f}%</div></div>
-    <div class="stat-card"><h3>Anomaly Rate</h3><div class="val">{report_stats['pcs_anomaly_rate']:.1f}%</div></div>
-    <div class="stat-card"><h3>Rule Error Rate</h3><div class="val">{report_stats['pcs_rule_error_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_TOTAL_SCORES}</p><h3 class="stat-label">Total PCS Scores<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['pcs_total_scores']}</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_THROWOUT_RATE}</p><h3 class="stat-label">Throwout Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['pcs_throwout_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_ANOMALY_RATE}</p><h3 class="stat-label">Anomaly Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['pcs_anomaly_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_RULE_ERROR_RATE}</p><h3 class="stat-label">Rule Error Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['pcs_rule_error_rate']:.1f}%</div></div>
   </div>
   <div class="section-title">Element Statistics</div>
   <div class="stats-grid">
-    <div class="stat-card"><h3>Total Element Scores</h3><div class="val">{report_stats['element_total_scores']}</div></div>
-    <div class="stat-card"><h3>Throwout Rate</h3><div class="val">{report_stats['element_throwout_rate']:.1f}%</div></div>
-    <div class="stat-card"><h3>Anomaly Rate</h3><div class="val">{report_stats['element_anomaly_rate']:.1f}%</div></div>
-    <div class="stat-card"><h3>Rule Error Rate</h3><div class="val">{report_stats['element_rule_error_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_TOTAL_SCORES}</p><h3 class="stat-label">Total Element Scores<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['element_total_scores']}</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_THROWOUT_RATE}</p><h3 class="stat-label">Throwout Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['element_throwout_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_ANOMALY_RATE}</p><h3 class="stat-label">Anomaly Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['element_anomaly_rate']:.1f}%</div></div>
+    <div class="stat-card stat-with-tip" tabindex="0"><p class="stat-tip-bubble" role="tooltip">{TOOLTIP_RULE_ERROR_RATE}</p><h3 class="stat-label">Rule Error Rate<span class="stat-tip" aria-hidden="true"> ⓘ</span></h3><div class="val">{report_stats['element_rule_error_rate']:.1f}%</div></div>
   </div>
 </div>
 
@@ -236,10 +332,10 @@ def build_judge_report_html(judge_name, report_stats, report_pcs_df,
   {_html_table('seg-table', seg_headers, seg_rows)}
 </div>
 
-<!-- ELEMENT ISSUES -->
+<!-- ELEMENT DETAILS -->
 <div id="elements" class="panel">
   <div class="toolbar">
-    <input class="search-box" type="text" id="elem-search" placeholder="Search element issues..."
+    <input class="search-box" type="text" id="elem-search" placeholder="Search element details..."
            oninput="applyIssueFilter('elem-table','elem-search','elem-chk')">
     <div class="filter-group">
       <label><input type="checkbox" id="elem-chk-to" checked onchange="applyIssueFilter('elem-table','elem-search','elem-chk')"> Thrown Out</label>
@@ -250,10 +346,10 @@ def build_judge_report_html(judge_name, report_stats, report_pcs_df,
   {_html_table('elem-table', elem_headers, elem_rows)}
 </div>
 
-<!-- PCS ISSUES -->
+<!-- PCS DETAILS -->
 <div id="pcs" class="panel">
   <div class="toolbar">
-    <input class="search-box" type="text" id="pcs-search" placeholder="Search PCS issues..."
+    <input class="search-box" type="text" id="pcs-search" placeholder="Search PCS details..."
            oninput="applyIssueFilter('pcs-table','pcs-search','pcs-chk')">
     <div class="filter-group">
       <label><input type="checkbox" id="pcs-chk-to" checked onchange="applyIssueFilter('pcs-table','pcs-search','pcs-chk')"> Thrown Out</label>

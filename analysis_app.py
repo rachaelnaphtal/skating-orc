@@ -223,7 +223,7 @@ def judge_performance_heatmap():
             color_continuous_scale='Reds')
 
         fig.update_layout(height=max(400, len(heatmap_df_sorted) * 25))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Show data table
         st.subheader("Judge Performance Data")
@@ -233,7 +233,7 @@ def judge_performance_heatmap():
         display_df.columns = [
             'Judge', metric_names[metric], 'Total Scores'
         ]
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
     else:  # Judge vs Competition
         # Get heatmap data for judge vs competition
@@ -277,7 +277,7 @@ def judge_performance_heatmap():
                           height=max(400,
                                      len(pivot_df.index) * 25))
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Show raw data
         st.subheader("Raw Data")
@@ -287,7 +287,7 @@ def judge_performance_heatmap():
         display_df.columns = [
             'Judge', 'Competition', metric_names[metric], 'Total Scores'
         ]
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
 
 def temporal_trend_analysis():
@@ -412,7 +412,7 @@ def temporal_trend_analysis():
                             line=dict(dash='dash', color='red'))
 
         fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Show detailed data
         st.subheader("Detailed Trends Data")
@@ -424,7 +424,7 @@ def temporal_trend_analysis():
             'Year', metric_names[metric], 'Total Scores', 'PCS Scores',
             'Element Scores'
         ]
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
     elif analysis_type == "Overall System Trends":
         # Get system-wide temporal trends
@@ -484,7 +484,7 @@ def temporal_trend_analysis():
             yaxis_title=metric_names[metric],
             height=500)
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # System statistics
         st.subheader("System Statistics")
@@ -523,7 +523,7 @@ def temporal_trend_analysis():
                 f'Median {metric_names[metric]}', 'Std Dev'
         ]:
             display_df[col] = display_df[col].round(2)
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
     else:  # Judge Consistency Ranking
         # Get all judges and their consistency metrics
@@ -593,7 +593,7 @@ def temporal_trend_analysis():
             color_continuous_scale='Greens')
 
         fig.update_layout(height=max(400, len(consistency_df.head(20)) * 25))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Show consistency ranking table
         st.subheader("Judge Consistency Rankings")
@@ -609,7 +609,7 @@ def temporal_trend_analysis():
             'Consistency Score (%)'].round(1)
         display_df['Coeff. of Variation (%)'] = display_df[
             'Coeff. of Variation (%)'].round(1)
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
 
 def statistical_bias_detection():
@@ -861,7 +861,7 @@ def statistical_bias_detection():
                 False: 'green'
             })
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # Detailed results table
         st.subheader("Detailed Bias Analysis")
@@ -883,7 +883,7 @@ def statistical_bias_detection():
         ]:
             display_df[col] = display_df[col].round(1)
 
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
     else:  # Judge Comparison
         # Select two judges for comparison
@@ -1106,7 +1106,7 @@ if page == "Individual Judge Analysis":
                     'Rule Error Rate (%)'
             ]:
                 display_summary[col] = display_summary[col].round(1)
-            st.dataframe(display_summary, use_container_width=True)
+            st.dataframe(display_summary, width="stretch")
 
             # Detailed element scores with issues
             st.subheader("Element Scores with Issues")
@@ -1158,7 +1158,7 @@ if page == "Individual Judge Analysis":
                 ]].copy()
 
                 st.dataframe(display_df.drop('competition_url', axis=1),
-                             use_container_width=True)
+                             width="stretch")
 
                 # Show competition links separately
                 if 'competition_url' in problem_elements.columns and not problem_elements['competition_url'].isna().all():
@@ -1233,7 +1233,7 @@ if page == "Individual Judge Analysis":
                     'Rule Error Rate (%)'
             ]:
                 display_summary[col] = display_summary[col].round(1)
-            st.dataframe(display_summary, use_container_width=True)
+            st.dataframe(display_summary, width="stretch")
 
             # Detailed PCS scores with issues
             st.subheader("PCS Scores with Issues")
@@ -1285,7 +1285,7 @@ if page == "Individual Judge Analysis":
                 ]].copy()
 
                 st.dataframe(display_df_pcs.drop('competition_url', axis=1),
-                             use_container_width=True)
+                             width="stretch")
 
                 # Show competition links separately
                 if 'competition_url' in problem_pcs.columns and not problem_pcs['competition_url'].isna().all():
@@ -1361,7 +1361,7 @@ if page == "Individual Judge Analysis":
 
             segment_display_with_totals = pd.concat([segment_display_cols, totals_row], ignore_index=True)
 
-            st.dataframe(segment_display_with_totals, use_container_width=True)
+            st.dataframe(segment_display_with_totals, width="stretch")
         else:
             st.info("No segment data found for selected filters")
 
@@ -1374,12 +1374,57 @@ if page == "Individual Judge Analysis":
         )
 
         safe_name = selected_judge_display.replace(' ', '_').replace('/', '_')
-        html_bytes = build_judge_report_html(selected_judge_display, stats,
-                                             pcs_df, element_df, segment_df)
+        single_competition_display_name = None
+        report_filter_lines = None
+        if competition_ids is not None and len(competition_ids) == 1:
+            _cid = competition_ids[0]
+            for comp_id, name, year in judge_competitions:
+                if comp_id == _cid:
+                    single_competition_display_name = f"{name} ({year})"
+                    break
+        else:
+            report_filter_lines = []
+            if year_filter is not None:
+                report_filter_lines.append(f"Year: {year_filter}")
+            else:
+                report_filter_lines.append("Year: All years")
+            if selected_competitions:
+                report_filter_lines.append(
+                    "Competitions: " + ", ".join(selected_competitions)
+                )
+            else:
+                report_filter_lines.append(
+                    "Competitions: All (this judge's events)"
+                )
+            if selected_disciplines:
+                report_filter_lines.append(
+                    "Discipline types: " + ", ".join(selected_disciplines)
+                )
+            else:
+                report_filter_lines.append("Discipline types: All")
+
+        html_bytes = build_judge_report_html(
+            selected_judge_display,
+            stats,
+            pcs_df,
+            element_df,
+            segment_df,
+            single_competition_display_name=single_competition_display_name,
+            filter_summary_lines=report_filter_lines,
+        )
+        _dn_comp = ""
+        if single_competition_display_name:
+            _dn_comp = (
+                "_"
+                + single_competition_display_name.replace(" ", "_")
+                .replace("/", "_")
+                .replace("(", "")
+                .replace(")", "")
+            )
         st.download_button(
             label="Download Interactive HTML Report",
             data=html_bytes,
-            file_name=f"judge_report_{safe_name}.html",
+            file_name=f"judge_report_{safe_name}{_dn_comp}.html",
             mime="text/html",
         )
 
@@ -1459,7 +1504,7 @@ elif page == "Rule Errors Analysis":
         judge_summary_display = judge_summary[['judge_name', 'total_rule_errors', 'pcs_errors', 'element_errors']].copy()
         judge_summary_display.columns = ['Judge', 'Total Rule Errors', 'PCS Errors', 'Element Errors']
 
-        st.dataframe(judge_summary_display, use_container_width=True)
+        st.dataframe(judge_summary_display, width="stretch")
 
         # Detailed rule errors table
         st.subheader("Detailed Rule Errors")
@@ -1477,7 +1522,7 @@ elif page == "Rule Errors Analysis":
             'Judge Score', 'Panel Average', 'Deviation'
         ]
 
-        st.dataframe(display_df.drop('Competition URL', axis=1), use_container_width=True)
+        st.dataframe(display_df.drop('Competition URL', axis=1), width="stretch")
 
         # Show competition links
         if 'Competition URL' in display_df.columns and not display_df['Competition URL'].isna().all():
@@ -1559,7 +1604,7 @@ elif page == "Competition Analysis":
             # Display total anomalies grid
             st.subheader("Total Anomalies by Judge and Segment")
             if not anomalies_grid.empty:
-                st.dataframe(anomalies_grid_display, use_container_width=True)
+                st.dataframe(anomalies_grid_display, width="stretch")
 
                 # Add judge totals for total anomalies
                 st.subheader("Judge Totals - Total Anomalies")
@@ -1568,14 +1613,14 @@ elif page == "Competition Analysis":
                     'Judge': judge_totals_anomalies.index,
                     'Total Anomalies': judge_totals_anomalies.values
                 })
-                st.dataframe(judge_totals_df_anomalies, use_container_width=True)
+                st.dataframe(judge_totals_df_anomalies, width="stretch")
             else:
                 st.info("No anomalies data available for grid display")
 
             # Display excess anomalies grid
             st.subheader("Excess Anomalies by Judge and Segment")
             if not excess_grid.empty:
-                st.dataframe(excess_grid_display, use_container_width=True)
+                st.dataframe(excess_grid_display, width="stretch")
 
                 # Add judge totals for excess anomalies
                 st.subheader("Judge Totals - Excess Anomalies")
@@ -1584,7 +1629,7 @@ elif page == "Competition Analysis":
                     'Judge': judge_totals_excess.index,
                     'Total Excess Anomalies': judge_totals_excess.values
                 })
-                st.dataframe(judge_totals_df_excess, use_container_width=True)
+                st.dataframe(judge_totals_df_excess, width="stretch")
             else:
                 st.info("No excess anomalies data available for grid display")
 
@@ -1618,7 +1663,7 @@ elif page == "Competition Analysis":
                     'Judge': rule_error_judge_summary.index,
                     'Rule Errors': rule_error_judge_summary.values
                 })
-                st.dataframe(judge_rule_error_df, use_container_width=True)
+                st.dataframe(judge_rule_error_df, width="stretch")
 
                 # Detailed rule errors table
                 st.subheader("Detailed Rule Errors")
@@ -1649,7 +1694,7 @@ elif page == "Competition Analysis":
                     'Element Name', 'Element Type', 'Judge Score', 'Panel Average', 'Deviation'
                 ]
 
-                st.dataframe(display_rule_errors, use_container_width=True)
+                st.dataframe(display_rule_errors, width="stretch")
             else:
                 st.info("No rule errors found for this competition")
 
@@ -1728,7 +1773,7 @@ elif page == "Competition Analysis":
                             'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
                         ]
 
-                        st.dataframe(display_pcs_anomalies, use_container_width=True)
+                        st.dataframe(display_pcs_anomalies, width="stretch")
                     else:
                         st.info("No PCS anomalies match the selected filters")
 
@@ -1761,7 +1806,7 @@ elif page == "Competition Analysis":
                             'Element Type', 'Judge Score', 'Panel Average', 'Deviation', 'Issue Type'
                         ]
 
-                        st.dataframe(display_element_anomalies, use_container_width=True)
+                        st.dataframe(display_element_anomalies, width="stretch")
                     else:
                         st.info("No element anomalies match the selected filters")
             else:
@@ -1882,7 +1927,7 @@ elif page == "Competition Analysis":
                 if summary_rows:
                     summary_df = pd.DataFrame(summary_rows)
                     summary_df = summary_df.sort_values('PCS Throw %', ascending=False)
-                    st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(summary_df, width="stretch")
                     
                     # Per-segment breakdown toggle
                     if st.checkbox("Show per-segment breakdown"):
@@ -1970,7 +2015,7 @@ elif page == "Competition Analysis":
                                 
                                 if seg_rows:
                                     seg_df = pd.DataFrame(seg_rows)
-                                    st.dataframe(seg_df, use_container_width=True)
+                                    st.dataframe(seg_df, width="stretch")
                 else:
                     st.info("No judge performance data available for this competition")
             else:
@@ -2106,7 +2151,7 @@ elif page == "Multi-Judge Comparison":
                 })
 
             summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True)
+            st.dataframe(summary_df, width="stretch")
 
             # Comparison tables
             if not pcs_comparison_df.empty:
@@ -2151,7 +2196,7 @@ elif page == "Multi-Judge Comparison":
                         'Rule Error Rate (%)'
                 ]:
                     display_pcs[col] = display_pcs[col].round(1)
-                st.dataframe(display_pcs, use_container_width=True)
+                st.dataframe(display_pcs, width="stretch")
 
             if not element_comparison_df.empty:
                 st.subheader("Element Comparison Analysis")
@@ -2195,7 +2240,7 @@ elif page == "Multi-Judge Comparison":
                         'Rule Error Rate (%)'
                 ]:
                     display_elements[col] = display_elements[col].round(1)
-                st.dataframe(display_elements, use_container_width=True)
+                st.dataframe(display_elements, width="stretch")
 
             # Export functionality
             st.subheader("Export Data")
@@ -2374,7 +2419,7 @@ elif page == "Admin Tools":
     else:
         st.write(f"**{len(email_list_df)} judges** in email list:")
         st.dataframe(email_list_df.rename(columns={"judge_name": "Name", "email": "Email"}),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         with st.expander("Remove an entry"):
             del_name = st.selectbox("Select judge to remove",
@@ -2436,14 +2481,14 @@ elif page == "Admin Tools":
                 st.write(f"**Will send ({len(matched)})**")
                 if matched:
                     st.dataframe(pd.DataFrame(matched)[["Judge", "Email"]],
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
                 else:
                     st.info("None matched — upload an email list above first.")
             with col_u:
                 st.write(f"**No email — skip ({len(unmatched)})**")
                 if unmatched:
                     st.dataframe(pd.DataFrame(unmatched),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
                 else:
                     st.info("All judges matched!")
 
