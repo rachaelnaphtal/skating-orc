@@ -29,6 +29,9 @@ from load_activity_data import (
     get_official_segment_official_activity_detail,
     get_competitions_for_report_dropdown,
     get_competition_assignment_rows,
+    get_nqs_detailed_activity_report_df,
+    activity_database_is_postgresql,
+    NQS_REPORT_LEVEL_FILTER_BY_LABEL,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, or_, select
@@ -552,6 +555,7 @@ REPORT_NUMBER_OF_ASSIGNMENTS = "Number of assignments"
 REPORT_REFEREE_SERVICE = "Referee service (by competition type)"
 REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
 REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
+REPORT_NQS_DETAILED = "NQS detailed activity"
 
 report_mode = st.radio(
     "Report",
@@ -562,12 +566,17 @@ report_mode = st.radio(
         REPORT_REFEREE_SERVICE,
         REPORT_PERSON_ASSIGNMENTS,
         REPORT_COMPETITION_ASSIGNMENTS,
+        REPORT_NQS_DETAILED,
     ],
     horizontal=True,
 )
 
 active_appointments_only = True
-if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
+if report_mode in (
+    REPORT_CHAMPIONSHIPS_DETAILED,
+    REPORT_SECTIONALS_DETAILED,
+    REPORT_NQS_DETAILED,
+):
     active_appointments_only = st.checkbox(
         "Active appointments only",
         value=True,
@@ -701,6 +710,21 @@ def load_disciplines_for_appt_type(
         result = {NO_DISCIPLINE_LABEL: None, **result}
 
     return result
+
+
+@st.cache_data
+def load_nqs_activity_table(
+    official_type: str,
+    discipline: str,
+    active_only: bool,
+    directory_level_ids: tuple[int, ...],
+):
+    return get_nqs_detailed_activity_report_df(
+        official_type,
+        discipline,
+        active_appointments_only=active_only,
+        directory_level_ids=directory_level_ids,
+    )
 
 
 # ---- MAIN PAGE FILTERS (Championships / sectionals activity reports) ----
@@ -1334,6 +1358,76 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
                     "Suffix (lower) means the assignment is lower-levels only.",
                 ),
             },
+        )
+    st.stop()
+
+
+if report_mode == REPORT_NQS_DETAILED:
+    if not activity_database_is_postgresql():
+        st.info(
+            "NQS panel activity needs PostgreSQL with judging ``public`` tables and a "
+            "``competition.nqs`` column (see migration ``005_public_competition_nqs.sql``)."
+        )
+        st.stop()
+    nqs_official_type = st.selectbox(
+        "Official type",
+        options=[
+            "Judge",
+            "Referee",
+            "Technical Controller",
+            "Technical Specialist",
+        ],
+        key="nqs_official_type",
+    )
+    if nqs_official_type in ("Judge", "Referee"):
+        nqs_discipline = st.selectbox(
+            "Discipline",
+            options=["Singles/Pairs", "Dance"],
+            key="nqs_discipline_jr",
+        )
+    else:
+        nqs_discipline = st.selectbox(
+            "Discipline",
+            options=["Singles", "Pairs", "Dance"],
+            key="nqs_discipline_tc_ts",
+        )
+    nqs_level_labels = st.multiselect(
+        "Official level (directory)",
+        options=list(NQS_REPORT_LEVEL_FILTER_BY_LABEL.keys()),
+        default=list(NQS_REPORT_LEVEL_FILTER_BY_LABEL.keys()),
+        key="nqs_level_filter",
+    )
+    if not nqs_level_labels:
+        st.info("Select at least one appointment level.")
+        st.stop()
+    nqs_directory_level_ids = tuple(
+        sorted(NQS_REPORT_LEVEL_FILTER_BY_LABEL[lbl] for lbl in nqs_level_labels)
+    )
+    nqs_table = load_nqs_activity_table(
+        nqs_official_type,
+        nqs_discipline,
+        active_appointments_only,
+        nqs_directory_level_ids,
+    )
+    if nqs_table.empty:
+        st.info(
+            "No officials match the directory filters, the appointment type was not found, "
+            "or NQS query failed (e.g. missing ``nqs`` column)."
+        )
+    else:
+        nqs_col_cfg = {
+            "Name": st.column_config.TextColumn("Name", width="large"),
+            "Level": st.column_config.TextColumn("Level", width="medium"),
+            "Total": st.column_config.NumberColumn("Total", format="%d"),
+        }
+        for _c in nqs_table.columns:
+            if _c not in ("Name", "Level", "Total"):
+                nqs_col_cfg[_c] = st.column_config.NumberColumn(str(_c), format="%d")
+        st.dataframe(
+            nqs_table,
+            width="stretch",
+            hide_index=True,
+            column_config=nqs_col_cfg,
         )
     st.stop()
 

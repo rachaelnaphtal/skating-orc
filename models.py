@@ -18,6 +18,7 @@ class Competition(Base):
     id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=32767, cycle=False, cache=1), primary_key=True)
     year: Mapped[str] = mapped_column(String)
     qualifying: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    nqs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     results_url: Mapped[str] = mapped_column(String)
     name: Mapped[str] = mapped_column(String)
     singles: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
