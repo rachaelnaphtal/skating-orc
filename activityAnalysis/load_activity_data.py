@@ -1680,6 +1680,17 @@ def get_officials_with_assignments():
     return pd.DataFrame(rows, columns=["official_id", "full_name"])
 
 
+def get_all_directory_officials():
+    """All officials in the directory (id + display name)."""
+    with Session(engine) as session:
+        stmt = (
+            select(Officials.id, Officials.full_name)
+            .order_by(Officials.full_name.asc().nulls_last(), Officials.id.asc())
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(rows, columns=["official_id", "full_name"])
+
+
 def get_official_assignment_detail_rows(official_id: int):
     """
     One row per assignment for ``official_id`` with fields needed for display/sort.

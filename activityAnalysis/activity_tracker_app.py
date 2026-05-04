@@ -23,7 +23,7 @@ from load_activity_data import (
     get_referee_competition_count_for_types,
     get_referee_discipline_options_for_comp_group,
     get_referee_yearly_activity_report,
-    get_officials_with_assignments,
+    get_all_directory_officials,
     get_official_assignment_detail_rows,
     get_official_appointment_rows,
     get_official_segment_official_activity_detail,
@@ -180,13 +180,11 @@ def _render_additional_segment_activity_slice(
     panel_detail: pd.DataFrame,
     *,
     section_subheader: str,
-    empty_message: str,
     expander_widget_key: str,
 ) -> None:
     """Per-competition summary + segment rows for one qualifying slice of protocol activity."""
     st.subheader(section_subheader)
     if panel_detail.empty:
-        st.info(empty_message)
         return
     summary = (
         panel_detail.groupby("competition_id", sort=False)
@@ -340,9 +338,7 @@ def _assignment_lower_only_flag(val) -> bool:
 def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
     """One row per competition; assignments aggregated; sort year then event category."""
     if detail_df.empty:
-        return pd.DataFrame(
-            columns=["competition_id", "Competition", "Assignments"]
-        )
+        return pd.DataFrame(columns=["Competition", "Assignments"])
     d = detail_df.copy()
     d["label"] = d.apply(
         lambda r: assignment_label_for_tables(
@@ -379,39 +375,7 @@ def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
         ascending=[False, True, True, True],
         kind="mergesort",
     )
-    return out[
-        ["competition_id", "Competition", "Assignments"]
-    ].reset_index(drop=True)
-
-
-def merge_panel_roles_into_person_assignment_summary(
-    display_assign: pd.DataFrame, panel_detail: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Join IJS protocol roles (``segment_official``) onto the per-competition assignments
-    summary, one comma-separated ``Panel roles`` column per competition.
-    """
-    if display_assign.empty:
-        return pd.DataFrame(columns=["Competition", "Assignments", "Panel roles"])
-    out = display_assign.copy()
-    if panel_detail.empty or "competition_id" not in panel_detail.columns:
-        out["Panel roles"] = ""
-    else:
-        role_map: dict[int, str] = {}
-        for cid, g in panel_detail.groupby("competition_id", sort=False):
-            labels: set[str] = set()
-            for raw in g["role"]:
-                if pd.isna(raw):
-                    continue
-                lab = _panel_role_summary_label(str(raw))
-                if lab:
-                    labels.add(lab)
-            if labels:
-                role_map[int(cid)] = ", ".join(sorted(labels, key=str.lower))
-        out["Panel roles"] = (
-            out["competition_id"].map(lambda x: role_map.get(int(x), "")).fillna("")
-        )
-    return out[["Competition", "Assignments", "Panel roles"]].reset_index(drop=True)
+    return out[["Competition", "Assignments"]].reset_index(drop=True)
 
 
 def build_competition_assignments_display(roster_df: pd.DataFrame) -> pd.DataFrame:
@@ -1006,8 +970,8 @@ def load_referee_yearly_report(
 
 
 @st.cache_data
-def load_officials_with_assignments():
-    return get_officials_with_assignments()
+def load_all_directory_officials():
+    return get_all_directory_officials()
 
 
 @st.cache_data
@@ -1230,27 +1194,36 @@ if report_mode == REPORT_REFEREE_SERVICE:
 
 
 if report_mode == REPORT_PERSON_ASSIGNMENTS:
-    officials_df = load_officials_with_assignments()
+    officials_df = load_all_directory_officials()
     if officials_df.empty:
-        st.info("No officials with assignments were found.")
+        st.info("No officials were found in the directory.")
         st.stop()
     id_to_name = dict(
         zip(officials_df["official_id"].astype(int), officials_df["full_name"])
     )
-    oid_list = sorted(id_to_name.keys(), key=lambda i: (str(id_to_name[i]).lower(), i))
+
+    def _per_person_sort_key(oid: int):
+        v = id_to_name.get(int(oid))
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            label = ""
+        else:
+            label = str(v).strip().lower()
+        return (label if label else "\uffff", int(oid))
+
+    oid_list = sorted(id_to_name.keys(), key=_per_person_sort_key)
     pick_oid = st.selectbox(
         "Official",
         options=oid_list,
-        format_func=lambda i: id_to_name.get(int(i), str(i)),
+        format_func=lambda i: (
+            (id_to_name.get(int(i)) or "").strip()
+            or f"Official id {int(i)}"
+        ),
         key="per_person_official_select",
     )
     pick_oid = int(pick_oid)
     detail = load_person_assignment_rows(pick_oid)
     panel_detail = load_person_segment_official_activity_detail(pick_oid)
     display_assign = build_person_assignments_display(detail)
-    display_assign = merge_panel_roles_into_person_assignment_summary(
-        display_assign, panel_detail
-    )
     st.subheader("Assignments")
     if display_assign.empty:
         st.info("No assignments for this official.")
@@ -1273,13 +1246,6 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                     help="Full appointment type names; discipline omitted when not applicable. "
                     "Suffix (lower) means the assignment is lower-levels only.",
                 ),
-                "Panel roles": st.column_config.TextColumn(
-                    "Panel roles (IJS)",
-                    width="medium",
-                    help="Roles from IJS protocol panels (``public.segment_official``) "
-                    "where this official is listed for that competition. "
-                    "Distinct from USFS directory assignments in the previous column.",
-                ),
             },
         )
     appts = load_person_appointment_rows(pick_oid)
@@ -1299,26 +1265,22 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         "full record of activity; non-qualifying competitions in particular are non-exhaustive."
     )
     if panel_detail.empty:
-        st.info(
-            "No protocol/panel rows for this official, or the database is not PostgreSQL "
-            "with judging ``public`` tables available."
-        )
+        qual_detail = panel_detail
+        nonqual_detail = panel_detail
     else:
         is_qualifying = panel_detail["qualifying"].fillna(False).astype(bool)
         qual_detail = panel_detail[is_qualifying]
         nonqual_detail = panel_detail[~is_qualifying]
-        _render_additional_segment_activity_slice(
-            qual_detail,
-            section_subheader="Additional Qualifying Activity",
-            empty_message="No qualifying protocol activity for this official.",
-            expander_widget_key="person_seg_official_qual_exp",
-        )
-        _render_additional_segment_activity_slice(
-            nonqual_detail,
-            section_subheader="Additional Nonqualifying Activity",
-            empty_message="No non-qualifying protocol activity for this official.",
-            expander_widget_key="person_seg_official_nonqual_exp",
-        )
+    _render_additional_segment_activity_slice(
+        qual_detail,
+        section_subheader="Additional Qualifying Activity",
+        expander_widget_key="person_seg_official_qual_exp",
+    )
+    _render_additional_segment_activity_slice(
+        nonqual_detail,
+        section_subheader="Additional Nonqualifying Activity",
+        expander_widget_key="person_seg_official_nonqual_exp",
+    )
     st.stop()
 
 
@@ -1408,6 +1370,11 @@ if report_mode == REPORT_NQS_DETAILED:
         nqs_discipline,
         active_appointments_only,
         nqs_directory_level_ids,
+    )
+    st.caption(
+        "Note: If qualifying and non-qualifying portions of an NQS meet were combined into one "
+        "IJS competition (single ``public.competition`` row marked ``nqs``), panel activity from "
+        "the non-qualifying segments may be included in these counts as well."
     )
     if nqs_table.empty:
         st.info(
