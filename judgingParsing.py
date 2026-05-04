@@ -737,6 +737,9 @@ def extract_judge_scores(
         )
     elif use_html:
         page_contents = get_page_contents(url)
+        if not page_contents:
+            print(f"WARNING: Empty or failed HTML fetch for {url!r}")
+            return ("", None, None, None, [], [], [])
         soup = BeautifulSoup(page_contents, "html.parser")
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = process_scores_html(
             soup=soup, event_regex=event_regex, use_gcp=use_gcp

@@ -149,6 +149,21 @@ def get_page_contents(url):
     return None
 
 #### FSM parsing ####
+def _find_judges_scores_pdf_anchor(td):
+    """Swiss Timing FSM: anchor text is often split across nodes; avoid ``string=`` matcher."""
+    if td is None:
+        return None
+    for a in td.find_all("a", href=True):
+        if "Judges Scores" in a.get_text():
+            return a
+    return None
+
+
+def _role_is_panel_judge(role_label: str) -> bool:
+    r = (role_label or "").strip().lower()
+    return bool(r) and r.startswith("judge")
+
+
 def get_fsm_judges_and_results_links(page_contents, base_url):
     soup = BeautifulSoup(page_contents, "html.parser")
 
@@ -158,38 +173,38 @@ def get_fsm_judges_and_results_links(page_contents, base_url):
         if len(tds) != 5:
             continue
 
-        scores_link = tds[4].find("a", string=lambda s: s and "Judges Scores" in s)
-        panel_link = tds[2].find("a")
+        scores_link = _find_judges_scores_pdf_anchor(tds[4])
+        panel_link = tds[2].find("a", href=True)
 
         if not scores_link or not panel_link:
             continue
 
+        panel_url = urljoin(base_url, panel_link["href"])
+        panel_html = get_page_contents(panel_url)
+        segment_official_rows = (
+            parse_ijs_segment_officials(panel_html) if panel_html else []
+        )
+        judges = [
+            r["name"] for r in segment_official_rows if _role_is_panel_judge(r["role"])
+        ]
+
         panels.append({
-            "judges": parse_judges_from_panel(urljoin(base_url, panel_link["href"])),
+            "judges": judges,
             "scores_url": urljoin(base_url, scores_link["href"]),
+            "segment_official_rows": segment_official_rows,
+            "panel_url": panel_url,
         })
 
     return panels
 
+
 def parse_judges_from_panel(panel_url):
-    panel_html = requests.get(panel_url).text
-    soup = BeautifulSoup(panel_html, "html.parser")
-
-    judges = []
-
-    for tr in soup.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) < 2:
-            continue
-
-        role = tds[0].get_text(strip=True)
-        name = tds[1].get_text(strip=True).replace("Ms. ", "").replace("Mr. ", "")
-
-        # Judges are usually labeled "Judge 1", "Judge 2", etc.
-        if role.startswith("Judge"):
-            judges.append(name)
-
-    return judges
+    """Judge names only (for PDF deviation logic); uses the same parsing as segment officials."""
+    panel_html = get_page_contents(panel_url)
+    if not panel_html:
+        return []
+    rows = parse_ijs_segment_officials(panel_html)
+    return [r["name"] for r in rows if _role_is_panel_judge(r["role"])]
 
 #### IJS companion parsing
 def get_urls_and_names(page_contents):
@@ -221,31 +236,147 @@ def iter_ijs_index_final_href_and_cover_event(page_contents: str):
         yield href, cover
 
 
-def parse_ijs_segment_officials(page_contents: str) -> list[dict]:
+def iter_fsm_leaderboard_panel_href_and_cover_event(page_contents: str):
     """
-    Parse the Officials table on an IJS cat/seg results page (e.g. CAT001SEG001.html).
-    Returns dicts: ``role`` (e.g. Judge 1, Referee), ``name`` (short name before comma; matches judge table usage).
+    USFS / Swiss Timing leaderboard ``index.htm``: rows with ``Panel of Judges`` and
+    ``Judges Scores (pdf)``. Yields ``(panel_of_href, cover_label)`` where
+    ``cover_label`` is ``"{category} - {segment}"`` (e.g. Championship Men - Short Program)
+    for alignment with ``ijs_event_label_to_db_segment_name``.
     """
     soup = BeautifulSoup(page_contents, "html.parser")
-    table = soup.find("table", class_=lambda c: c and "officials" in str(c).split())
-    if table is None:
-        return []
-    body = table.find("tbody") or table
-    out = []
-    for tr in body.find_all("tr"):
-        if tr.find("th"):
-            continue
+    current_category = ""
+    seen_href: set[str] = set()
+    for tr in soup.find_all("tr"):
         tds = tr.find_all("td")
-        if len(tds) < 2:
+        if len(tds) >= 3:
+            ent_a = tds[2].find("a", href=True)
+            if ent_a:
+                ht = (ent_a.get("href") or "").upper()
+                txt = ent_a.get_text(strip=True).lower()
+                if ("CAT" in ht and "EN.HTM" in ht) or "entries" in txt:
+                    cat = tds[0].get_text(strip=True)
+                    if cat:
+                        current_category = cat
+        if len(tds) != 5:
             continue
-        role = tds[0].get_text(strip=True)
-        name_cell = tds[1].get_text(strip=True)
-        if not role or not name_cell:
+        scores_link = _find_judges_scores_pdf_anchor(tds[4])
+        panel_a = tds[2].find("a", href=True)
+        if not scores_link or not panel_a:
             continue
-        name_only = name_cell.split(",")[0].strip()
-        name_only = name_only.replace("Ms. ", "").replace("Mr. ", "")
-        out.append({"role": role, "name": name_only})
+        href = (panel_a.get("href") or "").strip()
+        if not href or href in seen_href:
+            continue
+        ph = href.upper()
+        if not ph.endswith("OF.HTM") and not ph.endswith("OF.HTML"):
+            continue
+        seen_href.add(href)
+        segment_name = tds[1].get_text(strip=True)
+        if current_category and segment_name:
+            cover = f"{current_category} - {segment_name}"
+        else:
+            cover = segment_name or current_category
+        yield href, cover
+
+
+def _parse_fsm_function_name_officials(soup) -> list[dict]:
+    """Swiss Timing / USFS ``Panel of Judges`` pages (Function / Name table)."""
+    out: list[dict] = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        header_cells = rows[0].find_all(["th", "td"])
+        if len(header_cells) < 2:
+            continue
+        h0 = header_cells[0].get_text(strip=True).lower()
+        h1 = header_cells[1].get_text(strip=True).lower()
+        if h0 != "function" or "name" not in h1:
+            continue
+        for tr in rows[1:]:
+            if tr.find("th"):
+                continue
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+            role = tds[0].get_text(strip=True)
+            name_cell = tds[1].get_text(strip=True)
+            if not role or not name_cell:
+                continue
+            name_only = name_cell.split(",")[0].strip()
+            name_only = name_only.replace("Ms. ", "").replace("Mr. ", "")
+            out.append({"role": role, "name": name_only})
+        if out:
+            return out
+    return []
+
+
+def _disambiguate_official_roles(rows: list[dict]) -> list[dict]:
+    """FSM panels may list two ``Technical Specialist`` rows; DB requires unique ``role`` per segment."""
+    seen: dict[str, int] = {}
+    out: list[dict] = []
+    for r in rows:
+        base = (r.get("role") or "").strip()
+        name = r.get("name")
+        n = seen.get(base, 0) + 1
+        seen[base] = n
+        role = f"{base} ({n})" if n > 1 else base
+        out.append({"role": role, "name": name})
     return out
+
+
+def parse_ijs_segment_officials(page_contents: str) -> list[dict]:
+    """
+    Parse officials on a segment page: classic IJS ``table.officials``, or FSM
+    ``Function`` / ``Name`` panel table (e.g. SEG001OF.htm on USFS leaderboard).
+    Returns dicts: ``role`` (e.g. Judge No.1, Referee), ``name`` (short name before comma).
+    """
+    if not page_contents:
+        return []
+    soup = BeautifulSoup(page_contents, "html.parser")
+    table = soup.find("table", class_=lambda c: c and "officials" in str(c).split())
+    if table is not None:
+        body = table.find("tbody") or table
+        out = []
+        for tr in body.find_all("tr"):
+            if tr.find("th"):
+                continue
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+            role = tds[0].get_text(strip=True)
+            name_cell = tds[1].get_text(strip=True)
+            if not role or not name_cell:
+                continue
+            name_only = name_cell.split(",")[0].strip()
+            name_only = name_only.replace("Ms. ", "").replace("Mr. ", "")
+            out.append({"role": role, "name": name_only})
+        if out:
+            return _disambiguate_official_roles(out)
+    return _disambiguate_official_roles(_parse_fsm_function_name_officials(soup))
+
+
+def _classic_segment_official_rows(base_url: str, segment_href: str) -> list[dict]:
+    """
+    Officials for classic ``index.asp`` flow: try the Final results page, then a Swiss Timing
+    style ``*OF.htm`` panel page (e.g. ``SEG012OF.htm`` from ``SEG012.htm``).
+    """
+    base = (base_url or "").rstrip("/")
+    href = (segment_href or "").strip()
+    if not href or not base:
+        return []
+    urls: list[str] = [f"{base}/{href}"]
+    m = re.match(r"(?is)^(.+?)(\.(htm|html))$", href)
+    if m and not m.group(1).upper().endswith("OF"):
+        urls.append(f"{base}/{m.group(1)}OF{m.group(2)}")
+    for u in urls:
+        html = get_page_contents(u)
+        rows = parse_ijs_segment_officials(html or "")
+        if rows:
+            # if u != urls[0]:
+            #     print(f"INFO: Panel officials loaded from {u!r} (OF fallback)")
+            return rows
+    return []
+
 
 def findJudgesNames(soup):
     alltd = soup.find_all("td")
@@ -472,6 +603,9 @@ def make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex):
 def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     url = f"{base_url}/{results_page_link}"
     page_contents = get_page_contents(url)
+    if not page_contents:
+        print(f"WARNING: Empty or failed HTML fetch for Final page {url!r}")
+        return ("", [], "")
     soup = BeautifulSoup(page_contents, "html.parser")
     link = soup.find("a", href=True, string="Judge detail scores")
     judgesNames = findJudgesNames(soup)
@@ -532,6 +666,14 @@ def scrape(
     use_html=True,
     isFSM=False
 ):
+    """
+    When ``write_to_database`` is true, each ``public.segment`` row is named from the score
+    parse only: FSM uses ``process_fsm_scores`` / ``parse_scores`` (PDF header); classic IJS
+    uses ``process_scores_html`` (detail page ``catseg``). Panel officials are written after a
+    successful score parse. If a segment is skipped (e.g. ``event_regex``) but the parsed
+    name already matches an existing segment with no ``segment_official`` rows, panel data is
+    loaded when available. Index-only labels from ``segment_officials_backfill`` are not used.
+    """
     url = f"{base_url}/index.asp"
     if isFSM:
         url = f"{base_url}/index.htm"
@@ -589,28 +731,32 @@ def scrape(
                     use_html=use_html,
                     isFSM=True
                 )
+                segment_official_rows = None
+                if write_to_database:
+                    segment_official_rows = (
+                        event_info_dict.get("segment_official_rows") or None
+                    )
                 agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database, 
                                                                         judge_filter, agg_all_element_df, agg_all_pcs_df, 
                                                                         database_obj, competition_id, proccessed_segments, 
                                                                         judge_errors, event_details, detailed_rule_errors, 
                                                                         i, judges, event_name, total_errors, num_starts, 
-                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict)
+                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict,
+                                                                        segment_official_rows=segment_official_rows)
                 i=i+1
         else:
             links, names = get_urls_and_names(page_contents)
             for i in range(len(links)):
                 segment_href = links[i]["href"]
-                if write_to_database:
-                    segment_page_url = f"{base_url.rstrip('/')}/{segment_href}"
-                    segment_official_rows = parse_ijs_segment_officials(
-                        get_page_contents(segment_page_url)
-                    )
-                else:
-                    segment_official_rows = None
-                (resultsLink, judgesNames, event_name) = findResultsDetailUrlAndJudgesNames(
+                (resultsLink, judgesNames, h1_event_label) = findResultsDetailUrlAndJudgesNames(
                     base_url, segment_href
                 )
-                if specific_exclude and (event_name == specific_exclude or re.match(specific_exclude, event_name)):
+                if not resultsLink:
+                    print(
+                        f"WARNING: No judge detail scores link on Final page {segment_href!r}; skipping"
+                    )
+                    continue
+                if specific_exclude and (h1_event_label == specific_exclude or re.match(specific_exclude, h1_event_label)):
                     continue
 
                 (
@@ -636,13 +782,30 @@ def scrape(
                     judge_filter=judge_filter,
                     use_html=use_html
                 )
+                segment_official_rows = None
+                segment_db_key = None
+                if write_to_database:
+                    segment_official_rows = _classic_segment_official_rows(
+                        base_url, segment_href
+                    )
+                    if not segment_official_rows:
+                        print(
+                            f"WARNING: No panel officials parsed for Final {segment_href!r}"
+                        )
+                    segment_db_key = (
+                        (event_name or "").strip()
+                        or judgingParsing.ijs_event_label_to_db_segment_name(
+                            h1_event_label or ""
+                        )
+                    )
                 agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database,
                                                                         judge_filter, agg_all_element_df, agg_all_pcs_df,
                                                                         database_obj, competition_id, proccessed_segments,
                                                                         judge_errors, event_details, detailed_rule_errors,
                                                                         i, judgesNames, event_name, total_errors, num_starts,
                                                                         allowed_errors, rule_errors, all_element_dict, all_pcs_dict,
-                                                                        segment_official_rows=segment_official_rows)
+                                                                        segment_official_rows=segment_official_rows,
+                                                                        segment_db_key=segment_db_key)
         # Sort sheets
         del workbook["Sheet"]
         workbook._sheets.sort(key=lambda ws: ws.title)
@@ -674,10 +837,33 @@ def scrape(
     print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
     return df_dict, errors_dict_to_return
 
-def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None):
+def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None, segment_db_key=None):
+    row_segment_key = ((segment_db_key or event_name) or "").strip()
     if total_errors == None:
-                    # This is an event to skip per the regex
-        return
+        if (
+            write_to_database
+            and competition_id
+            and segment_official_rows
+            and row_segment_key
+        ):
+            segment_id = database_obj.get_segment_id(
+                row_segment_key, competition_id
+            )
+            if segment_id is not None:
+                database_obj.replace_segment_officials(
+                    segment_id, segment_official_rows
+                )
+                print(
+                    f" Officials only (skipped segment) {row_segment_key} "
+                    f"{datetime.now().strftime('%H:%M:%S')}"
+                )
+            else:
+                print(
+                    f"WARNING: Skipped scores for {row_segment_key!r}; no segment row in DB "
+                    f"— officials not written"
+                )
+        return agg_all_element_df, agg_all_pcs_df
+    # ``event_name`` must match ``extract_judge_scores`` (parse_scores / process_scores_html).
     start_of_summary_rows = sum(total_errors) + 11
     event_details[event_name] = {
                     "Num Starts": num_starts,
@@ -718,19 +904,31 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
                         [agg_all_element_df, all_element_df])
 
                 # write to database
-    if write_to_database and event_name not in proccessed_segments:
-        print(
+    if write_to_database:
+        segment_id = None
+        if event_name not in proccessed_segments:
+            print(
                         f"Writing segment {event_name} {datetime.now().strftime("%H:%M:%S")}")
-        segment_id = database_obj.insert_segment(
+            segment_id = database_obj.insert_segment(
                         event_name, competition_id)
-        database_obj.insert_element_scores(
+            database_obj.insert_element_scores(
                         judgesNames, all_element_dict, segment_id, rule_errors)
-        database_obj.insert_pcs_scores(
+            database_obj.insert_pcs_scores(
                         judgesNames, all_pcs_dict, segment_id)
-        if segment_official_rows:
+        else:
+            print(
+                f"Skipping scores for segment {event_name} "
+                f"(already present) {datetime.now().strftime("%H:%M:%S")}"
+            )
+            # ``insert_segment`` returns existing id when the row is already there (same as
+            # insert path); avoids ``get_segment_id`` None if the session/DB view differs.
+            segment_id = database_obj.insert_segment(event_name, competition_id)
+        if segment_id is not None and segment_official_rows:
             database_obj.replace_segment_officials(segment_id, segment_official_rows)
-    else:
-        print(f"Skipping segment {event_name}")
+            print(
+                f"INFO: segment_official {len(segment_official_rows)} row(s) → "
+                f"segment id {segment_id} ({event_name!r})"
+            )
     return agg_all_element_df,agg_all_pcs_df
 
 
@@ -1114,4 +1312,13 @@ if __name__ == "__main__":
     #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
     #        '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
+    scrape(
+        "https://ijs.usfigureskating.org/leaderboard/results/2022/30702",
+        "2025_Porter",
+        write_to_database=True,
+        pdf_folder=pdf_folder,
+        excel_folder=excel_folder,
+        year="2526",
+        isFSM=False,
+    )
     loadInfoForExistingCompetitions()

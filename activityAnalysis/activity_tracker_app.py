@@ -142,6 +142,37 @@ def _segment_official_disciplines_summary(series: pd.Series) -> str:
     return ", ".join(parts)
 
 
+def _panel_role_summary_label(role: str) -> str:
+    """Map ``segment_official.role`` to a short label for per-competition deduping."""
+    r = (role or "").strip()
+    if not r:
+        return ""
+    rl = r.lower()
+    if rl.startswith("judge"):
+        return "Judge"
+    if "referee" in rl:
+        return "Referee"
+    if "technical controller" in rl:
+        return "Technical Controller"
+    if "assistant technical specialist" in rl or "technical specialist" in rl:
+        return "Technical Specialist"
+    if "data operator" in rl or "replay operator" in rl:
+        return "Data/Replay operator"
+    return r
+
+
+def _segment_official_panel_roles_summary(series: pd.Series) -> str:
+    """Comma-separated unique IJS-style panel role labels for one competition."""
+    labels: set[str] = set()
+    for raw in series.dropna():
+        lab = _panel_role_summary_label(str(raw))
+        if lab:
+            labels.add(lab)
+    if not labels:
+        return ""
+    return ", ".join(sorted(labels, key=str.lower))
+
+
 def _render_additional_segment_activity_slice(
     panel_detail: pd.DataFrame,
     *,
@@ -164,6 +195,7 @@ def _render_additional_segment_activity_slice(
             end_date=("end_date", "first"),
             panel_segment_count=("segment_id", "nunique"),
             discipline=("discipline", _segment_official_disciplines_summary),
+            panel_roles=("role", _segment_official_panel_roles_summary),
         )
         .reset_index()
     )
@@ -178,6 +210,7 @@ def _render_additional_segment_activity_slice(
         "start_date",
         "end_date",
         "discipline",
+        "panel_roles",
         "panel_segment_count",
         "results_url",
     ]
@@ -199,6 +232,12 @@ def _render_additional_segment_activity_slice(
                 width="medium",
                 help="From segment ``discipline_type`` (public.discipline_type). "
                 "Multiple values if panels span categories at this competition.",
+            ),
+            "panel_roles": st.column_config.TextColumn(
+                "Panel roles (IJS)",
+                width="medium",
+                help="Distinct protocol panel roles for this official at this competition "
+                "(short labels from ``segment_official.role``).",
             ),
             "panel_segment_count": st.column_config.NumberColumn(
                 "Segments",
@@ -298,7 +337,9 @@ def _assignment_lower_only_flag(val) -> bool:
 def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
     """One row per competition; assignments aggregated; sort year then event category."""
     if detail_df.empty:
-        return pd.DataFrame(columns=["Competition", "Assignments"])
+        return pd.DataFrame(
+            columns=["competition_id", "Competition", "Assignments"]
+        )
     d = detail_df.copy()
     d["label"] = d.apply(
         lambda r: assignment_label_for_tables(
@@ -321,6 +362,7 @@ def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
         labels = sorted(g["label"].unique().tolist(), key=str.lower)
         rows.append(
             {
+                "competition_id": int(cid),
                 "_year": year,
                 "_ctid": ctid,
                 "_o": _competition_type_sort_key(ctid),
@@ -334,7 +376,39 @@ def build_person_assignments_display(detail_df: pd.DataFrame) -> pd.DataFrame:
         ascending=[False, True, True, True],
         kind="mergesort",
     )
-    return out[["Competition", "Assignments"]].reset_index(drop=True)
+    return out[
+        ["competition_id", "Competition", "Assignments"]
+    ].reset_index(drop=True)
+
+
+def merge_panel_roles_into_person_assignment_summary(
+    display_assign: pd.DataFrame, panel_detail: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Join IJS protocol roles (``segment_official``) onto the per-competition assignments
+    summary, one comma-separated ``Panel roles`` column per competition.
+    """
+    if display_assign.empty:
+        return pd.DataFrame(columns=["Competition", "Assignments", "Panel roles"])
+    out = display_assign.copy()
+    if panel_detail.empty or "competition_id" not in panel_detail.columns:
+        out["Panel roles"] = ""
+    else:
+        role_map: dict[int, str] = {}
+        for cid, g in panel_detail.groupby("competition_id", sort=False):
+            labels: set[str] = set()
+            for raw in g["role"]:
+                if pd.isna(raw):
+                    continue
+                lab = _panel_role_summary_label(str(raw))
+                if lab:
+                    labels.add(lab)
+            if labels:
+                role_map[int(cid)] = ", ".join(sorted(labels, key=str.lower))
+        out["Panel roles"] = (
+            out["competition_id"].map(lambda x: role_map.get(int(x), "")).fillna("")
+        )
+    return out[["Competition", "Assignments", "Panel roles"]].reset_index(drop=True)
 
 
 def build_competition_assignments_display(roster_df: pd.DataFrame) -> pd.DataFrame:
@@ -1148,7 +1222,11 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
     )
     pick_oid = int(pick_oid)
     detail = load_person_assignment_rows(pick_oid)
+    panel_detail = load_person_segment_official_activity_detail(pick_oid)
     display_assign = build_person_assignments_display(detail)
+    display_assign = merge_panel_roles_into_person_assignment_summary(
+        display_assign, panel_detail
+    )
     st.subheader("Assignments")
     if display_assign.empty:
         st.info("No assignments for this official.")
@@ -1171,6 +1249,13 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                     help="Full appointment type names; discipline omitted when not applicable. "
                     "Suffix (lower) means the assignment is lower-levels only.",
                 ),
+                "Panel roles": st.column_config.TextColumn(
+                    "Panel roles (IJS)",
+                    width="medium",
+                    help="Roles from IJS protocol panels (``public.segment_official``) "
+                    "where this official is listed for that competition. "
+                    "Distinct from USFS directory assignments in the previous column.",
+                ),
             },
         )
     appts = load_person_appointment_rows(pick_oid)
@@ -1184,12 +1269,10 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                 appts_show["achieved_date"], errors="coerce"
             ).dt.strftime("%Y-%m-%d")
         st.dataframe(appts_show, width="stretch", hide_index=True)
-    panel_detail = load_person_segment_official_activity_detail(pick_oid)
     st.caption(
-        "Competitions where this official appears on an IJS protocol (judging database "
-        "``segment_official``). Sorted by event dates when present, then season year. "
-        "Independent of USFS directory assignments above. Qualifying vs non-qualifying "
-        "follows ``public.competition.qualifying``."
+        "Competitions where this official appears on an IJS protocol. Sorted by event dates when present, then season year. "
+        "Compiled independently of assignments above. This should not be considered a "
+        "full record of activity; non-qualifying competitions in particular are non-exhaustive."
     )
     if panel_detail.empty:
         st.info(

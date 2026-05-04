@@ -29,10 +29,12 @@ APPOINTMENT_TYPE_ID_JUDGE = 1
 APPOINTMENT_TYPE_ID_REFEREE = 4
 APPOINTMENT_TYPE_ID_TECH_SPECIALIST = 9
 APPOINTMENT_TYPE_ID_TECH_CONTROLLER = 11
+APPOINTMENT_TYPE_ID_DATA_OR_REPLAY_OPERATOR = 8
 
 
 def appointment_type_id_for_ijs_role(role_label: str) -> int | None:
     r = (role_label or "").strip()
+    r_lower = r.lower()
     if r.startswith("Judge"):
         return APPOINTMENT_TYPE_ID_JUDGE
     if "Referee" in r:
@@ -41,6 +43,8 @@ def appointment_type_id_for_ijs_role(role_label: str) -> int | None:
         return APPOINTMENT_TYPE_ID_TECH_CONTROLLER
     if "Assistant Technical Specialist" in r or "Technical Specialist" in r:
         return APPOINTMENT_TYPE_ID_TECH_SPECIALIST
+    if r_lower.startswith("data operator") or r_lower.startswith("replay operator"):
+        return APPOINTMENT_TYPE_ID_DATA_OR_REPLAY_OPERATOR
     return None
 
 
@@ -88,6 +92,33 @@ class DatabaseLoader:
                 )
             )
         self.session.commit()
+
+    def ensure_segment_officials_if_empty(
+        self, competition_id: int, segment_name: str, rows: list
+    ) -> bool:
+        """
+        If ``public.segment`` already exists for this competition and name but has no
+        ``segment_official`` rows, load ``rows``. Used when ``scrape`` skips score
+        processing (e.g. ``event_regex``) but panel data is available.
+        """
+        if not rows or not segment_name:
+            return False
+        segment = (
+            self.session.query(Segment)
+            .filter_by(competition_id=competition_id, name=segment_name)
+            .first()
+        )
+        if segment is None:
+            return False
+        existing = (
+            self.session.query(SegmentOfficial)
+            .filter(SegmentOfficial.segment_id == segment.id)
+            .count()
+        )
+        if existing > 0:
+            return False
+        self.replace_segment_officials(segment.id, rows)
+        return True
 
     def _load_official_directory_choices(self) -> dict[int, str]:
         try:
@@ -235,6 +266,14 @@ class DatabaseLoader:
         existing.freeskate = is_freeskate
         self.session.commit()
         return existing.id
+
+    def get_segment_id(self, segment_name: str, competition_id: int) -> int | None:
+        row = (
+            self.session.query(Segment)
+            .filter_by(name=segment_name, competition_id=competition_id)
+            .first()
+        )
+        return int(row.id) if row else None
 
 
     def insert_judge(self, judge_name):
