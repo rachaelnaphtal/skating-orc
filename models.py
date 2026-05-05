@@ -1,6 +1,7 @@
 from typing import List, Optional
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKeyConstraint, Identity, Integer, Numeric, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, ForeignKeyConstraint, Identity, Index, Integer, Numeric, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import OID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
 import decimal
@@ -13,65 +14,24 @@ class Competition(Base):
     __tablename__ = 'competition'
     __table_args__ = (
         PrimaryKeyConstraint('id', name='competition_pkey'),
+        UniqueConstraint('results_url', name='competition_unique')
     )
 
     id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=32767, cycle=False, cache=1), primary_key=True)
     year: Mapped[str] = mapped_column(String)
     qualifying: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
-    nqs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     results_url: Mapped[str] = mapped_column(String)
     name: Mapped[str] = mapped_column(String)
     singles: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     pairs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     dance: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     synchronized: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    nqs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     start_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     location: Mapped[Optional[str]] = mapped_column(String)
 
     segment: Mapped[List['Segment']] = relationship('Segment', back_populates='competition')
-
-
-class SegmentOfficial(Base):
-    """Officials listed for a segment (IJS results table: Judge 1..n, Referee, TC, TS, …)."""
-
-    __tablename__ = "segment_official"
-    __table_args__ = (
-        ForeignKeyConstraint(["segment_id"], ["segment.id"], name="segment_official_segment_id_fkey", ondelete="CASCADE"),
-        # official_id / appointment_type_id → officials_analysis.* are enforced in PostgreSQL only
-        # (migration 002); they are not ORM ForeignKeys because that schema lives in another Base.
-        UniqueConstraint("segment_id", "role", name="segment_official_segment_role_uniq"),
-        PrimaryKeyConstraint("id", name="segment_official_pkey"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
-    segment_id: Mapped[int] = mapped_column(Integer)
-    official_name: Mapped[str] = mapped_column(String)
-    official_id: Mapped[Optional[int]] = mapped_column(Integer)
-    role: Mapped[str] = mapped_column(String)
-    appointment_type_id: Mapped[Optional[int]] = mapped_column(Integer)
-    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
-
-    segment: Mapped["Segment"] = relationship("Segment", back_populates="segment_official")
-
-
-class OfficialNameAlias(Base):
-    """
-    Protocol / IJS panel name (normalized) → directory ``official_id`` when names differ.
-    Enforced in PostgreSQL; ``official_id`` is not an ORM FK (cross-schema Base).
-    """
-
-    __tablename__ = "official_name_alias"
-    __table_args__ = (
-        UniqueConstraint("alias_normalized", name="official_name_alias_alias_normalized_key"),
-        PrimaryKeyConstraint("id", name="official_name_alias_pkey"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
-    alias_normalized: Mapped[str] = mapped_column(String)
-    official_id: Mapped[int] = mapped_column(Integer)
-    note: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
 
 class DisciplineType(Base):
@@ -108,8 +68,103 @@ class Judge(Base):
     name: Mapped[str] = mapped_column(String)
     location: Mapped[Optional[str]] = mapped_column(String)
 
+    judge_excess_anomalies_cache: Mapped[List['JudgeExcessAnomaliesCache']] = relationship('JudgeExcessAnomaliesCache', back_populates='judge')
     pcs_score_per_judge: Mapped[List['PcsScorePerJudge']] = relationship('PcsScorePerJudge', back_populates='judge')
     element_score_per_judge: Mapped[List['ElementScorePerJudge']] = relationship('ElementScorePerJudge', back_populates='judge')
+
+
+class JudgeEmailList(Base):
+    __tablename__ = 'judge_email_list'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='judge_email_list_pkey'),
+        UniqueConstraint('judge_name', name='judge_email_list_judge_name_key')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    judge_name: Mapped[str] = mapped_column(Text)
+    email: Mapped[str] = mapped_column(Text)
+
+
+class JudgeSummaryCache(Base):
+    __tablename__ = 'judge_summary_cache'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='judge_summary_cache_pkey'),
+        UniqueConstraint('judge_id', 'year_filter', 'competition_ids', 'discipline_type_ids', 'score_type', name='judge_summary_cache_judge_id_year_filter_competition_ids_di_key'),
+        Index('idx_judge_summary_filters', 'year_filter', 'score_type'),
+        Index('idx_judge_summary_judge', 'judge_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    judge_id: Mapped[int] = mapped_column(Integer)
+    score_type: Mapped[str] = mapped_column(String(20))
+    year_filter: Mapped[Optional[int]] = mapped_column(Integer)
+    competition_ids: Mapped[Optional[str]] = mapped_column(Text)
+    discipline_type_ids: Mapped[Optional[str]] = mapped_column(Text)
+    total_scores: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    pcs_scores: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    element_scores: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    throwout_rate: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2), server_default=text('0'))
+    anomaly_rate: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2), server_default=text('0'))
+    rule_error_rate: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(5, 2), server_default=text('0'))
+    avg_deviation: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(8, 4), server_default=text('0'))
+    total_excess_anomalies: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+t_officials = Table(
+    'officials', Base.metadata,
+    Column('mbr_number', BigInteger),
+    Column('first_name', Text),
+    Column('last_name', Text),
+    Column('full_name', Text),
+    Column('is_coach', Boolean),
+    Column('email', Text),
+    Column('phone', Text),
+    Column('city', Text),
+    Column('state', Text),
+    Column('region', Text)
+)
+
+
+class AppointmentTypes(Base):
+    __tablename__ = 'appointment_types'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='appointment_types_pkey'),
+        UniqueConstraint('name', name='appointment_types_name_key'),
+        {'schema': 'officials_analysis'}
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+
+    segment_official: Mapped[List['SegmentOfficial']] = relationship('SegmentOfficial', back_populates='appointment_type')
+
+
+class Officials(Base):
+    __tablename__ = 'officials'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='officials_pkey'),
+        UniqueConstraint('mbr_number', name='officials_mbr_number_key'),
+        {'schema': 'officials_analysis'}
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mbr_number: Mapped[Optional[str]] = mapped_column(Text)
+    first_name: Mapped[Optional[str]] = mapped_column(Text)
+    last_name: Mapped[Optional[str]] = mapped_column(Text)
+    full_name: Mapped[Optional[str]] = mapped_column(Text)
+    is_coach: Mapped[Optional[bool]] = mapped_column(Boolean)
+    email: Mapped[Optional[str]] = mapped_column(Text)
+    phone: Mapped[Optional[str]] = mapped_column(Text)
+    city: Mapped[Optional[str]] = mapped_column(Text)
+    state: Mapped[Optional[str]] = mapped_column(Text)
+    region: Mapped[Optional[str]] = mapped_column(Text)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+
+    judge_official_link: Mapped[List['JudgeOfficialLink']] = relationship('JudgeOfficialLink', back_populates='official')
+    official_name_alias: Mapped[List['OfficialNameAlias']] = relationship('OfficialNameAlias', back_populates='official')
+    segment_official: Mapped[List['SegmentOfficial']] = relationship('SegmentOfficial', back_populates='official')
 
 
 class PcsType(Base):
@@ -122,6 +177,67 @@ class PcsType(Base):
     name: Mapped[str] = mapped_column(String)
 
     pcs_score_per_judge: Mapped[List['PcsScorePerJudge']] = relationship('PcsScorePerJudge', back_populates='pcs_type')
+
+
+t_pg_stat_statements = Table(
+    'pg_stat_statements', Base.metadata,
+    Column('userid', OID),
+    Column('dbid', OID),
+    Column('toplevel', Boolean),
+    Column('queryid', BigInteger),
+    Column('query', Text),
+    Column('plans', BigInteger),
+    Column('total_plan_time', Double(53)),
+    Column('min_plan_time', Double(53)),
+    Column('max_plan_time', Double(53)),
+    Column('mean_plan_time', Double(53)),
+    Column('stddev_plan_time', Double(53)),
+    Column('calls', BigInteger),
+    Column('total_exec_time', Double(53)),
+    Column('min_exec_time', Double(53)),
+    Column('max_exec_time', Double(53)),
+    Column('mean_exec_time', Double(53)),
+    Column('stddev_exec_time', Double(53)),
+    Column('rows', BigInteger),
+    Column('shared_blks_hit', BigInteger),
+    Column('shared_blks_read', BigInteger),
+    Column('shared_blks_dirtied', BigInteger),
+    Column('shared_blks_written', BigInteger),
+    Column('local_blks_hit', BigInteger),
+    Column('local_blks_read', BigInteger),
+    Column('local_blks_dirtied', BigInteger),
+    Column('local_blks_written', BigInteger),
+    Column('temp_blks_read', BigInteger),
+    Column('temp_blks_written', BigInteger),
+    Column('shared_blk_read_time', Double(53)),
+    Column('shared_blk_write_time', Double(53)),
+    Column('local_blk_read_time', Double(53)),
+    Column('local_blk_write_time', Double(53)),
+    Column('temp_blk_read_time', Double(53)),
+    Column('temp_blk_write_time', Double(53)),
+    Column('wal_records', BigInteger),
+    Column('wal_fpi', BigInteger),
+    Column('wal_bytes', Numeric),
+    Column('jit_functions', BigInteger),
+    Column('jit_generation_time', Double(53)),
+    Column('jit_inlining_count', BigInteger),
+    Column('jit_inlining_time', Double(53)),
+    Column('jit_optimization_count', BigInteger),
+    Column('jit_optimization_time', Double(53)),
+    Column('jit_emission_count', BigInteger),
+    Column('jit_emission_time', Double(53)),
+    Column('jit_deform_count', BigInteger),
+    Column('jit_deform_time', Double(53)),
+    Column('stats_since', DateTime(True)),
+    Column('minmax_stats_since', DateTime(True))
+)
+
+
+t_pg_stat_statements_info = Table(
+    'pg_stat_statements_info', Base.metadata,
+    Column('dealloc', BigInteger),
+    Column('stats_reset', DateTime(True))
+)
 
 
 class Skater(Base):
@@ -137,12 +253,51 @@ class Skater(Base):
     skater_segment: Mapped[List['SkaterSegment']] = relationship('SkaterSegment', back_populates='skater')
 
 
+class JudgeOfficialLink(Judge):
+    __tablename__ = 'judge_official_link'
+    __table_args__ = (
+        CheckConstraint("status = 'linked'::text AND official_id IS NOT NULL OR status = 'outside_directory'::text AND official_id IS NULL", name='judge_official_link_linked_requires_official'),
+        CheckConstraint("status = ANY (ARRAY['linked'::text, 'outside_directory'::text])", name='judge_official_link_status_check'),
+        ForeignKeyConstraint(['judge_id'], ['judge.id'], ondelete='CASCADE', name='judge_official_link_judge_id_fkey'),
+        ForeignKeyConstraint(['official_id'], ['officials_analysis.officials.id'], ondelete='SET NULL', name='judge_official_link_official_id_fkey'),
+        PrimaryKeyConstraint('judge_id', name='judge_official_link_pkey'),
+        Index('idx_judge_official_link_official_id', 'official_id')
+    )
+
+    judge_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+    official_id: Mapped[Optional[int]] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+
+    official: Mapped[Optional['Officials']] = relationship('Officials', back_populates='judge_official_link')
+
+
+class OfficialNameAlias(Base):
+    __tablename__ = 'official_name_alias'
+    __table_args__ = (
+        ForeignKeyConstraint(['official_id'], ['officials_analysis.officials.id'], ondelete='CASCADE', name='official_name_alias_official_id_fkey'),
+        PrimaryKeyConstraint('id', name='official_name_alias_pkey'),
+        UniqueConstraint('alias_normalized', name='official_name_alias_alias_normalized_key'),
+        Index('ix_official_name_alias_official_id', 'official_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    alias_normalized: Mapped[str] = mapped_column(Text)
+    official_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+    note: Mapped[Optional[str]] = mapped_column(Text)
+
+    official: Mapped['Officials'] = relationship('Officials', back_populates='official_name_alias')
+
+
 class Segment(Base):
     __tablename__ = 'segment'
     __table_args__ = (
-        ForeignKeyConstraint(['competition_id'], ['competition.id'], name='segment_competition_id_fkey'),
+        ForeignKeyConstraint(['competition_id'], ['competition.id'], ondelete='CASCADE', name='segment_competition_id_fkey'),
         ForeignKeyConstraint(['discipline_type_id'], ['discipline_type.id'], name='segment_discipline_type_id_fkey'),
-        PrimaryKeyConstraint('id', name='segment_pkey')
+        PrimaryKeyConstraint('id', name='segment_pkey'),
+        UniqueConstraint('competition_id', 'name', name='segment_unique')
     )
 
     id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
@@ -153,14 +308,68 @@ class Segment(Base):
 
     competition: Mapped['Competition'] = relationship('Competition', back_populates='segment')
     discipline_type: Mapped[Optional['DisciplineType']] = relationship('DisciplineType', back_populates='segment')
-    skater_segment: Mapped[List['SkaterSegment']] = relationship('SkaterSegment', back_populates='segment')
+    judge_excess_anomalies_cache: Mapped[List['JudgeExcessAnomaliesCache']] = relationship('JudgeExcessAnomaliesCache', back_populates='segment')
     segment_official: Mapped[List['SegmentOfficial']] = relationship('SegmentOfficial', back_populates='segment')
+    skater_segment: Mapped[List['SkaterSegment']] = relationship('SkaterSegment', back_populates='segment')
+
+
+class JudgeExcessAnomaliesCache(Base):
+    __tablename__ = 'judge_excess_anomalies_cache'
+    __table_args__ = (
+        ForeignKeyConstraint(['judge_id'], ['judge.id'], name='judge_excess_anomalies_cache_judge_id_fkey'),
+        ForeignKeyConstraint(['segment_id'], ['segment.id'], name='judge_excess_anomalies_cache_segment_id_fkey'),
+        PrimaryKeyConstraint('id', name='judge_excess_anomalies_cache_pkey'),
+        UniqueConstraint('judge_id', 'segment_id', 'score_type', name='judge_excess_anomalies_cache_judge_id_segment_id_score_type_key'),
+        Index('idx_excess_anomalies_judge', 'judge_id'),
+        Index('idx_excess_anomalies_segment', 'segment_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    judge_id: Mapped[int] = mapped_column(Integer)
+    segment_id: Mapped[int] = mapped_column(Integer)
+    score_type: Mapped[str] = mapped_column(String(20))
+    skater_count: Mapped[int] = mapped_column(Integer)
+    allowed_errors: Mapped[int] = mapped_column(Integer)
+    total_anomalies: Mapped[int] = mapped_column(Integer)
+    excess_anomalies: Mapped[int] = mapped_column(Integer)
+    pcs_anomalies: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    element_anomalies: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+    judge: Mapped['Judge'] = relationship('Judge', back_populates='judge_excess_anomalies_cache')
+    segment: Mapped['Segment'] = relationship('Segment', back_populates='judge_excess_anomalies_cache')
+
+
+class SegmentOfficial(Base):
+    __tablename__ = 'segment_official'
+    __table_args__ = (
+        ForeignKeyConstraint(['appointment_type_id'], ['officials_analysis.appointment_types.id'], ondelete='SET NULL', name='segment_official_appointment_type_id_fkey'),
+        ForeignKeyConstraint(['official_id'], ['officials_analysis.officials.id'], ondelete='SET NULL', name='segment_official_official_id_fkey'),
+        ForeignKeyConstraint(['segment_id'], ['segment.id'], ondelete='CASCADE', name='segment_official_segment_id_fkey'),
+        PrimaryKeyConstraint('id', name='segment_official_pkey'),
+        UniqueConstraint('segment_id', 'role', name='segment_official_segment_role_uniq'),
+        Index('ix_segment_official_appointment_type_id', 'appointment_type_id'),
+        Index('ix_segment_official_official_id', 'official_id'),
+        Index('ix_segment_official_segment_id', 'segment_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    segment_id: Mapped[int] = mapped_column(Integer)
+    official_name: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+    official_id: Mapped[Optional[int]] = mapped_column(Integer)
+    appointment_type_id: Mapped[Optional[int]] = mapped_column(Integer)
+
+    appointment_type: Mapped[Optional['AppointmentTypes']] = relationship('AppointmentTypes', back_populates='segment_official')
+    official: Mapped[Optional['Officials']] = relationship('Officials', back_populates='segment_official')
+    segment: Mapped['Segment'] = relationship('Segment', back_populates='segment_official')
 
 
 class SkaterSegment(Base):
     __tablename__ = 'skater_segment'
     __table_args__ = (
-        ForeignKeyConstraint(['segment_id'], ['segment.id'], name='skater_segment_segment_id_fkey'),
+        ForeignKeyConstraint(['segment_id'], ['segment.id'], ondelete='CASCADE', name='skater_segment_segment_id_fkey'),
         ForeignKeyConstraint(['skater_id'], ['skater.id'], name='skater_segment_skater_id_fkey'),
         PrimaryKeyConstraint('id', name='skater_segment_pkey')
     )
@@ -180,7 +389,7 @@ class Element(Base):
     __tablename__ = 'element'
     __table_args__ = (
         ForeignKeyConstraint(['element_type_id'], ['element_type.id'], name='element_element_type_id_fkey'),
-        ForeignKeyConstraint(['skater_segment_id'], ['skater_segment.id'], name='element_skater_segment_id_fkey'),
+        ForeignKeyConstraint(['skater_segment_id'], ['skater_segment.id'], ondelete='CASCADE', name='element_skater_segment_id_fkey'),
         PrimaryKeyConstraint('id', name='element_pkey')
     )
 
@@ -201,8 +410,9 @@ class PcsScorePerJudge(Base):
     __table_args__ = (
         ForeignKeyConstraint(['judge_id'], ['judge.id'], name='pcs_score_per_judge_judge_id_fkey'),
         ForeignKeyConstraint(['pcs_type_id'], ['pcs_type.id'], name='pcs_score_per_judge_pcs_type_id_fkey'),
-        ForeignKeyConstraint(['skater_segment_id'], ['skater_segment.id'], name='pcs_score_per_judge_skater_segment_id_fkey'),
-        PrimaryKeyConstraint('id', name='pcs_score_per_judge_pkey')
+        ForeignKeyConstraint(['skater_segment_id'], ['skater_segment.id'], ondelete='CASCADE', name='pcs_score_per_judge_skater_segment_id_fkey'),
+        PrimaryKeyConstraint('id', name='pcs_score_per_judge_pkey'),
+        UniqueConstraint('skater_segment_id', 'pcs_type_id', 'judge_id', name='pcs_score_per_judge_unique')
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=9223372036854775807, cycle=False, cache=1), primary_key=True)
@@ -223,9 +433,12 @@ class PcsScorePerJudge(Base):
 class ElementScorePerJudge(Base):
     __tablename__ = 'element_score_per_judge'
     __table_args__ = (
-        ForeignKeyConstraint(['element_id'], ['element.id'], name='element_score_per_judge_element_id_fkey'),
+        ForeignKeyConstraint(['element_id'], ['element.id'], ondelete='CASCADE', name='element_score_per_judge_element_id_fkey'),
         ForeignKeyConstraint(['judge_id'], ['judge.id'], name='element_score_per_judge_judge_id_fkey'),
-        PrimaryKeyConstraint('id', name='element_score_per_judge_pkey')
+        PrimaryKeyConstraint('id', name='element_score_per_judge_pkey'),
+        UniqueConstraint('element_id', 'judge_id', name='element_score_per_judge_unique'),
+        Index('element_score_per_judge_is_rule_error_idx', 'is_rule_error'),
+        Index('element_score_per_judge_thrown_out_idx', 'thrown_out')
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=9223372036854775807, cycle=False, cache=1), primary_key=True)

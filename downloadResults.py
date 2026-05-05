@@ -6,6 +6,7 @@ import judgingParsing
 from judgingParsing import autofit_worksheet
 from sharedJudgingAnalysis import format_out_of_range_sheets
 import requests
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 from openpyxl.utils import get_column_letter
 import pandas as pd
@@ -40,8 +41,11 @@ def convert_url_to_pdf(url, pdf_path):
     except Exception as e:
         print(f"PDF generation failed: {e}")
 
-def download_pdf(url, pdf_path, use_gcp=False):
-    r = requests.get(url, timeout=30)
+def download_pdf(url, pdf_path, use_gcp=False, session=None):
+    if session is not None:
+        r = session.get(url, timeout=30)
+    else:
+        r = requests.get(url, timeout=30)
     r.raise_for_status()
 
     if use_gcp:
@@ -50,24 +54,38 @@ def download_pdf(url, pdf_path, use_gcp=False):
         with open(pdf_path, "wb") as f:
             f.write(r.content)
 
-async def generate_pdf(url, pdf_path, use_gcp=False):
-    browser = await launch(
-        {
-            "autoClose": False,
-            "handleSIGINT": False,
-            "handleSIGTERM": False,
-            "handleSIGHUP": False,
-        }
-    )
+async def generate_pdf(url, pdf_path, use_gcp=False, browser=None):
+    """
+    Render ``url`` to PDF. If ``browser`` is provided (pyppeteer ``Browser``), reuse it;
+    otherwise launch a temporary browser and close it when done.
+    """
+    close_browser = browser is None
+    if browser is None:
+        browser = await launch(
+            {
+                "autoClose": False,
+                "handleSIGINT": False,
+                "handleSIGTERM": False,
+                "handleSIGHUP": False,
+            }
+        )
     page = await browser.newPage()
-    await page.goto(url)
-    pdf_data = await page.pdf({"format": "A4"})
-    if use_gcp:
-        write_file_to_gcp(pdf_data, pdf_path)
-    else:
-        with open(pdf_path, "wb") as f:
-            f.write(pdf_data)
-    await browser.close()
+    try:
+        # Bounded wait avoids indefinite hangs; domcontentloaded is enough for PDF snapshot.
+        await page.goto(
+            url,
+            {"waitUntil": "domcontentloaded", "timeout": 90_000},
+        )
+        pdf_data = await page.pdf({"format": "A4"})
+        if use_gcp:
+            write_file_to_gcp(pdf_data, pdf_path)
+        else:
+            with open(pdf_path, "wb") as f:
+                f.write(pdf_data)
+    finally:
+        await page.close()
+        if close_browser:
+            await browser.close()
 
 
 def processEvent(
@@ -84,11 +102,15 @@ def processEvent(
     create_thrown_out_analysis=False,
     use_html=True,
     judge_filter="",
-    isFSM=False
+    isFSM=False,
+    pdf_browser=None,
+    pdf_loop=None,
+    http_session=None,
+    write_excel=True,
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     if isFSM:
-        download_pdf(url, pdf_path, use_gcp=use_gcp)
+        download_pdf(url, pdf_path, use_gcp=use_gcp, session=http_session)
         return judgingParsing.extract_judge_scores(
             workbook=workbook,
             pdf_path=pdf_path,
@@ -102,7 +124,9 @@ def processEvent(
             create_thrown_out_analysis=create_thrown_out_analysis,
             judge_filter=judge_filter,
             use_html=use_html,
-            isFSM=True
+            isFSM=True,
+            write_excel=write_excel,
+            http_session=http_session,
         )
     if use_html:
         return judgingParsing.extract_judge_scores(
@@ -117,10 +141,16 @@ def processEvent(
             use_gcp=use_gcp,
             create_thrown_out_analysis=create_thrown_out_analysis,
             judge_filter=judge_filter,
-            use_html=use_html
+            use_html=use_html,
+            write_excel=write_excel,
+            http_session=http_session,
         )
-    asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
-    # convert_url_to_pdf(url, pdf_path)
+    if pdf_browser is not None and pdf_loop is not None:
+        pdf_loop.run_until_complete(
+            generate_pdf(url, pdf_path, use_gcp=use_gcp, browser=pdf_browser)
+        )
+    else:
+        asyncio.run(generate_pdf(url, pdf_path, use_gcp=use_gcp))
     return judgingParsing.extract_judge_scores(
         workbook,
         pdf_path,
@@ -132,21 +162,42 @@ def processEvent(
         use_gcp=use_gcp,
         create_thrown_out_analysis=create_thrown_out_analysis,
         judge_filter=judge_filter,
-        use_html=False
+        use_html=False,
+        write_excel=write_excel,
+        http_session=http_session,
     )
 
 
-def get_page_contents(url):
+def get_page_contents(url, session=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
     }
 
-    page = requests.get(url, headers=headers)
+    if session is not None:
+        page = session.get(url, headers=headers, timeout=30)
+    else:
+        page = requests.get(url, headers=headers, timeout=30)
 
     if page.status_code == 200:
         return page.text
 
     return None
+
+
+def _scrape_http_session() -> requests.Session:
+    """Session tuned for many sequential IJS fetches: keep-alive, no urllib3 retries."""
+    s = requests.Session()
+    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
+        }
+    )
+    return s
+
 
 #### FSM parsing ####
 def _find_judges_scores_pdf_anchor(td):
@@ -164,7 +215,7 @@ def _role_is_panel_judge(role_label: str) -> bool:
     return bool(r) and r.startswith("judge")
 
 
-def get_fsm_judges_and_results_links(page_contents, base_url):
+def get_fsm_judges_and_results_links(page_contents, base_url, session=None):
     soup = BeautifulSoup(page_contents, "html.parser")
 
     panels = []
@@ -180,7 +231,7 @@ def get_fsm_judges_and_results_links(page_contents, base_url):
             continue
 
         panel_url = urljoin(base_url, panel_link["href"])
-        panel_html = get_page_contents(panel_url)
+        panel_html = get_page_contents(panel_url, session=session)
         segment_official_rows = (
             parse_ijs_segment_officials(panel_html) if panel_html else []
         )
@@ -198,9 +249,9 @@ def get_fsm_judges_and_results_links(page_contents, base_url):
     return panels
 
 
-def parse_judges_from_panel(panel_url):
+def parse_judges_from_panel(panel_url, session=None):
     """Judge names only (for PDF deviation logic); uses the same parsing as segment officials."""
-    panel_html = get_page_contents(panel_url)
+    panel_html = get_page_contents(panel_url, session=session)
     if not panel_html:
         return []
     rows = parse_ijs_segment_officials(panel_html)
@@ -355,7 +406,9 @@ def parse_ijs_segment_officials(page_contents: str) -> list[dict]:
     return _disambiguate_official_roles(_parse_fsm_function_name_officials(soup))
 
 
-def _classic_segment_official_rows(base_url: str, segment_href: str) -> list[dict]:
+def _classic_segment_official_rows(
+    base_url: str, segment_href: str, session=None
+) -> list[dict]:
     """
     Officials for classic ``index.asp`` flow: try the Final results page, then a Swiss Timing
     style ``*OF.htm`` panel page (e.g. ``SEG012OF.htm`` from ``SEG012.htm``).
@@ -369,7 +422,7 @@ def _classic_segment_official_rows(base_url: str, segment_href: str) -> list[dic
     if m and not m.group(1).upper().endswith("OF"):
         urls.append(f"{base}/{m.group(1)}OF{m.group(2)}")
     for u in urls:
-        html = get_page_contents(u)
+        html = get_page_contents(u, session=session)
         rows = parse_ijs_segment_officials(html or "")
         if rows:
             # if u != urls[0]:
@@ -600,9 +653,9 @@ def make_old_summary_sheet(workbook, df_dict, judge_errors, event_regex):
     judgingParsing.autofit_worksheet(sheet)
 
 
-def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
+def findResultsDetailUrlAndJudgesNames(base_url, results_page_link, session=None):
     url = f"{base_url}/{results_page_link}"
-    page_contents = get_page_contents(url)
+    page_contents = get_page_contents(url, session=session)
     if not page_contents:
         print(f"WARNING: Empty or failed HTML fetch for Final page {url!r}")
         return ("", [], "")
@@ -616,11 +669,11 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link):
     return (details_link, judgesNames, event_name)
 
 
-def loadCompetitionInfo(base_url):
+def loadCompetitionInfo(base_url, session=None):
     if base_url.endswith(".htm"):
-        return loadCompetitionInfoFSM(base_url)
-    
-    page_contents = get_page_contents(base_url)
+        return loadCompetitionInfoFSM(base_url, session=session)
+
+    page_contents = get_page_contents(base_url, session=session)
     soup = BeautifulSoup(page_contents, "html.parser")
     all_h3_tags = soup.find_all('h3')
     date = all_h3_tags[0].get_text().split(" ")
@@ -629,8 +682,8 @@ def loadCompetitionInfo(base_url):
     location = all_h3_tags[2].get_text()
     return (start_date, end_date, location)
 
-def loadCompetitionInfoFSM(base_url):
-    page_contents = get_page_contents(base_url)
+def loadCompetitionInfoFSM(base_url, session=None):
+    page_contents = get_page_contents(base_url, session=session)
     soup = BeautifulSoup(page_contents, "html.parser")
 
     start_date, end_date = soup.find_all("tr", class_="caption3")[0].find("td").text.replace(" ", "").split("-")
@@ -664,7 +717,8 @@ def scrape(
     judge_filter="",
     specific_exclude="",
     use_html=True,
-    isFSM=False
+    isFSM=False,
+    write_excel=True,
 ):
     """
     When ``write_to_database`` is true, each ``public.segment`` row is named from the score
@@ -673,169 +727,260 @@ def scrape(
     successful score parse. If a segment is skipped (e.g. ``event_regex``) but the parsed
     name already matches an existing segment with no ``segment_official`` rows, panel data is
     loaded when available. Index-only labels from ``segment_officials_backfill`` are not used.
+
+    When ``write_excel`` is false, per-event deviation sheets and the final workbook are not
+    written (faster when loading the database only). HTTP uses a shared ``requests.Session``;
+    non-HTML PDF mode reuses one headless browser for the whole competition.
     """
-    url = f"{base_url}/index.asp"
-    if isFSM:
-        url = f"{base_url}/index.htm"
-    page_contents = get_page_contents(url)
-    print(url)
-    workbook = openpyxl.Workbook()
-    agg_all_element_df = None
-    agg_all_pcs_df = None
-    session = get_db_session()
-    database_obj = DatabaseLoader(session)
+    df_dict: dict = {}
+    errors_dict_to_return = pd.DataFrame()
 
-    competition_id=0
-    proccessed_segments=[]
-    if write_to_database:
-        competition_id = database_obj.insert_competition(
-            report_name.replace("_", " "), base_url, year)
-        proccessed_segments = database_obj.getSegmentNamesForCompetition(
-            base_url)
-        (start_date, end_date, location) = loadCompetitionInfo(
-            url)
-        database_obj.updateCompetition(
-            base_url, location=location, start_date=start_date, end_date=end_date)
+    try:
+        http_session = _scrape_http_session()
+        pdf_loop = None
+        pdf_browser = None
 
-    if page_contents:
-        judge_errors = {}
-        event_details = {}
-        detailed_rule_errors = []
+        url = f"{base_url}/index.asp"
         if isFSM:
-            judges_and_results_links = get_fsm_judges_and_results_links(page_contents, f"{base_url}/")
-            i=0
-            for event_info_dict in judges_and_results_links:
-                judges = event_info_dict["judges"]
-                scores_url = event_info_dict["scores_url"]
-                (
-                    event_name,
-                    total_errors,
-                    num_starts,
-                    allowed_errors,
-                    rule_errors,
-                    all_element_dict,
-                    all_pcs_dict,
-                ) = processEvent(
-                    scores_url,
-                    i,
-                    judges,
-                    workbook,
-                    i,
-                    event_regex,
-                    pdf_folder,
-                    excel_folder,
-                    only_rule_errors=only_rule_errors,
-                    use_gcp=use_gcp,
-                    create_thrown_out_analysis=add_additional_analysis or write_to_database,
-                    judge_filter=judge_filter,
-                    use_html=use_html,
-                    isFSM=True
+            url = f"{base_url}/index.htm"
+        page_contents = get_page_contents(url, session=http_session)
+        print(url)
+        # Launch Chromium only after index succeeds and only for classic PDF mode (not FSM).
+        # Starting the browser before the first HTTP made runs feel slower than the old flow.
+        if page_contents and (not use_html) and (not isFSM):
+            pdf_loop = asyncio.new_event_loop()
+            pdf_browser = pdf_loop.run_until_complete(
+                launch(
+                    {
+                        "autoClose": False,
+                        "handleSIGINT": False,
+                        "handleSIGTERM": False,
+                        "handleSIGHUP": False,
+                    }
                 )
-                segment_official_rows = None
-                if write_to_database:
-                    segment_official_rows = (
-                        event_info_dict.get("segment_official_rows") or None
-                    )
-                agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database, 
-                                                                        judge_filter, agg_all_element_df, agg_all_pcs_df, 
-                                                                        database_obj, competition_id, proccessed_segments, 
-                                                                        judge_errors, event_details, detailed_rule_errors, 
-                                                                        i, judges, event_name, total_errors, num_starts, 
-                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict,
-                                                                        segment_official_rows=segment_official_rows)
-                i=i+1
-        else:
-            links, names = get_urls_and_names(page_contents)
-            for i in range(len(links)):
-                segment_href = links[i]["href"]
-                (resultsLink, judgesNames, h1_event_label) = findResultsDetailUrlAndJudgesNames(
-                    base_url, segment_href
-                )
-                if not resultsLink:
-                    print(
-                        f"WARNING: No judge detail scores link on Final page {segment_href!r}; skipping"
-                    )
-                    continue
-                if specific_exclude and (h1_event_label == specific_exclude or re.match(specific_exclude, h1_event_label)):
-                    continue
+            )
+        workbook = openpyxl.Workbook()
+        agg_all_element_df = None
+        agg_all_pcs_df = None
+        db_session = get_db_session()
+        database_obj = DatabaseLoader(db_session)
 
-                (
-                    event_name,
-                    total_errors,
-                    num_starts,
-                    allowed_errors,
-                    rule_errors,
-                    all_element_dict,
-                    all_pcs_dict,
-                ) = processEvent(
-                    f"{base_url}/{resultsLink}",
-                    i,
-                    judgesNames,
-                    workbook,
-                    i,
-                    event_regex,
-                    pdf_folder,
-                    excel_folder,
-                    only_rule_errors=only_rule_errors,
-                    use_gcp=use_gcp,
-                    create_thrown_out_analysis=add_additional_analysis or write_to_database,
-                    judge_filter=judge_filter,
-                    use_html=use_html
+        competition_id = 0
+        proccessed_segments = []
+        if write_to_database:
+            competition_id = database_obj.insert_competition(
+                report_name.replace("_", " "), base_url, year
+            )
+            proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
+            (start_date, end_date, location) = loadCompetitionInfo(
+                url, session=http_session
+            )
+            database_obj.updateCompetition(
+                base_url, location=location, start_date=start_date, end_date=end_date
+            )
+
+        if page_contents:
+            judge_errors = {}
+            event_details = {}
+            detailed_rule_errors = []
+            if isFSM:
+                judges_and_results_links = get_fsm_judges_and_results_links(
+                    page_contents, f"{base_url}/", session=http_session
                 )
-                segment_official_rows = None
-                segment_db_key = None
-                if write_to_database:
-                    segment_official_rows = _classic_segment_official_rows(
-                        base_url, segment_href
+                i = 0
+                for event_info_dict in judges_and_results_links:
+                    judges = event_info_dict["judges"]
+                    scores_url = event_info_dict["scores_url"]
+                    (
+                        event_name,
+                        total_errors,
+                        num_starts,
+                        allowed_errors,
+                        rule_errors,
+                        all_element_dict,
+                        all_pcs_dict,
+                    ) = processEvent(
+                        scores_url,
+                        i,
+                        judges,
+                        workbook,
+                        i,
+                        event_regex,
+                        pdf_folder,
+                        excel_folder,
+                        only_rule_errors=only_rule_errors,
+                        use_gcp=use_gcp,
+                        create_thrown_out_analysis=add_additional_analysis
+                        or write_to_database,
+                        judge_filter=judge_filter,
+                        use_html=use_html,
+                        isFSM=True,
+                        pdf_browser=pdf_browser,
+                        pdf_loop=pdf_loop,
+                        http_session=http_session,
+                        write_excel=write_excel,
                     )
-                    if not segment_official_rows:
+                    segment_official_rows = None
+                    if write_to_database:
+                        segment_official_rows = (
+                            event_info_dict.get("segment_official_rows") or None
+                        )
+                    agg_all_element_df, agg_all_pcs_df = handleEventResults(
+                        report_name,
+                        write_to_database,
+                        judge_filter,
+                        agg_all_element_df,
+                        agg_all_pcs_df,
+                        database_obj,
+                        competition_id,
+                        proccessed_segments,
+                        judge_errors,
+                        event_details,
+                        detailed_rule_errors,
+                        i,
+                        judges,
+                        event_name,
+                        total_errors,
+                        num_starts,
+                        allowed_errors,
+                        rule_errors,
+                        all_element_dict,
+                        all_pcs_dict,
+                        segment_official_rows=segment_official_rows,
+                    )
+                    i = i + 1
+            else:
+                links, names = get_urls_and_names(page_contents)
+                for i in range(len(links)):
+                    segment_href = links[i]["href"]
+                    (
+                        resultsLink,
+                        judgesNames,
+                        h1_event_label,
+                    ) = findResultsDetailUrlAndJudgesNames(
+                        base_url, segment_href, session=http_session
+                    )
+                    if not resultsLink:
                         print(
-                            f"WARNING: No panel officials parsed for Final {segment_href!r}"
+                            f"WARNING: No judge detail scores link on Final page {segment_href!r}; skipping"
                         )
-                    segment_db_key = (
-                        (event_name or "").strip()
-                        or judgingParsing.ijs_event_label_to_db_segment_name(
-                            h1_event_label or ""
-                        )
+                        continue
+                    if specific_exclude and (
+                        h1_event_label == specific_exclude
+                        or re.match(specific_exclude, h1_event_label)
+                    ):
+                        continue
+
+                    (
+                        event_name,
+                        total_errors,
+                        num_starts,
+                        allowed_errors,
+                        rule_errors,
+                        all_element_dict,
+                        all_pcs_dict,
+                    ) = processEvent(
+                        f"{base_url}/{resultsLink}",
+                        i,
+                        judgesNames,
+                        workbook,
+                        i,
+                        event_regex,
+                        pdf_folder,
+                        excel_folder,
+                        only_rule_errors=only_rule_errors,
+                        use_gcp=use_gcp,
+                        create_thrown_out_analysis=add_additional_analysis
+                        or write_to_database,
+                        judge_filter=judge_filter,
+                        use_html=use_html,
+                        pdf_browser=pdf_browser,
+                        pdf_loop=pdf_loop,
+                        http_session=http_session,
+                        write_excel=write_excel,
                     )
-                agg_all_element_df, agg_all_pcs_df = handleEventResults(report_name, write_to_database,
-                                                                        judge_filter, agg_all_element_df, agg_all_pcs_df,
-                                                                        database_obj, competition_id, proccessed_segments,
-                                                                        judge_errors, event_details, detailed_rule_errors,
-                                                                        i, judgesNames, event_name, total_errors, num_starts,
-                                                                        allowed_errors, rule_errors, all_element_dict, all_pcs_dict,
-                                                                        segment_official_rows=segment_official_rows,
-                                                                        segment_db_key=segment_db_key)
-        # Sort sheets
-        del workbook["Sheet"]
-        workbook._sheets.sort(key=lambda ws: ws.title)
+                    segment_official_rows = None
+                    segment_db_key = None
+                    if write_to_database:
+                        segment_official_rows = _classic_segment_official_rows(
+                            base_url, segment_href, session=http_session
+                        )
+                        if not segment_official_rows:
+                            print(
+                                f"WARNING: No panel officials parsed for Final {segment_href!r}"
+                            )
+                        segment_db_key = (
+                            (event_name or "").strip()
+                            or judgingParsing.ijs_event_label_to_db_segment_name(
+                                h1_event_label or ""
+                            )
+                        )
+                    agg_all_element_df, agg_all_pcs_df = handleEventResults(
+                        report_name,
+                        write_to_database,
+                        judge_filter,
+                        agg_all_element_df,
+                        agg_all_pcs_df,
+                        database_obj,
+                        competition_id,
+                        proccessed_segments,
+                        judge_errors,
+                        event_details,
+                        detailed_rule_errors,
+                        i,
+                        judgesNames,
+                        event_name,
+                        total_errors,
+                        num_starts,
+                        allowed_errors,
+                        rule_errors,
+                        all_element_dict,
+                        all_pcs_dict,
+                        segment_official_rows=segment_official_rows,
+                        segment_db_key=segment_db_key,
+                    )
 
-        df_dict = {}
-        for judge in judge_errors:
-            df_dict[judge] = pd.DataFrame.from_dict(
-                judge_errors[judge], orient="index")
+            df_dict = {
+                judge: pd.DataFrame.from_dict(judge_errors[judge], orient="index")
+                for judge in judge_errors
+            }
+            errors_dict_to_return = pd.DataFrame.from_dict(detailed_rule_errors)
 
-        errors_dict_to_return = pd.DataFrame.from_dict(detailed_rule_errors)
+            if write_excel:
+                del workbook["Sheet"]
+                workbook._sheets.sort(key=lambda ws: ws.title)
+                make_competition_summary_page(
+                    workbook, report_name, event_details, judge_errors
+                )
+        else:
+            print("Failed to get page contents.")
 
-        make_competition_summary_page(
-            workbook, report_name, event_details, judge_errors
-        )
+        excel_path = f"{excel_folder}{report_name}.xlsx"
+        if write_excel and page_contents:
+            if use_gcp:
+                save_gcp_workbook(workbook, excel_path)
+            else:
+                workbook.save(excel_path)
 
-    else:
-        print("Failed to get page contents.")
-
-    excel_path = f"{excel_folder}{report_name}.xlsx"
-    if use_gcp:
-        save_gcp_workbook(workbook, excel_path)
-    else:
-        workbook.save(excel_path)
-
-    if add_additional_analysis:
-        create_additional_analysis_sheet(
-            agg_all_element_df, agg_all_pcs_df, excel_folder, report_name, use_gcp=use_gcp
-        )
-    print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
-    return df_dict, errors_dict_to_return
+        if add_additional_analysis:
+            create_additional_analysis_sheet(
+                agg_all_element_df,
+                agg_all_pcs_df,
+                excel_folder,
+                report_name,
+                use_gcp=use_gcp,
+            )
+        print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
+        return df_dict, errors_dict_to_return
+    finally:
+        if pdf_loop is not None:
+            try:
+                if pdf_browser is not None:
+                    pdf_loop.run_until_complete(pdf_browser.close())
+            except Exception:
+                pass
+            finally:
+                pdf_loop.close()
 
 def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None, segment_db_key=None):
     row_segment_key = ((segment_db_key or event_name) or "").strip()
@@ -1312,13 +1457,41 @@ if __name__ == "__main__":
     #        '2025_Cranberry_Cup', write_to_database=False, pdf_folder=pdf_folder, year=2425, isFSM=True)
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
     #        '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
-    scrape(
-        "https://ijs.usfigureskating.org/leaderboard/results/2022/30702",
-        "2025_Porter",
-        write_to_database=True,
-        pdf_folder=pdf_folder,
-        excel_folder=excel_folder,
-        year="2526",
-        isFSM=False,
-    )
+    to_load ={
+              "2023 WisconSync! Synchronized Competition" : "2023/33728",
+              "2023 Chuck Cope Synchronized Competition":"2023/33666",
+              "2023 Capital Ice Synchro Classic":"2023/33819",
+              "2023 Stars and Stripes Synchro Invitational":"2023/33720",
+              "2023 Diamond Synchro Classic":"2023/33708",
+              "2023 Fall Synchro Classic":"2023/33802",
+            #   "2025 LeeAnn Miele Synchro Open":"",
+            #   "2023 Essex Synchro Classic":"2023/",
+              "2023 Boston Synchro Classic":"2023/33731",
+              "2023 Kalamazoo Synchro Kickoff Classic":"2023/33460",
+              "2023 Porter Synchro Classic":"2023/33760",
+              "2023 Terry Connors Open Synchro":"2023/33750",
+              "2023 Maplewood Synchro Classic":"2023/33882",
+              "2023 New England Synchro Classic":"2023/33886",
+              "2023 South Atlantic Synchro Open":"2023/33774",
+              "2024 Colonial Synchro Classic":"2024/33713",
+              "2024 Mid America Synchro Classic":"2024/33878",
+              "2024 Synchro Illinois":"2024/33872",
+              "2024 Tri-State Synchro":"2024/33730",
+              "2024 Connecticut Synchro Classic":"2024/33712",
+              "2024 Swan Synchro Skate":"2024/33837",
+              "2024 Reflections Synchro Classic":"2024/33757",
+              "2024 Sweetheart Synchro Classic":"2024/34184"}
+              
+    for name in to_load:
+        scrape(
+            f"https://ijs.usfigureskating.org/leaderboard/results/{to_load[name]}",
+            name,
+            write_to_database=True,
+            pdf_folder=pdf_folder,
+            excel_folder=excel_folder,
+            year="2324",
+            isFSM=False,
+            write_excel=False
+        )
+    
     loadInfoForExistingCompetitions()

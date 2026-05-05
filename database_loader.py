@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import decimal
 import streamlit as st
+from sqlalchemy import select, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.sql import text
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -92,6 +95,169 @@ class DatabaseLoader:
                 )
             )
         self.session.commit()
+
+    def _flush(self) -> None:
+        """Persist pending work to the DB without ending the transaction (fast for bulk loads)."""
+        self.session.flush()
+
+    _BULK_CHUNK = 3500
+
+    @staticmethod
+    def _to_decimal(v) -> decimal.Decimal:
+        if isinstance(v, decimal.Decimal):
+            return v
+        return decimal.Decimal(str(v))
+
+    @staticmethod
+    def _numeric_eq(a, b) -> bool:
+        """Compare panel scores; DB Numeric may differ only in trailing zeros."""
+        da = DatabaseLoader._to_decimal(a)
+        db = DatabaseLoader._to_decimal(b)
+        q = decimal.Decimal("0.01")
+        return da.quantize(q) == db.quantize(q)
+
+    def _dataframe_element_scores(
+        self, all_element_dict: list | dict,
+    ) -> pd.DataFrame:
+        if isinstance(all_element_dict, dict):
+            if not all_element_dict:
+                return pd.DataFrame()
+            return pd.DataFrame.from_dict(all_element_dict)
+        return pd.DataFrame(all_element_dict)
+
+    def _dataframe_pcs(self, all_pcs_dict: list | dict) -> pd.DataFrame:
+        if isinstance(all_pcs_dict, dict):
+            if not all_pcs_dict:
+                return pd.DataFrame()
+            return pd.DataFrame.from_dict(all_pcs_dict)
+        return pd.DataFrame(all_pcs_dict)
+
+    def _ensure_judges_by_name(self, names: list[str]) -> dict[str, int]:
+        unique = list(dict.fromkeys(names))
+        if not unique:
+            return {}
+        rows = self.session.execute(
+            select(Judge.id, Judge.name).where(Judge.name.in_(unique))
+        ).all()
+        by_name = {str(r.name): int(r.id) for r in rows}
+        missing = [n for n in unique if n not in by_name]
+        for n in missing:
+            self.session.add(Judge(name=n))
+        if missing:
+            self.session.flush()
+            rows = self.session.execute(
+                select(Judge.id, Judge.name).where(Judge.name.in_(missing))
+            ).all()
+            for r in rows:
+                by_name[str(r.name)] = int(r.id)
+        return by_name
+
+    def _ensure_skaters_by_name(self, names: list[str]) -> dict[str, int]:
+        unique = list(dict.fromkeys(names))
+        if not unique:
+            return {}
+        rows = self.session.execute(
+            select(Skater.id, Skater.name).where(Skater.name.in_(unique))
+        ).all()
+        by_name = {str(r.name): int(r.id) for r in rows}
+        missing = [n for n in unique if n not in by_name]
+        for n in missing:
+            self.session.add(Skater(name=n))
+        if missing:
+            self.session.flush()
+            rows = self.session.execute(
+                select(Skater.id, Skater.name).where(Skater.name.in_(missing))
+            ).all()
+            for r in rows:
+                by_name[str(r.name)] = int(r.id)
+        return by_name
+
+    def _ensure_skater_segments_map(
+        self, segment_id: int, skater_ids: list[int],
+    ) -> dict[int, int]:
+        """Map skater_id -> skater_segment.id for this segment."""
+        unique = list(dict.fromkeys(skater_ids))
+        if not unique:
+            return {}
+        rows = self.session.execute(
+            select(SkaterSegment.id, SkaterSegment.skater_id).where(
+                SkaterSegment.segment_id == segment_id,
+                SkaterSegment.skater_id.in_(unique),
+            )
+        ).all()
+        out = {int(r.skater_id): int(r.id) for r in rows}
+        missing = [sid for sid in unique if sid not in out]
+        for sid in missing:
+            self.session.add(
+                SkaterSegment(segment_id=segment_id, skater_id=sid)
+            )
+        if missing:
+            self.session.flush()
+            rows = self.session.execute(
+                select(SkaterSegment.id, SkaterSegment.skater_id).where(
+                    SkaterSegment.segment_id == segment_id,
+                    SkaterSegment.skater_id.in_(missing),
+                )
+            ).all()
+            for r in rows:
+                out[int(r.skater_id)] = int(r.id)
+        return out
+
+    def _ensure_element_types_by_name(self, names: list[str]) -> dict[str, int]:
+        unique = list(dict.fromkeys(names))
+        if not unique:
+            return {}
+        rows = self.session.execute(
+            select(ElementType.id, ElementType.name).where(
+                ElementType.name.in_(unique)
+            )
+        ).all()
+        by_name = {str(r.name): int(r.id) for r in rows}
+        missing = [n for n in unique if n not in by_name]
+        for n in missing:
+            self.session.add(ElementType(name=n))
+        if missing:
+            self.session.flush()
+            rows = self.session.execute(
+                select(ElementType.id, ElementType.name).where(
+                    ElementType.name.in_(missing)
+                )
+            ).all()
+            for r in rows:
+                by_name[str(r.name)] = int(r.id)
+        return by_name
+
+    def _ensure_pcs_types_by_name(self, names: list[str]) -> dict[str, int]:
+        unique = list(dict.fromkeys(names))
+        if not unique:
+            return {}
+        rows = self.session.execute(
+            select(PcsType.id, PcsType.name).where(PcsType.name.in_(unique))
+        ).all()
+        by_name = {str(r.name): int(r.id) for r in rows}
+        missing = [n for n in unique if n not in by_name]
+        for n in missing:
+            self.session.add(PcsType(name=n))
+        if missing:
+            self.session.flush()
+            rows = self.session.execute(
+                select(PcsType.id, PcsType.name).where(PcsType.name.in_(missing))
+            ).all()
+            for r in rows:
+                by_name[str(r.name)] = int(r.id)
+        return by_name
+
+    def _pg_bulk_insert_ignore(
+        self, table, rows: list[dict], constraint: str,
+    ) -> None:
+        if not rows:
+            return
+        for i in range(0, len(rows), self._BULK_CHUNK):
+            chunk = rows[i : i + self._BULK_CHUNK]
+            stmt = pg_insert(table).values(chunk).on_conflict_do_nothing(
+                constraint=constraint
+            )
+            self.session.execute(stmt)
 
     def ensure_segment_officials_if_empty(
         self, competition_id: int, segment_name: str, rows: list
@@ -249,7 +415,7 @@ class DatabaseLoader:
         if not existing:
             new = DisciplineType(name=type)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
 
@@ -260,10 +426,12 @@ class DatabaseLoader:
         if not existing:
             new = Segment(name=segment_name, competition_id=competition_id, freeskate=is_freeskate, discipline_type_id=discipline_type_id)
             self.session.add(new)
+            self._flush()
             self.session.commit()
             return new.id
         existing.discipline_type_id = discipline_type_id
         existing.freeskate = is_freeskate
+        self._flush()
         self.session.commit()
         return existing.id
 
@@ -281,7 +449,7 @@ class DatabaseLoader:
         if not existing_judge:
             new_judge = Judge(name=judge_name)
             self.session.add(new_judge)
-            self.session.commit()
+            self._flush()
             return new_judge.id
         return existing_judge.id
 
@@ -290,7 +458,7 @@ class DatabaseLoader:
         if not existing:
             new = Skater(name=skater_name)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
 
@@ -300,7 +468,7 @@ class DatabaseLoader:
         if not existing:
             new = SkaterSegment(segment_id=segment_id, skater_id=skater_id)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
 
@@ -309,7 +477,7 @@ class DatabaseLoader:
         if not existing:
             new = ElementType(name=element_name)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
         
@@ -318,7 +486,7 @@ class DatabaseLoader:
         if not existing:
             new = PcsType(name=pcs_name)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
 
@@ -328,12 +496,12 @@ class DatabaseLoader:
         if not existing:
             new = Element(name=element_name, element_type_id = element_type_id, element_type=element_type, skater_segment_id=skater_segment_id)
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         else:
             existing.element_type_id = element_type_id
             existing.element_type = element_type
-            self.session.commit()
+            self._flush()
         return existing.id
 
     def insert_element_score_per_judge(self, element_id, judge_id, score, panel_average, deviation, thrown_out):
@@ -348,7 +516,7 @@ class DatabaseLoader:
                 thrown_out=thrown_out
             )
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         return existing.id
         
@@ -365,49 +533,248 @@ class DatabaseLoader:
                 thrown_out=thrown_out
             )
             self.session.add(new)
-            self.session.commit()
+            self._flush()
             return new.id
         elif existing.judge_score!=score:
             raise NameError("Scores do not align")
         return existing.id
 
     def insert_element_scores(self, judgesNames, all_element_dict, segment_id, rule_errors):
-        if len(all_element_dict)==0:
+        df = self._dataframe_element_scores(all_element_dict)
+        if df.empty:
             return
-        judge_dict = {judge: self.insert_judge(judge) for judge in judgesNames}
-        all_element_df = pd.DataFrame.from_dict(all_element_dict)
-        skater_dict = {skater: self.insert_skater(skater) for skater in all_element_df["Skater"].unique()}
-        for row in all_element_df.itertuples():
-            skater_id = skater_dict[row.Skater]
-            skater_segment_id = self.insert_skater_segment(segment_id, skater_id)
-            element_id = self.insert_element(row.Element, row._4, skater_segment_id)
-            self.insert_element_score_per_judge(element_id, judge_dict[row._6], row.Score, row._5, row.Deviation, row._10)
-        self.insert_rule_errors(rule_errors, segment_id)
-        # self.session.commit()
 
-    def insert_rule_errors(self,rule_errors, segment_id):
+        judge_dict = self._ensure_judges_by_name(list(judgesNames))
+        skater_names = df["Skater"].astype(str).unique().tolist()
+        skater_dict = self._ensure_skaters_by_name(skater_names)
+        skater_ids = [skater_dict[n] for n in skater_names]
+        ss_map = self._ensure_skater_segments_map(segment_id, skater_ids)
+
+        type_names = df["Element Type"].astype(str).unique().tolist()
+        element_types_map = self._ensure_element_types_by_name(type_names)
+
+        element_specs: dict[tuple[int, str], str] = {}
+        for _, r in df.iterrows():
+            sid = skater_dict[str(r["Skater"])]
+            ssid = ss_map[sid]
+            element_specs[(ssid, str(r["Element"]))] = str(r["Element Type"])
+
+        pairs = list(element_specs.keys())
+        elem_id_by_pair: dict[tuple[int, str], int] = {}
+        step = 500
+        for i in range(0, len(pairs), step):
+            chunk = pairs[i : i + step]
+            elems = self.session.execute(
+                select(Element).where(
+                    tuple_(Element.skater_segment_id, Element.name).in_(chunk)
+                )
+            ).scalars().all()
+            for el in elems:
+                k = (int(el.skater_segment_id), str(el.name))
+                elem_id_by_pair[k] = int(el.id)
+                etype_name = element_specs[k]
+                etid = element_types_map[etype_name]
+                cur_etid = el.element_type_id
+                if el.element_type != etype_name or (
+                    cur_etid is None or int(cur_etid) != etid
+                ):
+                    el.element_type = etype_name
+                    el.element_type_id = etid
+
+        to_add: list[Element] = []
+        for (ssid, ename), etype_name in element_specs.items():
+            if (ssid, ename) in elem_id_by_pair:
+                continue
+            etid = element_types_map[etype_name]
+            to_add.append(
+                Element(
+                    name=ename,
+                    element_type_id=etid,
+                    element_type=etype_name,
+                    skater_segment_id=ssid,
+                )
+            )
+        if to_add:
+            self.session.add_all(to_add)
+            self.session.flush()
+            for el in to_add:
+                k = (int(el.skater_segment_id), str(el.name))
+                elem_id_by_pair[k] = int(el.id)
+
+        score_by_key: dict[tuple[int, int], dict] = {}
+        for _, r in df.iterrows():
+            sid = skater_dict[str(r["Skater"])]
+            ssid = ss_map[sid]
+            eid = elem_id_by_pair[(ssid, str(r["Element"]))]
+            jid = judge_dict[str(r["Judge Name"])]
+            key = (eid, jid)
+            score_by_key[key] = {
+                "element_id": eid,
+                "judge_id": jid,
+                "judge_score": self._to_decimal(r["Score"]),
+                "panel_average": self._to_decimal(r["Panel Average"]),
+                "deviation": self._to_decimal(r["Deviation"]),
+                "thrown_out": bool(r["Thrown out"]),
+                "is_rule_error": False,
+            }
+        score_rows = list(score_by_key.values())
+        self._pg_bulk_insert_ignore(
+            ElementScorePerJudge,
+            score_rows,
+            "element_score_per_judge_unique",
+        )
+
+        self._apply_rule_errors_bulk(
+            rule_errors,
+            skater_dict,
+            ss_map,
+            elem_id_by_pair,
+            judge_dict,
+        )
+
+    def _apply_rule_errors_bulk(
+        self,
+        rule_errors: list,
+        skater_dict: dict[str, int],
+        ss_map: dict[int, int],
+        elem_id_by_pair: dict[tuple[int, str], int],
+        judge_dict: dict[str, int],
+    ) -> None:
+        if not rule_errors:
+            return
+        pairs: list[tuple[int, int]] = []
         for rule_error in rule_errors:
-            skater_id = self.session.query(Skater).filter_by(name=rule_error["Skater"]).first().id
-            skater_segment_id = self.session.query(SkaterSegment).filter_by(segment_id=segment_id, skater_id=skater_id).first().id
-            # Rule errors add on the attention column
+            skater_id = skater_dict[str(rule_error["Skater"])]
+            ssid = ss_map[skater_id]
+            converted_name = str(rule_error["Element"]).split(" ")[0]
+            eid = elem_id_by_pair[(ssid, converted_name)]
+            jid = judge_dict[str(rule_error["Judge Name"])]
+            pairs.append((eid, jid))
+        uniq = list(dict.fromkeys(pairs))
+        step = 500
+        for i in range(0, len(uniq), step):
+            chunk = uniq[i : i + step]
+            self.session.execute(
+                update(ElementScorePerJudge)
+                .where(
+                    tuple_(
+                        ElementScorePerJudge.element_id,
+                        ElementScorePerJudge.judge_id,
+                    ).in_(chunk)
+                )
+                .values(is_rule_error=True)
+            )
+
+    def insert_rule_errors(self, rule_errors, segment_id):
+        """Legacy per-row path; prefer rule errors applied in insert_element_scores."""
+        if not rule_errors:
+            return
+        for rule_error in rule_errors:
+            skater_id = (
+                self.session.query(Skater)
+                .filter_by(name=rule_error["Skater"])
+                .first()
+                .id
+            )
+            skater_segment_id = (
+                self.session.query(SkaterSegment)
+                .filter_by(segment_id=segment_id, skater_id=skater_id)
+                .first()
+                .id
+            )
             converted_name = rule_error["Element"].split(" ")[0]
-            element_id = self.session.query(Element).filter_by(name=converted_name, skater_segment_id=skater_segment_id).first().id
-            judge_id = self.session.query(Judge).filter_by(name=rule_error["Judge Name"]).first().id
-            score = self.session.query(ElementScorePerJudge).filter_by(element_id=element_id, judge_id=judge_id).first()
+            element_id = (
+                self.session.query(Element)
+                .filter_by(
+                    name=converted_name, skater_segment_id=skater_segment_id
+                )
+                .first()
+                .id
+            )
+            judge_id = (
+                self.session.query(Judge)
+                .filter_by(name=rule_error["Judge Name"])
+                .first()
+                .id
+            )
+            score = (
+                self.session.query(ElementScorePerJudge)
+                .filter_by(element_id=element_id, judge_id=judge_id)
+                .first()
+            )
             score.is_rule_error = True
-            self.session.commit()
+        self._flush()
 
     def insert_pcs_scores(self, judgesNames, all_pcs_dict, segment_id):
-        judge_dict = {judge: self.insert_judge(judge) for judge in judgesNames}
-        all_pcs_df = pd.DataFrame.from_dict(all_pcs_dict)
-        if len(all_pcs_df)==0:
+        judge_dict = self._ensure_judges_by_name(list(judgesNames))
+        all_pcs_df = self._dataframe_pcs(all_pcs_dict)
+        if all_pcs_df.empty:
+            self.session.commit()
             return
-        skater_dict = {skater: self.insert_skater(skater) for skater in all_pcs_df["Skater"].unique()}
-        for row in all_pcs_df.itertuples():
-            skater_id = skater_dict[row.Skater]
-            skater_segment_id = self.insert_skater_segment(segment_id, skater_id)
-            pcs_type_id = self.insert_pcs_type(row.Component)
-            self.insert_pcs_score_per_judge(skater_segment_id, pcs_type_id, judge_dict[row._5], row.Score, row._4, row.Deviation, row._9)
+
+        skater_names = all_pcs_df["Skater"].astype(str).unique().tolist()
+        skater_dict = self._ensure_skaters_by_name(skater_names)
+        skater_ids = [skater_dict[n] for n in skater_names]
+        ss_map = self._ensure_skater_segments_map(segment_id, skater_ids)
+
+        pcs_type_names = all_pcs_df["Component"].astype(str).unique().tolist()
+        pcs_type_map = self._ensure_pcs_types_by_name(pcs_type_names)
+
+        expected: dict[tuple[int, int, int], decimal.Decimal] = {}
+        pcs_row_by_key: dict[tuple[int, int, int], dict] = {}
+        for _, r in all_pcs_df.iterrows():
+            sid = skater_dict[str(r["Skater"])]
+            skater_segment_id = ss_map[sid]
+            pcs_type_id = pcs_type_map[str(r["Component"])]
+            judge_id = judge_dict[str(r["Judge Name"])]
+            key = (skater_segment_id, pcs_type_id, judge_id)
+            score_dec = self._to_decimal(r["Score"])
+            expected[key] = score_dec
+            pcs_row_by_key[key] = {
+                "skater_segment_id": skater_segment_id,
+                "pcs_type_id": pcs_type_id,
+                "judge_id": judge_id,
+                "judge_score": score_dec,
+                "panel_average": self._to_decimal(r["Panel Average"]),
+                "deviation": self._to_decimal(r["Deviation"]),
+                "thrown_out": bool(r["Thrown out"]),
+                "is_rule_error": False,
+            }
+        pcs_rows = list(pcs_row_by_key.values())
+        self._pg_bulk_insert_ignore(
+            PcsScorePerJudge,
+            pcs_rows,
+            "pcs_score_per_judge_unique",
+        )
+
+        keys = list(expected.keys())
+        step = 500
+        db_scores: dict[tuple[int, int, int], object] = {}
+        for i in range(0, len(keys), step):
+            chunk = keys[i : i + step]
+            rows = self.session.execute(
+                select(
+                    PcsScorePerJudge.skater_segment_id,
+                    PcsScorePerJudge.pcs_type_id,
+                    PcsScorePerJudge.judge_id,
+                    PcsScorePerJudge.judge_score,
+                ).where(
+                    tuple_(
+                        PcsScorePerJudge.skater_segment_id,
+                        PcsScorePerJudge.pcs_type_id,
+                        PcsScorePerJudge.judge_id,
+                    ).in_(chunk)
+                )
+            ).all()
+            for r in rows:
+                db_scores[(int(r[0]), int(r[1]), int(r[2]))] = r[3]
+
+        for k, exp in expected.items():
+            if k not in db_scores:
+                raise NameError("PCS row missing after bulk insert")
+            if not self._numeric_eq(db_scores[k], exp):
+                raise NameError("Scores do not align")
+
         self.session.commit()
 
 # session = get_db_session()

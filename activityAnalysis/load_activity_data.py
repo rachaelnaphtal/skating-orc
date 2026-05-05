@@ -162,6 +162,29 @@ NQS_SEGMENT_DISCIPLINE_TYPE_SINGLES = 1
 NQS_SEGMENT_DISCIPLINE_TYPE_PAIRS = 2
 NQS_SEGMENT_DISCIPLINE_TYPE_ICE_DANCE = 3
 
+
+def _nqs_synchronized_segment_discipline_type_id() -> int | None:
+    """
+    ``public.discipline_type.id`` for synchronized skating segments (name ``Synchronized``).
+    Resolved at runtime so local DB seed order does not hard-code ids.
+    """
+    if not activity_database_is_postgresql():
+        return None
+    try:
+        with Session(engine) as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id FROM public.discipline_type
+                    WHERE LOWER(TRIM(name)) = 'synchronized'
+                    LIMIT 1
+                    """
+                )
+            ).first()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
 # National directory appointment ``name`` → international (ISU) appointment ``name``.
 # IDs for Referee/ITS/ITC/IDVO are typically 13–16; International Judge id comes from DB.
 _NATIONAL_TO_INTERNATIONAL_APPOINTMENT_NAME = {
@@ -654,6 +677,61 @@ def get_qualified_officials(
             .distinct()
         )
 
+        rows = session.execute(stmt).all()
+
+    out_cols = ["official_id", "full_name", "region", "achieved_date"]
+    if include_appointment_level:
+        out_cols.append("level_id")
+    return pd.DataFrame(rows, columns=out_cols)
+
+
+def get_qualified_officials_any_appointment_types(
+    discipline_id,
+    appointment_type_ids: tuple[int, ...],
+    level_ids,
+    include_appointment_level: bool = False,
+    active_appointments_only: bool = True,
+):
+    """Like ``get_qualified_officials`` but matches any of the given appointment type ids."""
+    if not appointment_type_ids:
+        out_cols = ["official_id", "full_name", "region", "achieved_date"]
+        if include_appointment_level:
+            out_cols.append("level_id")
+        return pd.DataFrame(columns=out_cols)
+    atid0 = int(appointment_type_ids[0])
+    with Session(engine) as session:
+        if discipline_id is None:
+            disc_filter = or_(
+                Appointments.discipline_id.is_(None),
+                Appointments.discipline_id == NO_DISCIPLINE_DIRECTORY_ID,
+            )
+        else:
+            resolved = _resolve_discipline_ids(discipline_id, atid0)
+            if len(resolved) == 1:
+                disc_filter = Appointments.discipline_id == resolved[0]
+            else:
+                disc_filter = Appointments.discipline_id.in_(resolved)
+        where_parts = [
+            disc_filter,
+            Appointments.appointment_type_id.in_(list(appointment_type_ids)),
+            Appointments.level_id.in_(level_ids),
+        ]
+        if active_appointments_only:
+            where_parts.append(Appointments.active.is_(True))
+        select_cols = [
+            Officials.id,
+            Officials.full_name,
+            Officials.region,
+            Appointments.achieved_date,
+        ]
+        if include_appointment_level:
+            select_cols.append(Appointments.level_id)
+        stmt = (
+            select(*select_cols)
+            .join(Appointments, Appointments.official_id == Officials.id)
+            .where(*where_parts)
+            .distinct()
+        )
         rows = session.execute(stmt).all()
 
     out_cols = ["official_id", "full_name", "region", "achieved_date"]
@@ -2535,6 +2613,13 @@ NQS_REPORT_LEVEL_FILTER_BY_LABEL: dict[str, int] = {
     "National": NATIONAL_LEVEL_ID,
 }
 
+# Synchronized NQ report: NQ tier is ``levels.id`` = 1; no "Qualifying" (tier 9) option.
+SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL: dict[str, int] = {
+    "NQ": 1,
+    "Sectional": SECTIONAL_LEVEL_ID,
+    "National": NATIONAL_LEVEL_ID,
+}
+
 
 def _nqs_directory_appointment_type_name(official_type_label: str) -> str:
     m = {
@@ -2565,6 +2650,13 @@ def _nqs_resolve_directory_and_segment_disciplines(
     Directory discipline id for ``get_qualified_officials`` and IJS ``segment.discipline_type_id``
     values to match (Singles=1, Pairs=2, Ice Dance=3).
     """
+    if discipline_label == "Synchronized":
+        seg_id = _nqs_synchronized_segment_discipline_type_id()
+        if seg_id is None:
+            raise ValueError(
+                "Could not resolve public.discipline_type row for Synchronized segments."
+            )
+        return DISC_SYNCHRO_ID, (seg_id,)
     if official_type_label in ("Judge", "Referee"):
         if discipline_label == "Singles/Pairs":
             return DISC_SINGLES_PAIRS_ID, (
@@ -2589,6 +2681,23 @@ def _nqs_resolve_directory_and_segment_disciplines(
     raise ValueError(f"Unknown official type: {official_type_label!r}")
 
 
+_SYNCHRO_ALL_APPOINTMENT_TYPE_NAMES = (
+    "Competition Judge",
+    "Referee",
+    "Technical Controller",
+    "Technical Specialist",
+)
+
+
+def _nqs_synchro_all_appointment_type_ids() -> tuple[int, ...]:
+    ids: list[int] = []
+    for name in _SYNCHRO_ALL_APPOINTMENT_TYPE_NAMES:
+        tid = _get_appointment_type_id_by_name(name)
+        if tid is not None:
+            ids.append(int(tid))
+    return tuple(ids)
+
+
 def _nqs_panel_role_sql_predicate(panel_role_kind: str) -> str:
     """SQL boolean expression on ``so.role``; values are fixed internally (not user input)."""
     if panel_role_kind == "judge":
@@ -2600,6 +2709,14 @@ def _nqs_panel_role_sql_predicate(panel_role_kind: str) -> str:
     if panel_role_kind == "technical_specialist":
         return "LOWER(so.role) LIKE '%technical specialist%'"
     raise ValueError(f"Unknown panel role kind: {panel_role_kind!r}")
+
+
+def _nqs_panel_role_sql_predicate_all() -> str:
+    """Any of judge / referee / technical controller / technical specialist panel role."""
+    return "(" + " OR ".join(
+        f"({_nqs_panel_role_sql_predicate(k)})"
+        for k in ("judge", "referee", "technical_controller", "technical_specialist")
+    ) + ")"
 
 
 def _get_appointment_type_id_by_name(name: str) -> int | None:
@@ -2614,6 +2731,10 @@ def _query_nqs_competition_counts_by_year(
     official_ids: list[int],
     panel_role_kind: str,
     segment_discipline_type_ids: tuple[int, ...],
+    *,
+    require_competition_nqs: bool = True,
+    require_competition_synchronized: bool = False,
+    include_qualifying_competitions: bool = True,
 ) -> pd.DataFrame:
     """
     Rows: official_id, season_year, nqs_competitions (distinct ``public.competition`` per year).
@@ -2622,7 +2743,20 @@ def _query_nqs_competition_counts_by_year(
         return pd.DataFrame(
             columns=["official_id", "season_year", "nqs_competitions"],
         )
-    role_pred = _nqs_panel_role_sql_predicate(panel_role_kind)
+    role_pred = (
+        _nqs_panel_role_sql_predicate_all()
+        if panel_role_kind == "all"
+        else _nqs_panel_role_sql_predicate(panel_role_kind)
+    )
+    nqs_clause = ""
+    if require_competition_nqs:
+        nqs_clause = "              AND COALESCE(c.nqs, false) = true\n"
+    sync_clause = ""
+    if require_competition_synchronized:
+        sync_clause = "              AND COALESCE(c.synchronized, false) = true\n"
+    qual_clause = ""
+    if not include_qualifying_competitions:
+        qual_clause = "              AND COALESCE(c.qualifying, false) = false\n"
     stmt = (
         text(
             f"""
@@ -2634,8 +2768,7 @@ def _query_nqs_competition_counts_by_year(
             INNER JOIN public.competition c ON c.id = s.competition_id
             WHERE so.official_id IS NOT NULL
               AND so.official_id IN :official_ids
-              AND COALESCE(c.nqs, false) = true
-              AND s.discipline_type_id IN :discipline_type_ids
+{nqs_clause}{sync_clause}{qual_clause}              AND s.discipline_type_id IN :discipline_type_ids
               AND c.year ~ '^[0-9]+$'
               AND ({role_pred})
             GROUP BY so.official_id, c.year::integer
@@ -2670,6 +2803,9 @@ def get_nqs_detailed_activity_report_df(
     *,
     active_appointments_only: bool = True,
     directory_level_ids: tuple[int, ...] | None = None,
+    require_competition_nqs: bool = True,
+    require_competition_synchronized: bool = False,
+    include_qualifying_competitions: bool = True,
 ) -> pd.DataFrame:
     """
     One row per eligible directory official: name, USFS appointment level label, total NQS
@@ -2677,23 +2813,43 @@ def get_nqs_detailed_activity_report_df(
 
     Eligibility: appointment in the selected role and discipline at one of the given
     directory levels (default: qualifying, sectional, national). Panel matches use
-    ``public.segment_official``; competitions must have ``public.competition.nqs`` true.
+    ``public.segment_official``. Competition filters default to ``competition.nqs`` true;
+    set ``require_competition_nqs`` false and ``require_competition_synchronized`` true
+    for synchronized-skating competitions without requiring NQS.
+    When ``include_qualifying_competitions`` is false, rows with ``competition.qualifying`` true are excluded.
     """
     if not activity_database_is_postgresql():
         return pd.DataFrame()
 
-    try:
-        appt_name = _nqs_directory_appointment_type_name(official_type_label)
-        dir_disc_id, seg_dt_ids = _nqs_resolve_directory_and_segment_disciplines(
-            official_type_label, discipline_label
-        )
-        panel_kind = _nqs_panel_role_kind(official_type_label)
-    except ValueError:
-        return pd.DataFrame()
+    if official_type_label == "All":
+        if discipline_label != "Synchronized" or not require_competition_synchronized:
+            return pd.DataFrame()
+        try:
+            _, seg_dt_ids = _nqs_resolve_directory_and_segment_disciplines(
+                "Judge", "Synchronized"
+            )
+        except ValueError:
+            return pd.DataFrame()
+        dir_disc_id = DISC_SYNCHRO_ID
+        atids = _nqs_synchro_all_appointment_type_ids()
+        if len(atids) < 4:
+            return pd.DataFrame()
+        panel_kind = "all"
+        omit_level_column = True
+    else:
+        try:
+            appt_name = _nqs_directory_appointment_type_name(official_type_label)
+            dir_disc_id, seg_dt_ids = _nqs_resolve_directory_and_segment_disciplines(
+                official_type_label, discipline_label
+            )
+            panel_kind = _nqs_panel_role_kind(official_type_label)
+        except (ValueError, KeyError):
+            return pd.DataFrame()
 
-    atid = _get_appointment_type_id_by_name(appt_name)
-    if atid is None:
-        return pd.DataFrame()
+        atid = _get_appointment_type_id_by_name(appt_name)
+        if atid is None:
+            return pd.DataFrame()
+        omit_level_column = False
 
     level_ids = (
         directory_level_ids
@@ -2703,28 +2859,47 @@ def get_nqs_detailed_activity_report_df(
     if not level_ids:
         return pd.DataFrame()
 
-    qualified = get_qualified_officials(
-        dir_disc_id,
-        atid,
-        level_ids,
-        include_appointment_level=True,
-        active_appointments_only=active_appointments_only,
-    )
+    if official_type_label == "All":
+        qualified = get_qualified_officials_any_appointment_types(
+            dir_disc_id,
+            atids,
+            level_ids,
+            include_appointment_level=False,
+            active_appointments_only=active_appointments_only,
+        )
+    else:
+        qualified = get_qualified_officials(
+            dir_disc_id,
+            atid,
+            level_ids,
+            include_appointment_level=True,
+            active_appointments_only=active_appointments_only,
+        )
     if qualified.empty:
         return pd.DataFrame()
 
     qualified = qualified.sort_values(
         "achieved_date", ascending=True, na_position="last"
     ).drop_duplicates(subset=["official_id"], keep="first")
-    level_names = _level_id_to_name_map(qualified["level_id"].tolist())
-    qualified = qualified.copy()
-    qualified["Level"] = qualified["level_id"].map(
-        lambda v: level_names.get(int(v), "")
-        if v is not None and not (isinstance(v, float) and pd.isna(v))
-        else ""
-    )
+    if omit_level_column:
+        qualified = qualified[["official_id", "full_name"]]
+    else:
+        level_names = _level_id_to_name_map(qualified["level_id"].tolist())
+        qualified = qualified.copy()
+        qualified["Level"] = qualified["level_id"].map(
+            lambda v: level_names.get(int(v), "")
+            if v is not None and not (isinstance(v, float) and pd.isna(v))
+            else ""
+        )
     oids = [int(x) for x in qualified["official_id"].tolist()]
-    counts = _query_nqs_competition_counts_by_year(oids, panel_kind, seg_dt_ids)
+    counts = _query_nqs_competition_counts_by_year(
+        oids,
+        panel_kind,
+        seg_dt_ids,
+        require_competition_nqs=require_competition_nqs,
+        require_competition_synchronized=require_competition_synchronized,
+        include_qualifying_competitions=include_qualifying_competitions,
+    )
     if counts.empty:
         pivot = pd.DataFrame({"official_id": oids})
     else:
@@ -2736,10 +2911,16 @@ def get_nqs_detailed_activity_report_df(
             fill_value=0,
         ).reset_index()
 
-    out = qualified[["official_id", "full_name", "Level"]].merge(
-        pivot, on="official_id", how="left"
-    )
-    numeric_years = [c for c in out.columns if c not in ("official_id", "full_name", "Level")]
+    if omit_level_column:
+        merge_cols = ["official_id", "full_name"]
+        out = qualified[merge_cols].merge(pivot, on="official_id", how="left")
+        meta = {"official_id", "full_name"}
+    else:
+        out = qualified[["official_id", "full_name", "Level"]].merge(
+            pivot, on="official_id", how="left"
+        )
+        meta = {"official_id", "full_name", "Level"}
+    numeric_years = [c for c in out.columns if c not in meta]
     for c in numeric_years:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
     year_cols_sorted = sorted(
@@ -2754,7 +2935,10 @@ def get_nqs_detailed_activity_report_df(
 
     out = out.rename(columns={"full_name": "Name"})
     out = out.drop(columns=["official_id"], errors="ignore")
-    col_order = ["Name", "Level", "Total"] + year_cols_sorted
+    if omit_level_column:
+        col_order = ["Name", "Total"] + year_cols_sorted
+    else:
+        col_order = ["Name", "Level", "Total"] + year_cols_sorted
     out = out[[c for c in col_order if c in out.columns]]
     # Streamlit/PyArrow warn on mixed-type column labels (str vs int year keys from pivot).
     out.columns = pd.Index([str(c) for c in out.columns])

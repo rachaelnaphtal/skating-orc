@@ -13,6 +13,8 @@ def categorizeElement(element):
         element = element.replace("+SyTwM", "")
         element = element.replace("+DiStM", "")
         element = element.replace("+OFTM", "")
+        element = element.replace("+OFStM", "")
+        element = element.replace("+PStM", "")
         element = element.replace("+CiStM", "")
         element = element.replace("+SeStM", "")
         element = element.replace("+SqTwM", "")
@@ -64,6 +66,7 @@ def categorizeElement(element):
         "CiStW": "Step Sequence",
         "SoPSt": "Step Sequence",
         "PSt": "Step Sequence",
+        "PStW": "Step Sequence",
         "OFTW": "Step Sequence",
         "SoOFT": "Step Sequence",
         "SqTwW": "Twizzle",
@@ -71,6 +74,8 @@ def categorizeElement(element):
         "PiF": "Pivot Figure",
         "DiSt": "Step Sequence",
         "OFT": "Step Sequence",
+        "OFSt": "Step Sequence",
+        "OFStW": "Step Sequence",
         "MiSt": "Step Sequence",
         "SpEe": "Edge Element",
         "SeEe": "Edge Element",

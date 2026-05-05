@@ -728,15 +728,17 @@ def extract_judge_scores(
     only_rule_errors=False,
     use_gcp=False,
     create_thrown_out_analysis=False,
-    judge_filter="", 
+    judge_filter="",
     isFSM=False,
+    write_excel=True,
+    http_session=None,
 ):
     if isFSM:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
             pdf_path, event_regex, use_gcp=use_gcp, isFSM=True
         )
     elif use_html:
-        page_contents = get_page_contents(url)
+        page_contents = get_page_contents(url, session=http_session)
         if not page_contents:
             print(f"WARNING: Empty or failed HTML fetch for {url!r}")
             return ("", None, None, None, [], [], [])
@@ -777,15 +779,16 @@ def extract_judge_scores(
     )
 
     formatted_event_name = event_name.replace("/", "")
-    printToExcel(
-        workbook,
-        event_name,
-        judges,
-        element_errors,
-        element_deviations,
-        pcs_errors,
-        pdf_number,
-    )
+    if write_excel:
+        printToExcel(
+            workbook,
+            event_name,
+            judges,
+            element_errors,
+            element_deviations,
+            pcs_errors,
+            pdf_number,
+        )
 
     all_element_dict = {}
     all_pcs_dict = {}
@@ -1185,12 +1188,15 @@ def printToExcel(
     # print (f"Processed {event_name}")
 
 
-def get_page_contents(url):
+def get_page_contents(url, session=None):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
     }
 
-    page = requests.get(url, headers=headers)
+    if session is not None:
+        page = session.get(url, headers=headers, timeout=30)
+    else:
+        page = requests.get(url, headers=headers, timeout=30)
 
     if page.status_code == 200:
         return page.text

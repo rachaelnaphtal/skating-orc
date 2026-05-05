@@ -32,6 +32,7 @@ from load_activity_data import (
     get_nqs_detailed_activity_report_df,
     activity_database_is_postgresql,
     NQS_REPORT_LEVEL_FILTER_BY_LABEL,
+    SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, or_, select
@@ -520,6 +521,12 @@ REPORT_REFEREE_SERVICE = "Referee service (by competition type)"
 REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
 REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
 REPORT_NQS_DETAILED = "NQS detailed activity"
+REPORT_SYNCHRO_ACTIVITY = "Synchro Activity"
+
+# Shown as column header help when the NQS pivot includes season column 2122.
+NQS_COLUMN_2122_HELP = (
+    "NQS was cancelled this year due to Covid so this reflects the US Championship Series."
+)
 
 report_mode = st.radio(
     "Report",
@@ -531,6 +538,7 @@ report_mode = st.radio(
         REPORT_PERSON_ASSIGNMENTS,
         REPORT_COMPETITION_ASSIGNMENTS,
         REPORT_NQS_DETAILED,
+        REPORT_SYNCHRO_ACTIVITY,
     ],
     horizontal=True,
 )
@@ -540,6 +548,7 @@ if report_mode in (
     REPORT_CHAMPIONSHIPS_DETAILED,
     REPORT_SECTIONALS_DETAILED,
     REPORT_NQS_DETAILED,
+    REPORT_SYNCHRO_ACTIVITY,
 ):
     active_appointments_only = st.checkbox(
         "Active appointments only",
@@ -682,12 +691,19 @@ def load_nqs_activity_table(
     discipline: str,
     active_only: bool,
     directory_level_ids: tuple[int, ...],
+    *,
+    require_competition_nqs: bool = True,
+    require_competition_synchronized: bool = False,
+    include_qualifying_competitions: bool = True,
 ):
     return get_nqs_detailed_activity_report_df(
         official_type,
         discipline,
         active_appointments_only=active_only,
         directory_level_ids=directory_level_ids,
+        require_competition_nqs=require_competition_nqs,
+        require_competition_synchronized=require_competition_synchronized,
+        include_qualifying_competitions=include_qualifying_competitions,
     )
 
 
@@ -1324,78 +1340,190 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
     st.stop()
 
 
-if report_mode == REPORT_NQS_DETAILED:
+if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
+    synchro = report_mode == REPORT_SYNCHRO_ACTIVITY
     if not activity_database_is_postgresql():
-        st.info(
-            "NQS panel activity needs PostgreSQL with judging ``public`` tables and a "
-            "``competition.nqs`` column (see migration ``005_public_competition_nqs.sql``)."
-        )
+        if synchro:
+            st.stop()
+        else:
+            st.info(
+                "This report needs PostgreSQL with judging ``public`` tables and a "
+                "``competition.nqs`` column (see migration ``005_public_competition_nqs.sql``)."
+            )
         st.stop()
-    nqs_official_type = st.selectbox(
-        "Official type",
-        options=[
+    _nq_key = "synchro_" if synchro else "nqs_"
+    _official_type_options = (
+        [
+            "All",
             "Judge",
             "Referee",
             "Technical Controller",
             "Technical Specialist",
-        ],
-        key="nqs_official_type",
+        ]
+        if synchro
+        else [
+            "Judge",
+            "Referee",
+            "Technical Controller",
+            "Technical Specialist",
+        ]
     )
-    if nqs_official_type in ("Judge", "Referee"):
-        nqs_discipline = st.selectbox(
-            "Discipline",
-            options=["Singles/Pairs", "Dance"],
-            key="nqs_discipline_jr",
+    nqs_official_type = st.selectbox(
+        "Official type",
+        options=_official_type_options,
+        key=f"{_nq_key}official_type",
+    )
+    if synchro:
+        nqs_discipline = "Synchronized"
+        include_qualifying_competitions = st.checkbox(
+            "Include qualifying",
+            value=True,
+            key=f"{_nq_key}include_qualifying",
         )
     else:
-        nqs_discipline = st.selectbox(
-            "Discipline",
-            options=["Singles", "Pairs", "Dance"],
-            key="nqs_discipline_tc_ts",
-        )
+        include_qualifying_competitions = True
+        if nqs_official_type in ("Judge", "Referee"):
+            nqs_discipline = st.selectbox(
+                "Discipline",
+                options=["Singles/Pairs", "Dance"],
+                key="nqs_discipline_jr",
+            )
+        else:
+            nqs_discipline = st.selectbox(
+                "Discipline",
+                options=["Singles", "Pairs", "Dance"],
+                key="nqs_discipline_tc_ts",
+            )
+    _level_options = (
+        SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL
+        if synchro
+        else NQS_REPORT_LEVEL_FILTER_BY_LABEL
+    )
     nqs_level_labels = st.multiselect(
         "Official level (directory)",
-        options=list(NQS_REPORT_LEVEL_FILTER_BY_LABEL.keys()),
-        default=list(NQS_REPORT_LEVEL_FILTER_BY_LABEL.keys()),
-        key="nqs_level_filter",
+        options=list(_level_options.keys()),
+        default=list(_level_options.keys()),
+        key=f"{_nq_key}level_filter",
     )
     if not nqs_level_labels:
         st.info("Select at least one appointment level.")
         st.stop()
     nqs_directory_level_ids = tuple(
-        sorted(NQS_REPORT_LEVEL_FILTER_BY_LABEL[lbl] for lbl in nqs_level_labels)
+        sorted(_level_options[lbl] for lbl in nqs_level_labels)
     )
     nqs_table = load_nqs_activity_table(
         nqs_official_type,
         nqs_discipline,
         active_appointments_only,
         nqs_directory_level_ids,
+        require_competition_nqs=not synchro,
+        require_competition_synchronized=synchro,
+        include_qualifying_competitions=include_qualifying_competitions,
     )
-    st.caption(
-        "Note: If qualifying and non-qualifying portions of an NQS meet were combined into one "
-        "IJS competition (single ``public.competition`` row marked ``nqs``), panel activity from "
-        "the non-qualifying segments may be included in these counts as well."
-    )
-    if nqs_table.empty:
-        st.info(
-            "No officials match the directory filters, the appointment type was not found, "
-            "or NQS query failed (e.g. missing ``nqs`` column)."
+    if not synchro:
+        st.caption(
+            "Note: If qualifying and non-qualifying portions of an NQS competition were combined, "
+            "the panel activity from the non-qualifying segments may be included in these counts "
+            "as well."
         )
+    if nqs_table.empty:
+        if not synchro:
+            st.info(
+                "No officials match the directory filters, the appointment type was not found, "
+                "or NQS query failed (e.g. missing ``nqs`` column)."
+            )
     else:
+        _has_level = "Level" in nqs_table.columns
+        _label_cols = {"Name", "Level"} if _has_level else {"Name"}
+        nqs_numeric_cols = [c for c in nqs_table.columns if c not in _label_cols]
+        _fixed_cols = {"Name", "Total"}
+        if _has_level:
+            _fixed_cols.add("Level")
         nqs_col_cfg = {
             "Name": st.column_config.TextColumn("Name", width="large"),
-            "Level": st.column_config.TextColumn("Level", width="medium"),
-            "Total": st.column_config.NumberColumn("Total", format="%d"),
         }
+        if _has_level:
+            nqs_col_cfg["Level"] = st.column_config.TextColumn("Level", width="medium")
+        nqs_col_cfg["Total"] = st.column_config.NumberColumn("Total", format="%d")
         for _c in nqs_table.columns:
-            if _c not in ("Name", "Level", "Total"):
-                nqs_col_cfg[_c] = st.column_config.NumberColumn(str(_c), format="%d")
+            if _c not in _fixed_cols:
+                _num_kw: dict = {"format": "%d"}
+                if str(_c).strip() == "2122":
+                    _num_kw["help"] = NQS_COLUMN_2122_HELP
+                nqs_col_cfg[_c] = st.column_config.NumberColumn(str(_c), **_num_kw)
         st.dataframe(
             nqs_table,
             width="stretch",
             hide_index=True,
             column_config=nqs_col_cfg,
         )
+        if nqs_numeric_cols:
+            stats_vals: dict[str, object] = {"Name": "Average"}
+            stats_cfg = {
+                "Name": st.column_config.TextColumn("Name", width="large"),
+            }
+            if _has_level:
+                stats_vals["Level"] = ""
+                stats_cfg["Level"] = st.column_config.TextColumn("Level", width="medium")
+            for col in nqs_numeric_cols:
+                s = pd.to_numeric(nqs_table[col], errors="coerce")
+                m = s.mean(skipna=True)
+                stats_vals[col] = float(m) if pd.notna(m) else 0.0
+                _stat_kw: dict = {"format": "%.2f"}
+                if str(col).strip() == "2122":
+                    _stat_kw["help"] = NQS_COLUMN_2122_HELP
+                stats_cfg[col] = st.column_config.NumberColumn(str(col), **_stat_kw)
+            stats_df = pd.DataFrame([stats_vals])[nqs_table.columns.tolist()]
+            st.dataframe(
+                stats_df,
+                width="stretch",
+                hide_index=True,
+                column_config=stats_cfg,
+            )
+
+            def _nqs_year_col_sort_key(c: object) -> int:
+                try:
+                    return int(str(c).strip())
+                except (TypeError, ValueError):
+                    return 0
+
+            _chart_opts: list[str] = []
+            if "Total" in nqs_numeric_cols:
+                _chart_opts.append("Total")
+            _year_cols = [c for c in nqs_numeric_cols if c != "Total"]
+            _chart_opts.extend(
+                sorted(_year_cols, key=_nqs_year_col_sort_key, reverse=True)
+            )
+            if _chart_opts:
+                _comp_short = "Synchro" if synchro else "NQS"
+                _hist_col = st.selectbox(
+                    f"Distribution chart: {_comp_short} competitions in",
+                    options=_chart_opts,
+                    index=0,
+                    key=f"{_nq_key}hist_metric_select",
+                )
+                _hist_series = (
+                    pd.to_numeric(nqs_table[_hist_col], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                )
+                _nqs_dist_df = (
+                    _hist_series.value_counts()
+                    .sort_index()
+                    .reset_index()
+                )
+                _x_label = (
+                    f"Total {_comp_short} competitions"
+                    if _hist_col == "Total"
+                    else f"{_comp_short} competitions ({_hist_col})"
+                )
+                _nqs_dist_df.columns = [_x_label, "Officials"]
+                st.subheader("Officials by competition count")
+                st.bar_chart(
+                    _nqs_dist_df,
+                    x=_x_label,
+                    y="Officials",
+                )
     st.stop()
 
 
