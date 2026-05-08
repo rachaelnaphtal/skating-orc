@@ -1070,10 +1070,10 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
             segment_id = database_obj.insert_segment(event_name, competition_id)
         if segment_id is not None and segment_official_rows:
             database_obj.replace_segment_officials(segment_id, segment_official_rows)
-            print(
-                f"INFO: segment_official {len(segment_official_rows)} row(s) → "
-                f"segment id {segment_id} ({event_name!r})"
-            )
+            # print(
+            #     f"INFO: segment_official {len(segment_official_rows)} row(s) → "
+            #     f"segment id {segment_id} ({event_name!r})"
+            # )
     return agg_all_element_df,agg_all_pcs_df
 
 
@@ -1458,29 +1458,30 @@ if __name__ == "__main__":
     # scrape('https://ijs.usfigureskating.org/leaderboard/results/2026/36273',
     #        '2026_US_Championships_Senior', write_to_database=True, pdf_folder=pdf_folder, year=2526, isFSM=True)
     to_load ={
-              "2023 WisconSync! Synchronized Competition" : "2023/33728",
-              "2023 Chuck Cope Synchronized Competition":"2023/33666",
-              "2023 Capital Ice Synchro Classic":"2023/33819",
-              "2023 Stars and Stripes Synchro Invitational":"2023/33720",
-              "2023 Diamond Synchro Classic":"2023/33708",
-              "2023 Fall Synchro Classic":"2023/33802",
+              "2022 WisconSync! Synchronized Competition" : "2022/30924",
+            #   "2023 Chuck Cope Synchronized Competition":"2023/33666",
+              "2022 Capital Ice Synchro Classic":"2022/32044",
+            #   "2023 Stars and Stripes Synchro Invitational":"2023/33720",
+            #   "2023 Diamond Synchro Classic":"2023/33708",
+              "2023 Fall Synchro Classic":"2022/31989",
             #   "2025 LeeAnn Miele Synchro Open":"",
-            #   "2023 Essex Synchro Classic":"2023/",
-              "2023 Boston Synchro Classic":"2023/33731",
-              "2023 Kalamazoo Synchro Kickoff Classic":"2023/33460",
-              "2023 Porter Synchro Classic":"2023/33760",
-              "2023 Terry Connors Open Synchro":"2023/33750",
-              "2023 Maplewood Synchro Classic":"2023/33882",
-              "2023 New England Synchro Classic":"2023/33886",
-              "2023 South Atlantic Synchro Open":"2023/33774",
-              "2024 Colonial Synchro Classic":"2024/33713",
-              "2024 Mid America Synchro Classic":"2024/33878",
-              "2024 Synchro Illinois":"2024/33872",
-              "2024 Tri-State Synchro":"2024/33730",
-              "2024 Connecticut Synchro Classic":"2024/33712",
-              "2024 Swan Synchro Skate":"2024/33837",
-              "2024 Reflections Synchro Classic":"2024/33757",
-              "2024 Sweetheart Synchro Classic":"2024/34184"}
+              "2023 Essex Synchro Classic":"2022/31994",
+              "2022 Boston Synchro Classic":"2022/30956",
+              "2022 Kalamazoo Synchro Kickoff Classic":"2022/30952",
+              "2022 Porter Synchro Classic":"2022/31987",
+              "2022 Terry Connors Open Synchro":"2022/32019",
+              "2022 Maplewood Synchro Classic":"2022/31982",
+              "2022 Cape Cod Synchro Classic":"2022/31969",
+            #   "2023 New England Synchro Classic":"2023/33886",
+            #   "2023 South Atlantic Synchro Open":"2023/33774",
+              "2023 Colonial Synchro Classic":"2023/31980",
+              "2023 Mid America Synchro Classic":"2022/30812",
+              "2023 Synchro Illinois":"2023/30944",
+              "2023 Tri-State Synchro":"2023/32157",
+              "2023 Connecticut Synchro Classic":"2023/32076",
+            #   "2024 Swan Synchro Skate":"2024/33837",
+              "2023 Reflections Synchro Classic":"2023/32108",
+              "2023 Sweetheart Synchro Classic":"2023/32328"}
               
     for name in to_load:
         scrape(
@@ -1489,9 +1490,10 @@ if __name__ == "__main__":
             write_to_database=True,
             pdf_folder=pdf_folder,
             excel_folder=excel_folder,
-            year="2324",
+            year="2223",
             isFSM=False,
             write_excel=False
         )
+    
     
     loadInfoForExistingCompetitions()

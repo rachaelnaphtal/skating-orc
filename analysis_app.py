@@ -2672,26 +2672,26 @@ elif page == "Load Competition":
     # ── Basic fields ────────────────────────────────────────────────────────
     base_url = st.text_input(
         "Competition URL",
-        placeholder="https://ijs.usfigureskating.org/leaderboard/results/2026/34238",
+        placeholder="https://ijs.usfigureskating.org/leaderboard/results/2026/34238/index.asp",
     )
     report_name = st.text_input(
-        "Report name (used as file prefix)",
-        placeholder="2026_US_Synchronized_Skating_Championships",
+        "Competition Name",
+        placeholder="2026 US Synchronized Skating Championships",
     )
     year = st.text_input(
         "Season year code",
         value="2526",
         help="e.g. 2526 for the 2025-26 season, 2425 for 2024-25",
     )
-    pdf_folder = st.text_input(
-        "PDF output folder (leave blank if not saving PDFs)",
-        value="",
-        placeholder="/path/to/pdfs",
-    )
+    # pdf_folder = st.text_input(
+    #     "PDF output folder (leave blank if not saving PDFs)",
+    #     value="",
+    #     placeholder="/path/to/pdfs",
+    # )
 
     # ── Advanced options ─────────────────────────────────────────────────────
     with st.expander("Advanced options"):
-        excel_folder = st.text_input("Excel output folder (leave blank to skip)", value="")
+        # excel_folder = st.text_input("Excel output folder (leave blank to skip)", value="")
         event_regex = st.text_input(
             "Event regex filter",
             value="",
@@ -2708,9 +2708,9 @@ elif page == "Load Competition":
             help="Exclude specific events matching this string.",
         )
         only_rule_errors = st.checkbox("Only rule errors", value=False)
-        add_additional_analysis = st.checkbox("Add additional analysis", value=False)
-        use_html = st.checkbox("Use HTML mode", value=True)
-        isFSM = st.checkbox("Is FSM competition", value=False)
+        # add_additional_analysis = st.checkbox("Add additional analysis", value=False)
+        # use_html = st.checkbox("Use HTML mode", value=True)
+        # isFSM = st.checkbox("Is FSM competition", value=False)
 
     st.markdown("---")
 
@@ -2723,21 +2723,23 @@ elif page == "Load Competition":
             import importlib as _il
             _mod = _il.import_module("downloadResults")
             scrape_fn = getattr(_mod, "scrape")
+            isFSM = not base_url.strip().endswith("index.asp")
+            url=base_url.strip().replace("/index.asp", "").replace("/index.htm", "")
+            if url.endswith('/'):
+                url = url[:-1]
 
             kwargs = dict(
-                base_url=base_url.strip(),
+                base_url=url,
                 report_name=report_name.strip(),
-                excel_folder=excel_folder.strip(),
-                pdf_folder=pdf_folder.strip(),
                 event_regex=event_regex.strip(),
                 only_rule_errors=only_rule_errors,
                 use_gcp=False,
-                add_additional_analysis=add_additional_analysis,
+                write_excel=False,
                 write_to_database=True,
                 year=year.strip(),
                 judge_filter=judge_filter.strip(),
                 specific_exclude=specific_exclude.strip(),
-                use_html=use_html,
+                use_html=True,
                 isFSM=isFSM,
             )
 

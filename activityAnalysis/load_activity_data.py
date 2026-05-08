@@ -519,16 +519,23 @@ def insert_assignments(
             .first()
         )
 
+        row_chief = bool(row.get("Chief", False))
+        row_lower = bool(row.get("Lower_Levels_Only", False))
         if exists:
-            continue  # skip duplicates
+            if bool(exists.chief) != row_chief or bool(
+                exists.lower_levels_only
+            ) != row_lower:
+                exists.chief = row_chief
+                exists.lower_levels_only = row_lower
+            continue
 
         assignment = Assignment(
             competition_id=comp.id,
             official_id=official_id,
             discipline_id=int(discipline_id),
             appointment_type_id=int(appointment_type_id),
-            chief=bool(row.get("Chief", False)),
-            lower_levels_only=bool(row.get("Lower_Levels_Only", False)),
+            chief=row_chief,
+            lower_levels_only=row_lower,
         )
 
         session.add(assignment)
