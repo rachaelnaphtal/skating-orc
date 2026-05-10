@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Streamlit local config / secrets
+.streamlit/
+
+# Local TLS certs / keys (e.g. dev HTTPS)
+ssl/
+
+# Archived / legacy code not part of the main app
+archive/
+
+# Database dumps
+backups/
+
+# Python
+__pycache__/
+# Local venv metadata (repo-level or copied venv)
+pyvenv.cfg
