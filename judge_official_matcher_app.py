@@ -42,6 +42,7 @@ def _build_review_table(
     labels: dict[int, str],
     *,
     default_link_min_score: float,
+    id_to_display: dict[int, str],
 ) -> pd.DataFrame:
     rows_out: list[dict] = []
     for j in judges:
@@ -54,10 +55,12 @@ def _build_review_table(
             official_id: int | None = int(oid)
             score = round(float(sc), 1)
             directory_name = lbl
+            directory_official = id_to_display.get(official_id, lbl)
         else:
             official_id = None
             score = 0.0
             directory_name = ""
+            directory_official = ""
         decision = "Link" if score >= default_link_min_score and official_id else "Skip"
         rows_out.append(
             {
@@ -66,14 +69,30 @@ def _build_review_table(
                 "location": loc,
                 "match_score": score,
                 "directory_name": directory_name,
-                "official_id": official_id,
+                "directory_official": directory_official,
                 "decision": decision,
             }
         )
-    df = pd.DataFrame(rows_out)
-    if not df.empty:
-        df["official_id"] = df["official_id"].astype("Int64")
-    return df
+    return pd.DataFrame(rows_out)
+
+
+def _filter_official_select_options(
+    full_options: list[str],
+    needle: str,
+    *,
+    pinned: set[str],
+) -> list[str]:
+    """``full_options`` includes leading ``""``. Narrow by substring; keep ``pinned`` values visible."""
+    rest = [o for o in full_options if o]
+    n = needle.strip().casefold()
+    if not n:
+        out = list(rest)
+    else:
+        out = [o for o in rest if n in o.casefold()]
+    for p in pinned:
+        if p and p not in out:
+            out.append(p)
+    return [""] + sorted(set(out), key=str.casefold)
 
 
 def render_judge_official_matcher(*, embedded: bool = False) -> None:
@@ -113,6 +132,9 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         st.stop()
 
     labels = _official_labels()
+    full_select_options, display_to_id, id_to_display = core.official_select_display_maps(
+        labels
+    )
     st.sidebar.metric("Officials in directory (with name)", len(labels))
 
     max_rows = st.sidebar.number_input("Max unmapped judges to load", 10, 5000, 400, 10)
@@ -131,7 +153,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
     st.subheader("Review and apply")
     st.write(
         "Each row is a protocol name with the **best fuzzy match** to the directory. "
-        "Adjust **official_id** or **decision**, then **Apply decisions in table**."
+        "Choose the **directory official** (search names in the sidebar filter), set **decision**, "
+        "then **Apply decisions in table**."
     )
 
     if st.button(
@@ -151,7 +174,27 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         _official_labels.clear()
         st.rerun()
 
-    df = _build_review_table(judges, labels, default_link_min_score=float(default_link))
+    df = _build_review_table(
+        judges,
+        labels,
+        default_link_min_score=float(default_link),
+        id_to_display=id_to_display,
+    )
+    pinned = {str(x) for x in df["directory_official"].dropna() if str(x).strip()}
+    name_filter = st.sidebar.text_input(
+        "Filter directory names",
+        value="",
+        help="Narrows the **Directory official** dropdown (substring match, case-insensitive). "
+        "Suggested picks for loaded rows stay in the list.",
+        placeholder="e.g. Smith",
+    )
+    select_options = _filter_official_select_options(
+        full_select_options,
+        name_filter,
+        pinned=pinned,
+    )
+    if name_filter.strip() and len(select_options) <= 1:
+        st.sidebar.caption("No matches — clear or broaden the filter.")
 
     edited = st.data_editor(
         df,
@@ -161,11 +204,11 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             "location": st.column_config.TextColumn("Protocol location", disabled=True),
             "match_score": st.column_config.NumberColumn("Best match score", disabled=True, format="%.1f"),
             "directory_name": st.column_config.TextColumn("Directory (suggested)", disabled=True, width="large"),
-            "official_id": st.column_config.NumberColumn(
-                "Official ID (edit)",
-                help="Must match an id in officials_analysis.officials (leave empty if unsure).",
-                step=1,
-                format="%d",
+            "directory_official": st.column_config.SelectboxColumn(
+                "Directory official",
+                help="Directory entry to link (same strings as US roster names; duplicate names show · id …).",
+                options=select_options,
+                required=False,
             ),
             "decision": st.column_config.SelectboxColumn(
                 "Decision",
@@ -193,11 +236,20 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                 applied += 1
                 continue
             if dec == "Link":
-                oid = row["official_id"]
-                if pd.isna(oid):
-                    errors.append(f"Judge {jid}: Link selected but official_id is empty.")
+                disp = row.get("directory_official")
+                if disp is None or (isinstance(disp, float) and pd.isna(disp)) or str(disp).strip() == "":
+                    errors.append(
+                        f"Judge {jid}: Link selected — pick a **Directory official** or change decision."
+                    )
                     continue
-                oid_int = int(oid)
+                disp_s = str(disp).strip()
+                oid_int = display_to_id.get(disp_s)
+                if oid_int is None:
+                    errors.append(
+                        f"Judge {jid}: could not resolve directory row {disp_s!r}. "
+                        "Adjust the filter so that name appears in the list, then re-select."
+                    )
+                    continue
                 if not core.official_exists(eng, oid_int):
                     errors.append(
                         f"Judge {jid}: official_id {oid_int} not found in officials_analysis.officials."

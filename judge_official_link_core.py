@@ -116,6 +116,34 @@ def fetch_official_choices(conn: Connection) -> dict[int, str]:
     return {int(r["id"]): str(r["label"]) for r in rows}
 
 
+def official_select_display_maps(
+    labels: dict[int, str],
+) -> tuple[list[str], dict[str, int], dict[int, str]]:
+    """
+    Build UI strings for picking an official by directory name (not raw id).
+
+    Returns ``(select_options, display_to_id, id_to_display)`` where ``select_options``
+    starts with ``""`` (no selection), then sorted display strings. Duplicate
+    ``labels`` values get `` · id {official_id}`` so each row maps uniquely.
+    """
+    by_label: dict[str, list[int]] = {}
+    for oid, lbl in labels.items():
+        by_label.setdefault(lbl, []).append(int(oid))
+    display_to_id: dict[str, int] = {}
+    id_to_display: dict[int, str] = {}
+    for lbl, oids in by_label.items():
+        oids_sorted = sorted(oids)
+        for oid in oids_sorted:
+            if len(oids_sorted) > 1:
+                disp = f"{lbl} · id {oid}"
+            else:
+                disp = lbl
+            display_to_id[disp] = oid
+            id_to_display[oid] = disp
+    options = [""] + sorted(display_to_id.keys(), key=str.casefold)
+    return options, display_to_id, id_to_display
+
+
 def fetch_unmapped_judges(conn: Connection, limit: int | None = None) -> list[RowMapping]:
     lim_sql = " LIMIT :lim" if limit is not None else ""
     q = text(
