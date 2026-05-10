@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import traceback
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -2273,6 +2274,8 @@ elif page == "Load Competition":
                 st.cache_resource.clear()
             except Exception as _exc:
                 status_area.error(f"Scrape failed: {_exc}")
+                with st.expander("Error details (traceback)", expanded=False):
+                    st.code(traceback.format_exc(), language="python")
 
 else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")

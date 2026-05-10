@@ -674,20 +674,46 @@ def loadCompetitionInfo(base_url, session=None):
         return loadCompetitionInfoFSM(base_url, session=session)
 
     page_contents = get_page_contents(base_url, session=session)
+    if not page_contents:
+        print(f"WARNING: Empty page fetching competition info {base_url!r}")
+        return ("", "", "")
     soup = BeautifulSoup(page_contents, "html.parser")
     all_h3_tags = soup.find_all('h3')
+    if len(all_h3_tags) < 3:
+        print(
+            f"WARNING: Expected at least 3 <h3> blocks for dates/location on {base_url!r}, "
+            f"found {len(all_h3_tags)}"
+        )
+        return ("", "", "")
     date = all_h3_tags[0].get_text().split(" ")
-    start_date = date[0]
-    end_date = date[2]
+    start_date = date[0] if date else ""
+    end_date = date[2] if len(date) > 2 else (date[1] if len(date) > 1 else start_date)
     location = all_h3_tags[2].get_text()
     return (start_date, end_date, location)
 
 def loadCompetitionInfoFSM(base_url, session=None):
     page_contents = get_page_contents(base_url, session=session)
+    if not page_contents:
+        print(f"WARNING: Empty page fetching FSM competition info {base_url!r}")
+        return ("", "", "")
     soup = BeautifulSoup(page_contents, "html.parser")
 
-    start_date, end_date = soup.find_all("tr", class_="caption3")[0].find("td").text.replace(" ", "").split("-")
-    location = soup.find_all("td", class_="caption3")[0].text
+    caption_rows = soup.find_all("tr", class_="caption3")
+    if caption_rows:
+        td = caption_rows[0].find("td")
+        raw = (td.get_text() if td else "").replace(" ", "")
+        parts = raw.split("-") if raw else []
+        if len(parts) >= 2:
+            start_date, end_date = parts[0], parts[1]
+        elif len(parts) == 1:
+            start_date = end_date = parts[0]
+        else:
+            start_date, end_date = "", ""
+    else:
+        print(f"WARNING: No tr.caption3 date row on FSM page {base_url!r}")
+        start_date, end_date = "", ""
+    loc_cells = soup.find_all("td", class_="caption3")
+    location = loc_cells[0].text if loc_cells else ""
     return (start_date, end_date, location)
 
 

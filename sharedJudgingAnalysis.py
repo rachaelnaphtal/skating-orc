@@ -4,7 +4,11 @@ import re
 
 # Return type of element
 def categorizeElement(element):
-    element = element.replace("<", "")
+    element = (element or "").replace("<", "").strip()
+    if not element:
+        return ""
+    if "+fm" in element:
+        return "Moves Element"
     if "+" in element:
         if element[-1].isdigit():
             element = element[:-1]
@@ -20,19 +24,30 @@ def categorizeElement(element):
         element = element.replace("+SqTwM", "")
         element = element.replace("+MiStM", "")
         element = element.replace("+pSTwM", "")
+        element = element.replace("+fm", "")
+        element = element.replace("+d", "")
         # element = element.replace("+SeEe", "")
+    if not element:
+        return ""
     if element[-1] == "V":
         element = element[:-1]
-    if element[-1].isdigit():
+    if element and element[-1].isdigit():
         element = element[:-1]
+    if not element:
+        return ""
     if element == "PB":
         return "Pivoting Block"
     if element[-1] == "B":
         element = element[:-1]
+    if not element:
+        return ""
 
     element_dict = {
         "Pa": "Pair Element",
         "TrE": "Travelling Element",
+        "TE": "Twizzle Element",
+        "TW": "Travelling Element",
+        "TC": "Travelling Element",
         "ME": "Moves Element",
         "TwE": "Twizzle Element",
         "AL": "Artistic",
@@ -48,6 +63,7 @@ def categorizeElement(element):
         "CrL": "Creative",
         "CrI": "Creative",
         "GL": "Group Lift",
+        "Co": "Mixed Element",
         "Mi": "Mixed Element",
         "PB": "Pivoting Block",
         "ChSq": "ChSq",
@@ -105,7 +121,7 @@ def categorizeElement(element):
         return "Spin"
     elif element.endswith("Th"):
         return "Throw Jump"
-    elif element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F", "H"]:
+    elif len(element) >= 2 and element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F", "H"]:
         return "Jump"
     elif element.endswith("+pi") or element == "I":
         return "Intersection"

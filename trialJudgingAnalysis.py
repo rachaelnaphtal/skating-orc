@@ -129,8 +129,8 @@ def analyze_trial_judges(
             avg = sum(allScores) / len(allScores)
             total_element_count += 1
 
-            element_name_no_level = element_details["Element"]
-            if element_name_no_level[-1].isdigit():
+            element_name_no_level = element_details["Element"] or ""
+            if element_name_no_level and element_name_no_level[-1].isdigit():
                 element_name_no_level = element_name_no_level[:-1]
 
             judge_number = 1

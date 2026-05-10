@@ -497,15 +497,19 @@ def extract_skater_element_sections(soup):
     while i < len(tables):
         tbl = tables[i]
         if "sum" in (tbl.get("class") or []):
-            row = tbl.find("tbody").find("tr")
-
-            rank = row.find_all(class_="rank")[0].get_text(
-                strip=True) if row else None
-            skater_title = row.find_all(class_="name")[0].get_text(
-                strip=True) if row else None
-            skater_name = skater_title.split(",")[0]
-            skater_total_element_score = row.find_all(
-                class_="totElm")[0].get_text(strip=True) if row else None
+            tbody = tbl.find("tbody")
+            row = tbody.find("tr") if tbody else None
+            rank_cells = row.find_all(class_="rank") if row else []
+            rank = rank_cells[0].get_text(strip=True) if rank_cells else None
+            name_cells = row.find_all(class_="name") if row else []
+            skater_title = name_cells[0].get_text(strip=True) if name_cells else None
+            skater_name = (
+                skater_title.split(",")[0].strip() if skater_title else ""
+            )
+            tot_elm = row.find_all(class_="totElm") if row else []
+            skater_total_element_score = (
+                tot_elm[0].get_text(strip=True) if tot_elm else None
+            )
             skater = {"name": skater_name,
                       "rank": rank,
                       "element_score": skater_total_element_score}
@@ -642,8 +646,8 @@ def create_all_element_dict(judges, elements_per_skater, event_name):
                 deviation = judge_score - avg
                 thrown_out = is_score_thrown_out(judge_score, all_scores)
                 high = judge_score > avg
-                element_name_no_level = element["Element"]
-                if element_name_no_level[-1].isdigit():
+                element_name_no_level = element["Element"] or ""
+                if element_name_no_level and element_name_no_level[-1].isdigit():
                     element_name_no_level = element_name_no_level[:-1]
 
                 all_elements.append(
