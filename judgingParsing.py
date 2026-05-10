@@ -31,6 +31,26 @@ import streamlit as st
 USING_ISU_COMPONENT_METHOD = False
 
 
+def split_judge_filter_names(judge_filter: str) -> frozenset[str]:
+    """Split user-entered ``judge_filter`` into exact panel-name tokens.
+
+    Tokens are separated by comma, semicolon, or newline. Empty / whitespace-only
+    entries are dropped. When the result is empty, callers treat it as *no filter*.
+    """
+    if not judge_filter or not str(judge_filter).strip():
+        return frozenset()
+    parts = re.split(r"[\n,;]+", str(judge_filter))
+    return frozenset(p.strip() for p in parts if p and p.strip())
+
+
+def judge_name_allowed_by_filter(judge_name: str, judge_filter: str) -> bool:
+    """If ``judge_filter`` resolves to no tokens, all judges are allowed; else exact name match."""
+    allowed = split_judge_filter_names(judge_filter)
+    if not allowed:
+        return True
+    return judge_name in allowed
+
+
 def autofit_worksheet(worksheet):
     max_length = 0
     for col in worksheet.columns:
@@ -877,7 +897,7 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
                         print(
                             f"Missing elements for skater {skater} judge {judgeNumber}")
                     continue
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
+                if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
                 # Must be -5 if  it is a short and there is a +COMBO or *
                 if (
@@ -975,7 +995,7 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
                         print(
                             f"Missing elements for skater {skater} judge {judgeNumber}")
                     continue
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
+                if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if abs(deviation) >= 2:
@@ -1012,7 +1032,7 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
                         print(
                             f"Missing component for skater {skater} judge {judgeNumber}")
                     continue
-                if len(judge_filter) > 0 and judge_filter != judges[judgeNumber-1]:
+                if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
                 if not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5:
@@ -1033,6 +1053,10 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
 
         for judgeNumber in range(1, len(allScores) + 1):
             if USING_ISU_COMPONENT_METHOD and deviation_points[judgeNumber] > 4.5:
+                if not judge_name_allowed_by_filter(
+                    judges[judgeNumber - 1], judge_filter
+                ):
+                    continue
                 # Add errors here if using ISU method
                 errors.append(
                     {

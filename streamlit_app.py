@@ -2,6 +2,11 @@ import streamlit as st
 from io import BytesIO
 
 import downloadResults
+from event_regex_presets import (
+    DISCIPLINE_CHOICES,
+    LEVEL_CHOICES,
+    effective_event_regex,
+)
 from openpyxl import load_workbook
 from st_files_connection import FilesConnection
 from google.cloud import storage
@@ -64,7 +69,7 @@ def createCompetitionReportLayout():
     This creates a report to analyze the deviations found in a competition. It is meant to then be used by review captains to decide on which deviations are errors for a given competition.
     There are a couple of options:
 
-    -  **Include only some events**: Do this via an event regex. For example, enter '.*(Novice|Junior|Senior).*(Women|Men|Pairs).*' to just include the Novice and higher Singles/Pairs events at a competiiton.
+                    -  **Include only some events**: Either use the quick level/discipline picks (no typing) or enter a custom event regex. Example custom: ``.*(Novice|Junior|Senior).*(Women|Men|Pairs).*`` for singles/pairs at novice and above.
     -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
                     """)
     with st.form("options_form", border=False):
@@ -75,16 +80,38 @@ def createCompetitionReportLayout():
             "Results URL for competition (for example:https://ijs.usfigureskating.org/leaderboard/results/2025/34240/index.asp).",
             key="url",
         )
-        st.text_input(
-            "Event Regex. (Optional)",
-            value="",
-            help="For example, '.*(Novice|Junior|Senior).*' will only consider results for Novice, Junior and Senior events.",
-            key="event_regex",
+        st.multiselect(
+            "Quick filter: event level (optional)",
+            list(LEVEL_CHOICES),
+            default=[],
+            key="event_regex_levels",
+            help=(
+                "Novice / Junior / Senior in the segment label (case-insensitive). "
+                "Senior also matches *Championship*."
+            ),
+        )
+        st.multiselect(
+            "Quick filter: discipline (optional)",
+            list(DISCIPLINE_CHOICES),
+            default=[],
+            key="event_regex_disciplines",
+            help="Singles-, pairs-, or dance-style tokens in the segment label (case-insensitive).",
         )
         st.text_input(
-            "Judge Filter (Optional)",
+            "Custom event regex (optional; overrides quick filters)",
             value="",
-            help="Enter the name of the judge you want on the report. If none are specified, all will be included.",
+            help="If blank, quick filters are combined (case-insensitive). If set, used as-is; add (?i) for case-insensitivity.",
+            key="event_regex_custom",
+        )
+        st.text_area(
+            "Judge filter (optional)",
+            value="",
+            height=80,
+            placeholder="Exact panel names — comma, semicolon, or newline separated.",
+            help=(
+                "Limits the report to these judges (exact match to protocol names). "
+                "Use commas, semicolons, or new lines between names. Leave blank for all judges."
+            ),
             key="judge_filter",
         )
         st.checkbox(
@@ -236,38 +263,29 @@ def generate_full_competition_report():
     if url.endswith('/'):
         url = url[:-1]
     report_name_value = st.session_state["report_name"]
-    event_regex = st.session_state["event_regex"]
+    event_regex = effective_event_regex(
+        st.session_state.get("event_regex_custom", ""),
+        st.session_state.get("event_regex_levels") or (),
+        st.session_state.get("event_regex_disciplines") or (),
+    )
     judge_filter = st.session_state["judge_filter"]
     only_include_errors = st.session_state["only_include_errors"]
     folder_name = LOCAL_RESULTS_FILES_PATH
     generate_analysis_sheet = st.session_state["generate_analysis_sheet"]
     if USE_GCP:
         folder_name = GCP_RESULTS_FILES_PATH
-    if event_regex != "":
-        downloadResults.scrape(
-            url,
-            report_name_value,
-            event_regex=event_regex,
-            excel_folder=folder_name,
-            pdf_folder=f"{folder_name}PDFs/",
-            use_gcp=USE_GCP,
-            judge_filter=judge_filter,
-            only_rule_errors=only_include_errors,
-            add_additional_analysis=generate_analysis_sheet,
-            isFSM=isFSM
-        )
-    else:
-        downloadResults.scrape(
-            url,
-            report_name_value,
-            excel_folder=folder_name,
-            pdf_folder=f"{folder_name}PDFs/",
-            use_gcp=USE_GCP,
-            judge_filter=judge_filter,
-            only_rule_errors=only_include_errors,
-            add_additional_analysis=generate_analysis_sheet,
-            isFSM=isFSM
-        )
+    downloadResults.scrape(
+        url,
+        report_name_value,
+        event_regex=event_regex,
+        excel_folder=folder_name,
+        pdf_folder=f"{folder_name}PDFs/",
+        use_gcp=USE_GCP,
+        judge_filter=judge_filter,
+        only_rule_errors=only_include_errors,
+        add_additional_analysis=generate_analysis_sheet,
+        isFSM=isFSM,
+    )
 
     if USE_GCP:
         print(f"Download coming for {report_name_value}")

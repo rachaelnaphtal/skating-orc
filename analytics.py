@@ -1871,7 +1871,9 @@ class JudgeAnalytics:
     ):
         """
         For competitions in ``competition_pairs``, list distinct protocol roles from
-        segment_official when any of these judge records shares a linked directory official.
+        segment_official when any of these judge records shares a linked directory official,
+        or—if not linked—when ``segment_official.official_name`` matches the judge's name
+        (same normalization as ``_normalize_person_name_key``).
 
         judge_ids: one id or merged identities (same as elsewhere in this module).
 
@@ -1887,6 +1889,18 @@ class JudgeAnalytics:
         roles_by_comp_id = defaultdict(set)
         ids = self.normalize_judge_ids(judge_ids)
 
+        id_by_label = {
+            (str(nm), str(yr)): int(cid)
+            for cid, nm, yr in self.get_judge_competitions(ids, competition_scope)
+        }
+        relevant_cids = set(id_by_label.values())
+
+        name_keys: set[str] = set()
+        for jid in ids:
+            jrow = self.session.get(Judge, jid)
+            if jrow is not None and jrow.name:
+                name_keys.add(_normalize_person_name_key(jrow.name))
+
         official_id = None
         for jid in ids:
             link = self.session.get(JudgeOfficialLink, jid)
@@ -1894,8 +1908,9 @@ class JudgeAnalytics:
                 official_id = int(link.official_id)
                 break
 
-        if official_id is not None:
-            stmt = (
+        used_name_fallback = False
+        if relevant_cids:
+            base = (
                 select(
                     Competition.id.label("cid"),
                     func.coalesce(AppointmentTypes.name, SegmentOfficial.role).label(
@@ -1909,21 +1924,61 @@ class JudgeAnalytics:
                     AppointmentTypes,
                     SegmentOfficial.appointment_type_id == AppointmentTypes.id,
                 )
-                .where(SegmentOfficial.official_id == official_id)
+                .where(Competition.id.in_(relevant_cids))
             )
-            for cid, lbl in self.session.execute(stmt):
-                if lbl is not None and str(lbl).strip():
-                    roles_by_comp_id[int(cid)].add(str(lbl).strip())
-        else:
-            caption = (
-                "Link this judge to a directory official under Admin Tools to populate "
-                "protocol roles from segment_official data."
-            )
+            if official_id is not None:
+                stmt = base.where(SegmentOfficial.official_id == official_id)
+                for cid, lbl in self.session.execute(stmt):
+                    if lbl is not None and str(lbl).strip():
+                        roles_by_comp_id[int(cid)].add(str(lbl).strip())
+            elif name_keys:
+                stmt = (
+                    select(
+                        Competition.id.label("cid"),
+                        SegmentOfficial.official_name.label("oname"),
+                        func.coalesce(
+                            AppointmentTypes.name, SegmentOfficial.role
+                        ).label("lbl"),
+                    )
+                    .select_from(SegmentOfficial)
+                    .join(Segment, SegmentOfficial.segment_id == Segment.id)
+                    .join(Competition, Segment.competition_id == Competition.id)
+                    .outerjoin(
+                        AppointmentTypes,
+                        SegmentOfficial.appointment_type_id == AppointmentTypes.id,
+                    )
+                    .where(
+                        Competition.id.in_(relevant_cids),
+                        SegmentOfficial.official_name.isnot(None),
+                    )
+                )
+                for cid, oname, lbl in self.session.execute(stmt):
+                    if not oname or not str(oname).strip():
+                        continue
+                    if _normalize_person_name_key(str(oname)) not in name_keys:
+                        continue
+                    used_name_fallback = True
+                    if lbl is not None and str(lbl).strip():
+                        roles_by_comp_id[int(cid)].add(str(lbl).strip())
 
-        id_by_label = {
-            (str(nm), str(yr)): int(cid)
-            for cid, nm, yr in self.get_judge_competitions(ids, competition_scope)
-        }
+        if official_id is None:
+            if used_name_fallback:
+                caption = (
+                    "Protocol roles matched where **segment_official.official_name** matches "
+                    "this judge's name (normalized); judge is not linked to a directory official. "
+                    "Link under Admin Tools to use official_id and reduce ambiguity."
+                )
+            elif not name_keys:
+                caption = (
+                    "No judge name on file; link to a directory official under Admin Tools to "
+                    "populate protocol roles from segment_official."
+                )
+            else:
+                caption = (
+                    "No segment_official row matched this judge's name in these competitions, "
+                    "and the judge is not linked to a directory official. Link under Admin Tools "
+                    "to resolve roles by official_id."
+                )
 
         rows = []
         for name, year in competition_pairs:

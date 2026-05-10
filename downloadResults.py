@@ -1069,7 +1069,7 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
                 }
     for event_number in range(len(judgesNames)):
         judge = judgesNames[event_number]
-        if len(judge_filter) > 0 and judge_filter != judge:
+        if not judgingParsing.judge_name_allowed_by_filter(judge, judge_filter):
             continue
         if judge not in judge_errors:
             judge_errors[judge] = {}

@@ -21,6 +21,11 @@ from officials_competition_types import (
     competition_load_flags_from_officials_type_id,
     format_officials_competition_type_select_label,
 )
+from event_regex_presets import (
+    DISCIPLINE_CHOICES,
+    LEVEL_CHOICES,
+    effective_event_regex,
+)
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -1040,7 +1045,8 @@ if page == "Individual Judge Analysis":
                     "Distinct protocol roles",
                     width="large",
                     help="Distinct appointment/protocol roles from segment_official for this judge's "
-                    "linked official, sorted alphabetically within each competition.",
+                    "linked official (or, if unlinked, rows whose protocol official_name matches the "
+                    "judge name), sorted alphabetically within each competition.",
                 ),
             },
         )
@@ -2313,16 +2319,43 @@ elif page == "Load Competition":
 
     # ── Advanced options ─────────────────────────────────────────────────────
     with st.expander("Advanced options"):
-        # excel_folder = st.text_input("Excel output folder (leave blank to skip)", value="")
-        event_regex = st.text_input(
-            "Event regex filter",
-            value="",
-            help="Only process events whose names match this regex. Leave blank for all.",
+        load_ev_levels = st.multiselect(
+            "Quick filter: event level (in segment/event name)",
+            list(LEVEL_CHOICES),
+            default=[],
+            help=(
+                "Case-insensitive on the segment label. **Senior** also matches *Championship* "
+                "(e.g. ``CHAMPIONSHIP_ICE_DANCE_…``). Leave empty and leave custom regex blank for all events."
+            ),
         )
-        judge_filter = st.text_input(
-            "Judge filter",
+        load_ev_disciplines = st.multiselect(
+            "Quick filter: discipline (in segment/event name)",
+            list(DISCIPLINE_CHOICES),
+            default=[],
+            help=(
+                "Singles uses Women/Men/Ladies-style tokens; Pairs; Dance (Ice Dance, etc.). "
+                "Case-insensitive. Combined with level presets, an event must match both groups."
+            ),
+        )
+        event_regex_custom = st.text_input(
+            "Custom event regex (optional)",
             value="",
-            help="Restrict processing to judges matching this string.",
+            help=(
+                "If set, **replaces** the quick filters above. Only events matching this regex "
+                "are processed (``re.match`` on the parsed label). Prefix with ``(?i)`` for "
+                "case-insensitivity. Leave blank to use quick filters only."
+            ),
+        )
+        judge_filter = st.text_area(
+            "Judge filter (optional)",
+            value="",
+            height=80,
+            placeholder="Exact panel names — comma, semicolon, or newline separated.",
+            help=(
+                "Limits deviation / error reporting to these judges only (exact match to names "
+                "on the protocol). Separate multiple names with commas, semicolons, or new lines. "
+                "Leave blank for all judges."
+            ),
         )
         specific_exclude = st.text_input(
             "Specific exclude",
@@ -2350,10 +2383,14 @@ elif page == "Load Competition":
             if url.endswith('/'):
                 url = url[:-1]
 
+            event_regex = effective_event_regex(
+                event_regex_custom, load_ev_levels, load_ev_disciplines
+            )
+
             kwargs = dict(
                 base_url=url,
                 report_name=report_name.strip(),
-                event_regex=event_regex.strip(),
+                event_regex=event_regex,
                 only_rule_errors=only_rule_errors,
                 use_gcp=False,
                 write_excel=False,

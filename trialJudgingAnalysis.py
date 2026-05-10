@@ -383,10 +383,15 @@ def make_extra_analysis_sheet(
     excel_path, all_element_df, all_pcs_df, average_deviations, use_gcp=False, judge_filter=""
 ):
     # Make additional analysis document
-    if judge_filter == "":
+    allowed = judgingParsing.split_judge_filter_names(judge_filter)
+    if not allowed:
         extra_info_path = excel_path.replace(".xlsx", "_OutOfRangeAnalysis.xlsx")
+    elif len(allowed) == 1:
+        extra_info_path = excel_path.replace(
+            ".xlsx", f"_{next(iter(allowed))}_OutOfRangeAnalysis.xlsx"
+        )
     else:
-        extra_info_path = excel_path.replace(".xlsx", f"_{judge_filter}_OutOfRangeAnalysis.xlsx")
+        extra_info_path = excel_path.replace(".xlsx", "_MultiJudge_OutOfRangeAnalysis.xlsx")
 
     excel_buffer = BytesIO()
     if not use_gcp:
@@ -396,8 +401,8 @@ def make_extra_analysis_sheet(
         make_analysis_cover_sheet(writer.book)
 
         # Analyze elements
-        if judge_filter != "":
-            all_element_df = all_element_df[all_element_df["Judge Name"] == judge_filter]
+        if allowed:
+            all_element_df = all_element_df[all_element_df["Judge Name"].isin(allowed)]
         all_el_df = (
             all_element_df.groupby(["Judge Name", "Element Type", "Type"])
             .size()
@@ -508,8 +513,8 @@ def make_extra_analysis_sheet(
         format_out_of_range_sheets(writer.sheets["GOE-Thrown out"])
 
         ## PCS
-        if judge_filter != "":
-            all_pcs_df = all_pcs_df[all_pcs_df["Judge Name"] == judge_filter]
+        if allowed:
+            all_pcs_df = all_pcs_df[all_pcs_df["Judge Name"].isin(allowed)]
         all_pcs_df = (
             all_pcs_df.groupby(["Judge Name", "Component", "Type"])
             .size()
@@ -626,8 +631,10 @@ def make_extra_analysis_sheet(
         format_out_of_range_sheets(writer.sheets["PCS-Thrown out"])
 
         average_deviation_df = pd.DataFrame.from_records(average_deviations)
-        if judge_filter != "":
-            average_deviation_df=average_deviation_df[judge_filter]
+        if allowed:
+            cols = [c for c in allowed if c in average_deviation_df.columns]
+            if cols:
+                average_deviation_df = average_deviation_df[cols]
         average_deviation_df.to_excel(writer, sheet_name="Average GOE deviations")
 
         for sheet in writer.sheets:
