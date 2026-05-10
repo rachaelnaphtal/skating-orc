@@ -17,7 +17,10 @@ from sqlalchemy.engine import RowMapping
 try:
     from rapidfuzz import fuzz, process
 except ImportError as e:  # pragma: no cover
-    raise ImportError("Install rapidfuzz: pip install rapidfuzz") from e
+    raise ImportError(
+        "The rapidfuzz package is required for judge ↔ directory matching "
+        "(list rapidfuzz in requirements.txt / pip metadata — import unavailable)."
+    ) from e
 
 DDL_JUDGE_OFFICIAL_LINK = """
 CREATE TABLE IF NOT EXISTS judge_official_link (

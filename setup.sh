@@ -1,13 +1,18 @@
 echo $DB_HOST
 printenv
 mkdir -p ~/.streamlit/
-echo "
+# Merge runtime Heroku settings with UX defaults from repo [.streamlit/config.toml].
+# (Writing only [server] here used to wipe showSidebarNavigation and surfaced multipage links.)
+cat > ~/.streamlit/config.toml <<STREAMLITCFG
 [server]
 headless = true
-port = $PORT
+port = ${PORT:-8501}
 enableCORS = false
 
-" > ~/.streamlit/config.toml
+[client]
+showSidebarNavigation = false
+
+STREAMLITCFG
 
 echo "
 
