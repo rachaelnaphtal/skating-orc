@@ -955,6 +955,289 @@ class JudgeAnalytics:
         discipline_types = self.session.query(DisciplineType).all()
         return [(dt.id, dt.name) for dt in discipline_types]
 
+    def _discipline_bucket_case_for_segment(self):
+        """
+        Map ``segment.discipline_type_id`` to Singles / Pairs / Dance / Synchronized
+        (Dance = Ice Dance + Solo Dance). Returns a SQLAlchemy ``case`` or None if no ids.
+        """
+        rows = (
+            self.session.query(DisciplineType.id, DisciplineType.name)
+            .filter(DisciplineType.name.isnot(None))
+            .all()
+        )
+        whens: list[tuple] = []
+        for did, name in rows:
+            key = (name or "").strip().lower()
+            if key == "singles":
+                lbl = "Singles"
+            elif key == "pairs":
+                lbl = "Pairs"
+            elif key in ("ice dance", "solo dance"):
+                lbl = "Dance"
+            elif key == "synchronized":
+                lbl = "Synchronized"
+            else:
+                continue
+            whens.append((Segment.discipline_type_id == int(did), lbl))
+        if not whens:
+            return None
+        return case(*whens, else_=None)
+
+    def _apply_benchmark_competition_filter(
+        self,
+        stmt,
+        *,
+        competition_filter_mode: str,
+        competition_scope: str,
+    ):
+        """
+        ``db_qualifying``: ``competition.qualifying`` is true.
+        ``officials_scope``: use ``_filter_select_competition_scope`` (linked officials competition type).
+        """
+        if competition_filter_mode == "db_qualifying":
+            return stmt.where(Competition.qualifying.is_(True))
+        if competition_filter_mode == "officials_scope":
+            return self._filter_select_competition_scope(stmt, competition_scope)
+        raise ValueError(
+            f"competition_filter_mode must be 'db_qualifying' or 'officials_scope', "
+            f"not {competition_filter_mode!r}"
+        )
+
+    def get_panel_score_benchmarks(
+        self,
+        *,
+        metrics: tuple[str, ...] = ("throwout", "anomaly"),
+        competition_filter_mode: str = "db_qualifying",
+        competition_scope: str = COMPETITION_SCOPE_QUALIFYING,
+        year_filters: list[str] | None = None,
+        min_panel_size: int = 3,
+        max_panel_size: int = 12,
+    ) -> pd.DataFrame:
+        """
+        Aggregate throw-out and/or **anomaly** rates by discipline bucket and panel size.
+
+        **Competition filter** (``competition_filter_mode``):
+
+        - ``db_qualifying``: only rows with ``competition.qualifying`` true.
+        - ``officials_scope``: filter by linked ``officials_analysis.competition_type``
+          (same as other analytics); ``competition_scope`` is one of the
+          ``COMPETITION_SCOPE_*`` constants.
+
+        **Discipline buckets** (from segment ``discipline_type``): Singles, Pairs,
+        Dance (Ice Dance + Solo Dance), Synchronized.
+
+        **Panel size**: judge count per element row (elements) or per
+        (skater_segment × PCS component) (PCS).
+
+        **Metrics**:
+
+        - ``throwout``: stored ``thrown_out`` flag (IJS trim at ingest).
+        - ``anomaly``: PCS if ``|deviation| >= 1.5`` or rule error; element if
+          ``|deviation| >= 2.0`` or rule error (same as judge summary / HTML report).
+
+        Returns columns:
+        ``discipline``, ``panel_size``, ``score_type`` (Element / PCS),
+        ``benchmark`` (``throwout`` / ``anomaly``), ``total_scores``, ``hits``, ``rate_pct``.
+        """
+        allowed_m = {"throwout", "anomaly"}
+        _metrics: list[str] = []
+        for m in metrics:
+            if m in allowed_m and m not in _metrics:
+                _metrics.append(m)
+        metrics_set = tuple(_metrics)
+        if not metrics_set:
+            return pd.DataFrame(
+                columns=[
+                    "discipline",
+                    "panel_size",
+                    "score_type",
+                    "benchmark",
+                    "total_scores",
+                    "hits",
+                    "rate_pct",
+                ]
+            )
+        disc_bucket = self._discipline_bucket_case_for_segment()
+        if disc_bucket is None:
+            return pd.DataFrame(
+                columns=[
+                    "discipline",
+                    "panel_size",
+                    "score_type",
+                    "benchmark",
+                    "total_scores",
+                    "hits",
+                    "rate_pct",
+                ]
+            )
+
+        elem_panel = (
+            select(
+                ElementScorePerJudge.element_id.label("element_id"),
+                func.count().label("panel_size"),
+            )
+            .select_from(ElementScorePerJudge)
+            .group_by(ElementScorePerJudge.element_id)
+        ).subquery()
+
+        pcs_panel = (
+            select(
+                PcsScorePerJudge.skater_segment_id.label("skater_segment_id"),
+                PcsScorePerJudge.pcs_type_id.label("pcs_type_id"),
+                func.count().label("panel_size"),
+            )
+            .select_from(PcsScorePerJudge)
+            .group_by(
+                PcsScorePerJudge.skater_segment_id,
+                PcsScorePerJudge.pcs_type_id,
+            )
+        ).subquery()
+
+        out_rows: list[dict] = []
+
+        for metric in metrics_set:
+            if metric == "throwout":
+                el_hits = func.sum(
+                    case((ElementScorePerJudge.thrown_out, 1), else_=0)
+                ).label("hits")
+                pcs_hits = func.sum(
+                    case((PcsScorePerJudge.thrown_out, 1), else_=0)
+                ).label("hits")
+            else:
+                el_hits = func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(ElementScorePerJudge.deviation) >= 2.0,
+                                ElementScorePerJudge.is_rule_error.is_(True),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("hits")
+                pcs_hits = func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                PcsScorePerJudge.is_rule_error.is_(True),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("hits")
+
+            q_el = (
+                select(
+                    disc_bucket.label("discipline"),
+                    elem_panel.c.panel_size.label("panel_size"),
+                    func.count().label("total_scores"),
+                    el_hits,
+                )
+                .select_from(ElementScorePerJudge)
+                .join(Element, ElementScorePerJudge.element_id == Element.id)
+                .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+                .join(Segment, SkaterSegment.segment_id == Segment.id)
+                .join(Competition, Segment.competition_id == Competition.id)
+                .join(
+                    elem_panel,
+                    ElementScorePerJudge.element_id == elem_panel.c.element_id,
+                )
+                .where(disc_bucket.isnot(None))
+                .where(elem_panel.c.panel_size >= min_panel_size)
+                .where(elem_panel.c.panel_size <= max_panel_size)
+            )
+            q_el = self._apply_benchmark_competition_filter(
+                q_el,
+                competition_filter_mode=competition_filter_mode,
+                competition_scope=competition_scope,
+            )
+            if year_filters:
+                q_el = q_el.where(Competition.year.in_(year_filters))
+            q_el = q_el.group_by(disc_bucket, elem_panel.c.panel_size)
+
+            for r in self.session.execute(q_el).all():
+                tot = int(r.total_scores or 0)
+                h = int(r.hits or 0)
+                out_rows.append(
+                    {
+                        "discipline": r.discipline,
+                        "panel_size": int(r.panel_size),
+                        "score_type": "Element",
+                        "benchmark": metric,
+                        "total_scores": tot,
+                        "hits": h,
+                        "rate_pct": round((h / tot * 100) if tot else 0.0, 3),
+                    }
+                )
+
+            q_pcs = (
+                select(
+                    disc_bucket.label("discipline"),
+                    pcs_panel.c.panel_size.label("panel_size"),
+                    func.count().label("total_scores"),
+                    pcs_hits,
+                )
+                .select_from(PcsScorePerJudge)
+                .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+                .join(Segment, SkaterSegment.segment_id == Segment.id)
+                .join(Competition, Segment.competition_id == Competition.id)
+                .join(
+                    pcs_panel,
+                    and_(
+                        PcsScorePerJudge.skater_segment_id
+                        == pcs_panel.c.skater_segment_id,
+                        PcsScorePerJudge.pcs_type_id == pcs_panel.c.pcs_type_id,
+                    ),
+                )
+                .where(disc_bucket.isnot(None))
+                .where(pcs_panel.c.panel_size >= min_panel_size)
+                .where(pcs_panel.c.panel_size <= max_panel_size)
+            )
+            q_pcs = self._apply_benchmark_competition_filter(
+                q_pcs,
+                competition_filter_mode=competition_filter_mode,
+                competition_scope=competition_scope,
+            )
+            if year_filters:
+                q_pcs = q_pcs.where(Competition.year.in_(year_filters))
+            q_pcs = q_pcs.group_by(disc_bucket, pcs_panel.c.panel_size)
+
+            for r in self.session.execute(q_pcs).all():
+                tot = int(r.total_scores or 0)
+                h = int(r.hits or 0)
+                out_rows.append(
+                    {
+                        "discipline": r.discipline,
+                        "panel_size": int(r.panel_size),
+                        "score_type": "PCS",
+                        "benchmark": metric,
+                        "total_scores": tot,
+                        "hits": h,
+                        "rate_pct": round((h / tot * 100) if tot else 0.0, 3),
+                    }
+                )
+
+        if not out_rows:
+            return pd.DataFrame(
+                columns=[
+                    "discipline",
+                    "panel_size",
+                    "score_type",
+                    "benchmark",
+                    "total_scores",
+                    "hits",
+                    "rate_pct",
+                ]
+            )
+        df = pd.DataFrame(out_rows)
+        return df.sort_values(
+            ["benchmark", "score_type", "discipline", "panel_size"],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
     def get_element_types(self):
         """Get all element types"""
         element_types = self.session.query(ElementType).all()

@@ -103,7 +103,8 @@ st.title("⛸️ Figure Skating Judge Performance Analytics")
 import os as _os
 _nav_pages = [
     "Individual Judge Analysis",
-    "Cross-Judge Benchmarking", "Temporal Trend Analysis",
+    "Cross-Judge Benchmarking",     "Temporal Trend Analysis",
+    "Panel benchmarks",
     "Rule Errors Analysis", "Competition Analysis",
 ]
 if _os.path.exists("downloadResults.py"):
@@ -2134,6 +2135,116 @@ elif page == "Cross-Judge Benchmarking":
 
 elif page == "Temporal Trend Analysis":
     temporal_trend_analysis()
+
+elif page == "Panel benchmarks":
+    st.header("Panel benchmarks")
+    st.caption(
+        "Rates by **discipline** (segment ``discipline_type``) and **panel size** "
+        "(number of judges on that element or PCS line). **Anomalies**: PCS uses "
+        "|deviation| ≥ 1.5 or rule error; elements use |deviation| ≥ 2.0 or rule error "
+        "(same thresholds as judge reports)."
+    )
+    analytics_bm = get_analytics_safe()
+    use_scope = st.checkbox(
+        "Filter by **officials competition type** (linked to `public.competition`) "
+        "instead of **`competition.qualifying`** flag",
+        value=False,
+        help="When off, only competitions with qualifying=true. When on, use the same "
+        "type-based scope as Cross-Judge benchmarks (requires linked competition type).",
+    )
+    scope_label = "Qualifying only"
+    if use_scope:
+        scope_label = st.selectbox(
+            "Competition scope",
+            options=list(_COMPETITION_SCOPE_LABELS),
+            index=1,
+            help="Mapped via `officials_analysis_competition_type_id` on each competition row.",
+        )
+    scope_key = _competition_scope_key(scope_label) if use_scope else COMPETITION_SCOPE_ALL
+    filter_mode = "officials_scope" if use_scope else "db_qualifying"
+
+    metric_labels = st.multiselect(
+        "Metrics",
+        options=["Throwouts", "Anomalies"],
+        default=["Throwouts", "Anomalies"],
+        help="Throwouts = stored IJS trim; Anomalies = deviation/rule-error thresholds above.",
+    )
+    label_to_key = {"Throwouts": "throwout", "Anomalies": "anomaly"}
+    metric_keys = tuple(label_to_key[k] for k in metric_labels if k in label_to_key)
+    if not metric_keys:
+        st.info("Select at least one metric.")
+        st.stop()
+
+    years_all = analytics_bm.get_years()
+    year_pick = st.multiselect(
+        "Season years (blank = all)",
+        options=years_all,
+        default=[],
+        help="Competition ``year`` field (e.g. 2526).",
+    )
+    c_low, c_high = st.columns(2)
+    with c_low:
+        min_panel = st.number_input("Min panel size", min_value=2, max_value=15, value=3, step=1)
+    with c_high:
+        max_panel = st.number_input("Max panel size", min_value=2, max_value=15, value=9, step=1)
+    if min_panel > max_panel:
+        st.error("Min panel size cannot exceed max.")
+        st.stop()
+    if st.button("Run report", type="primary"):
+        with st.spinner("Querying scores…"):
+            df_bm = analytics_bm.get_panel_score_benchmarks(
+                metrics=metric_keys,
+                competition_filter_mode=filter_mode,
+                competition_scope=scope_key,
+                year_filters=year_pick if year_pick else None,
+                min_panel_size=int(min_panel),
+                max_panel_size=int(max_panel),
+            )
+        if df_bm.empty:
+            st.info(
+                "No rows returned. Check competition filters, linked officials types (if used), "
+                "segment disciplines, and panel size range."
+            )
+        else:
+            st.subheader("Summary table")
+            st.dataframe(df_bm, width="stretch", hide_index=True)
+            st.download_button(
+                "Download CSV",
+                data=df_bm.to_csv(index=False).encode("utf-8"),
+                file_name="panel_benchmarks.csv",
+                mime="text/csv",
+            )
+            st.subheader("Charts")
+            st.caption(
+                "Smaller panels often raise **throwout** rates mechanically (more min/max exposure). "
+                "**Anomaly** rates use fixed deviation thresholds and are less driven by panel size."
+            )
+            bench_titles = {
+                "throwout": "Throwout rate (%)",
+                "anomaly": "Anomaly rate (%)",
+            }
+            for bmk in df_bm["benchmark"].unique():
+                st.markdown(f"#### {bench_titles.get(str(bmk), str(bmk))}")
+                for stype in ("Element", "PCS"):
+                    sub = df_bm[
+                        (df_bm["benchmark"] == bmk) & (df_bm["score_type"] == stype)
+                    ]
+                    if sub.empty:
+                        continue
+                    fig = px.bar(
+                        sub,
+                        x="panel_size",
+                        y="rate_pct",
+                        color="discipline",
+                        barmode="group",
+                        title=f"{stype} · {bench_titles.get(str(bmk), bmk)} by panel size",
+                        labels={
+                            "panel_size": "Panel size (judges)",
+                            "rate_pct": bench_titles.get(str(bmk), "Rate (%)"),
+                            "discipline": "Discipline",
+                        },
+                    )
+                    st.plotly_chart(fig, width="stretch")
 
 elif page == "Load Competition":
     st.header("Load Competition")

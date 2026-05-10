@@ -47,6 +47,11 @@ from datetime import datetime
 
 engine = get_engine()
 
+# Streamlit ``st.cache_data`` expiry (seconds) for DB-backed loaders in this app.
+# Capped TTL keeps new competitions/assignments visible without restarting; raise if DB is
+# quiet and you want fewer queries. Use sidebar **Refresh data now** to invalidate immediately.
+_ACTIVITY_CACHE_TTL_SEC = 120
+
 NATIONAL_LEVEL_ID = 7
 SYNCHRO_DISCIPLINE_ID = 2
 COMPETITION_TYPE_MAP = {SYNCHRO_DISCIPLINE_ID: 8}   # US Synchronized Skating Championships
@@ -565,7 +570,7 @@ SUMMARY_COMPETITION_TYPES = {
 }
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_appt_data_date():
     """Most recent achieved_date across all appointments — used as the data currency note."""
     from sqlalchemy import func as sqlfunc
@@ -576,7 +581,7 @@ def load_appt_data_date():
     return result
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_all_appt_types(active_appointments_only: bool = True):
     with Session(engine) as session:
         q = (
@@ -592,7 +597,7 @@ def load_all_appt_types(active_appointments_only: bool = True):
     return {name: id_ for id_, name in rows}
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_disciplines_for_appt_type(
     appointment_type_id,
     include_sectional_appointment_levels: bool,
@@ -685,7 +690,7 @@ def load_disciplines_for_appt_type(
     return result
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_nqs_activity_table(
     official_type: str,
     discipline: str,
@@ -846,7 +851,7 @@ def normalize_df(df):
     return df, year_cols
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_matrix(
     discipline_id,
     appointment_type_id,
@@ -864,7 +869,7 @@ def load_matrix(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_matrix_sectionals(
     discipline_id,
     appointment_type_id,
@@ -879,7 +884,7 @@ def load_matrix_sectionals(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_sectional_region_rows(
     discipline_id,
     appointment_type_id,
@@ -894,7 +899,7 @@ def load_sectional_region_rows(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_any_role_data(official_ids_tuple, competition_scope, include_lower_levels):
     return get_any_role_years(
         list(official_ids_tuple),
@@ -903,7 +908,7 @@ def load_any_role_data(official_ids_tuple, competition_scope, include_lower_leve
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_chief_data(
     official_ids_tuple,
     discipline_id,
@@ -920,7 +925,7 @@ def load_chief_data(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_all_lower_level_only_years(
     official_ids_tuple,
     discipline_id,
@@ -935,27 +940,27 @@ def load_all_lower_level_only_years(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_appt_has_chiefs(appointment_type_id):
     return appointment_type_has_chiefs(appointment_type_id)
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_assigned_summary(competition_type_ids_tuple):
     return get_assigned_competition_counts(list(competition_type_ids_tuple))
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_competition_count(competition_type_ids_tuple):
     return get_competition_count_for_types(list(competition_type_ids_tuple))
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_referee_discipline_options(comp_group_name):
     return get_referee_discipline_options_for_comp_group(comp_group_name)
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_referee_competition_count(
     competition_type_ids_tuple, discipline_id_sentinel, comp_group_name
 ):
@@ -968,7 +973,7 @@ def load_referee_competition_count(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_referee_yearly_report(
     competition_type_ids_tuple,
     discipline_id_sentinel,
@@ -985,32 +990,32 @@ def load_referee_yearly_report(
     )
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_all_directory_officials():
     return get_all_directory_officials()
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_person_assignment_rows(official_id: int):
     return get_official_assignment_detail_rows(int(official_id))
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_person_segment_official_activity_detail(official_id: int):
     return get_official_segment_official_activity_detail(int(official_id))
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_person_appointment_rows(official_id: int):
     return get_official_appointment_rows(int(official_id))
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_competitions_report_dropdown():
     return get_competitions_for_report_dropdown()
 
 
-@st.cache_data
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
 def load_competition_assignment_rows(competition_id: int):
     return get_competition_assignment_rows(int(competition_id))
 
