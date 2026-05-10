@@ -6,11 +6,20 @@ from plotly.subplots import make_subplots
 import numpy as np
 from scipy import stats
 
-from database import get_db_session, test_connection
+from analytics_connection import get_analytics, get_analytics_safe
 from analytics import JudgeAnalytics
 from models import Segment, DisciplineType, Judge, PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment
 from sqlalchemy import text, func, case
 from report_html import build_judge_report_html
+from officials_competition_types import (
+    COMPETITION_SCOPE_ALL,
+    COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    COMPETITION_SCOPE_NQS,
+    COMPETITION_SCOPE_QUALIFYING,
+    COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
+    competition_load_flags_from_officials_type_id,
+    format_officials_competition_type_select_label,
+)
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -22,70 +31,68 @@ if 'current_page' not in st.session_state:
     st.session_state.current_page = "Individual Judge Analysis"
 
 
-# Test database connection with timeout and better error handling
-@st.cache_resource
-def get_analytics():
-    try:
-        with st.spinner("Connecting to database..."):
-            connection_test = test_connection()
-            if connection_test is not True:
-                st.error(f"Database connection failed: {connection_test[1]}")
-                st.info(
-                    "This usually means the database is starting up. Please refresh the page in a few seconds."
-                )
-                st.stop()
+_COMPETITION_SCOPE_LABELS = (
+    "All competitions",
+    "Qualifying only",
+    "NQS only",
+    "Sectionals & championships",
+    "Championships only",
+)
 
-            session = get_db_session()
-            analytics_obj = JudgeAnalytics(session)
-
-            # Test that we can actually query data
-            try:
-                judges = analytics_obj.get_judges()
-                if not judges:
-                    st.warning(
-                        "Database connected but no judge data found. Please import your data first."
-                    )
-                    st.info(
-                        "Use one of the import scripts to populate your database with figure skating data."
-                    )
-                else:
-                    st.success(
-                        f"Database connected successfully! Found {len(judges)} judges."
-                    )
-            except Exception as e:
-                st.error(
-                    f"Database connection successful but data access failed: {e}"
-                )
-                st.stop()
-
-            return analytics_obj
-
-    except Exception as e:
-        st.error(f"Failed to initialize analytics: {e}")
-        st.info("This might be a temporary issue. Please refresh the page.")
-        st.stop()
+_COMPETITION_SCOPE_LABEL_TO_KEY = {
+    "All competitions": COMPETITION_SCOPE_ALL,
+    "Qualifying only": COMPETITION_SCOPE_QUALIFYING,
+    "NQS only": COMPETITION_SCOPE_NQS,
+    "Sectionals & championships": COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
+    "Championships only": COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+}
 
 
-# Lazy load analytics only when needed with connection retry
-def get_analytics_safe():
-    """Safely get analytics object with error handling and retry logic"""
-    if 'analytics' not in st.session_state:
-        st.session_state.analytics = get_analytics()
+def _competition_scope_key(scope_label: str) -> str:
+    """Map sidebar label to analytics ``competition_scope`` string."""
+    return _COMPETITION_SCOPE_LABEL_TO_KEY.get(scope_label, COMPETITION_SCOPE_ALL)
 
-    # Check if we need to refresh the connection
-    try:
-        # Simple test query to check if connection is still alive
-        analytics = st.session_state.analytics
-        analytics.session.execute(text("SELECT 1"))
-        return analytics
-    except Exception as e:
-        st.warning("Database connection lost, reconnecting...")
-        # Clear cached analytics and reconnect
-        if 'analytics' in st.session_state:
-            del st.session_state.analytics
-        st.cache_resource.clear()
-        st.session_state.analytics = get_analytics()
-        return st.session_state.analytics
+
+@st.cache_data(ttl=300)
+def _cached_pooled_cross_judge_metrics(
+    score_type: str,
+    year_filter,
+    competition_ids_tuple,
+    discipline_ids_tuple,
+    competition_scope: str,
+):
+    analytics = get_analytics_safe()
+    return analytics.get_pooled_cross_judge_metrics(
+        score_type=score_type,
+        year_filter=year_filter,
+        competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
+        discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
+        competition_scope=competition_scope,
+    )
+
+
+@st.cache_data(ttl=300)
+def _cached_competition_segment_officials(competition_id: int):
+    return get_analytics_safe().get_competition_segment_officials_display(competition_id)
+
+
+def _streamlit_safe_judge_pivot_display(grid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Judge × segment pivot tables used to mix int counts with '' after replacing zeros,
+    which breaks PyArrow when Streamlit serializes the dataframe (column names are judge names).
+    Normalize every cell to str: blank for zero / NA, else decimal digits only.
+    """
+    def cell(v):
+        if pd.isna(v):
+            return ""
+        try:
+            iv = int(v)
+            return "" if iv == 0 else str(iv)
+        except (TypeError, ValueError):
+            s = str(v).strip()
+            return "" if s in ("", "0", "0.0") else s
+
+    return grid.apply(lambda col: col.map(cell))
 
 
 # Main title
@@ -94,27 +101,268 @@ st.title("⛸️ Figure Skating Judge Performance Analytics")
 # Navigation
 import os as _os
 _nav_pages = [
-    "Individual Judge Analysis", "Multi-Judge Comparison",
-    "Judge Performance Heatmap", "Temporal Trend Analysis",
+    "Individual Judge Analysis",
+    "Cross-Judge Benchmarking", "Temporal Trend Analysis",
     "Rule Errors Analysis", "Competition Analysis",
 ]
 if _os.path.exists("downloadResults.py"):
     _nav_pages.append("Load Competition")
-_nav_pages.append("Admin Tools")
 
 page = st.sidebar.selectbox("Select Analysis Type", _nav_pages)
 
 
-def judge_performance_heatmap():
-    """Judge Performance Heatmap Analysis"""
-    st.header("Judge Performance Heatmap")
+def _individual_judge_protocol_competition_pairs(
+    judge_competitions,
+    pcs_df,
+    element_df,
+    year_filter,
+    competition_ids,
+):
+    """Pairs for the protocol-roles table: scored comps plus judge comps after year/competition filters."""
+    pairs = set()
+    for df in (pcs_df, element_df):
+        if df is None or df.empty:
+            continue
+        if "competition_name" not in df.columns or "year" not in df.columns:
+            continue
+        sub = df[["competition_name", "year"]].drop_duplicates()
+        for _, r in sub.iterrows():
+            pairs.add((str(r["competition_name"]), str(r["year"])))
+
+    for comp_id, name, year in judge_competitions:
+        if year_filter is not None and str(year) != str(year_filter):
+            continue
+        if competition_ids is not None and comp_id not in competition_ids:
+            continue
+        pairs.add((str(name), str(year)))
+
+    def sort_key(p):
+        try:
+            yi = int(p[1])
+        except (TypeError, ValueError):
+            yi = 0
+        return (-yi, p[0].lower())
+
+    return sorted(pairs, key=sort_key)
+
+
+def _identity_group_options(analytics):
+    """Labels and judge-id lists for selects; merges aliases sharing one directory official."""
+    groups = analytics.get_judge_analysis_identity_groups()
+    labels = [g["label"] for g in groups]
+    label_to_ids = {g["label"]: g["judge_ids"] for g in groups}
+    return labels, label_to_ids
+
+
+def _cross_judge_pooled_metrics_df(pm: dict, score_type: str) -> pd.DataFrame:
+    """Single-table display for score-weighted pooled benchmark metrics."""
+    rows = []
+    rows.append(("Total scores", pm["total_scores"]))
+    if score_type in ("both", "pcs"):
+        rows.append(("PCS scores (in pool)", pm["pcs_scores"]))
+    if score_type in ("both", "element"):
+        rows.append(("Element scores (in pool)", pm["element_scores"]))
+    rows.extend(
+        [
+            ("Throwouts (count)", pm["throwouts"]),
+            ("Throwout rate (%)", round(pm["throwout_rate_pct"], 4)),
+            ("Anomalies (count)", pm["anomalies"]),
+            ("Anomaly rate (%)", round(pm["anomaly_rate_pct"], 4)),
+            ("Rule errors (count)", pm["rule_errors"]),
+            ("Rule error rate (%)", round(pm["rule_error_rate_pct"], 4)),
+            ("Mean |deviation| per score", round(pm["avg_abs_deviation"], 6)),
+            (
+                "Total excess anomalies (summed across judges)",
+                pm["total_excess_anomalies"],
+            ),
+        ]
+    )
+    return pd.DataFrame(rows, columns=["Metric", "Value"])
+
+
+def _render_pooled_benchmark_block(pm: dict, score_type: str) -> None:
+    st.subheader("Pooled metrics (score-weighted)")
+    st.caption(
+        "Rates use total counts divided by total PCS/element scores in scope — "
+        "each score counts equally (judges with more segments weigh more)."
+    )
+    st.dataframe(
+        _cross_judge_pooled_metrics_df(pm, score_type),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _heatmap_metric_distribution_summary(series: pd.Series, count_label: str) -> pd.DataFrame:
+    """Descriptive stats for the metric column in cross-judge views."""
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return pd.DataFrame()
+    std = float(s.std(ddof=1)) if len(s) > 1 else 0.0
+    rows = [
+        (count_label, int(len(s))),
+        ("Mean", round(float(s.mean()), 4)),
+        ("Median", round(float(s.median()), 4)),
+        ("Std dev", round(std, 4)),
+        ("Min", round(float(s.min()), 4)),
+        ("Max", round(float(s.max()), 4)),
+        ("25th percentile", round(float(s.quantile(0.25)), 4)),
+        ("75th percentile", round(float(s.quantile(0.75)), 4)),
+    ]
+    return pd.DataFrame(rows, columns=["Statistic", "Value"])
+
+
+def _plot_summary_normal_curve(values: pd.Series, metric_label: str) -> None:
+    """Normal curve N(sample mean, sample SD) with σ markers and observation rug."""
+    s = pd.to_numeric(values, errors="coerce").dropna()
+    if s.empty:
+        return
+
+    n = int(len(s))
+    mu = float(s.mean())
+    sigma = float(s.std(ddof=1)) if n > 1 else 0.0
+    ymax_ref = 1.0
+
+    fig = go.Figure()
+
+    if n < 2 or sigma <= 0:
+        fig.add_trace(
+            go.Scatter(
+                x=s.values,
+                y=np.zeros(n),
+                mode="markers",
+                marker=dict(size=10, color="#c0392b"),
+                name="Values",
+            )
+        )
+        fig.update_layout(
+            title=f"{metric_label}: single value or zero spread — no Gaussian fit (n={n})",
+            xaxis_title=metric_label,
+            yaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, width="stretch")
+        return
+
+    lo = min(float(s.min()), mu - 3.6 * sigma)
+    hi = max(float(s.max()), mu + 3.6 * sigma)
+    xs = np.linspace(lo, hi, 500)
+    ys = stats.norm.pdf(xs, mu, sigma)
+    ymax_ref = float(np.max(ys))
+
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="lines",
+            name="Normal N(μ̂, σ̂)",
+            fill="tozeroy",
+            fillcolor="rgba(192, 57, 43, 0.14)",
+            line=dict(color="#c0392b", width=2.4),
+            hovertemplate="x=%{x:.4g}<br>density=%{y:.5g}<extra></extra>",
+        )
+    )
+
+    # Mean and ±1σ … ±3σ vertical guides (in σ units from μ)
+    sigma_styles = [
+        (0, "solid", "#2c3e50", 2.6, "μ (mean)"),
+        (1, "dot", "#2980b9", 1.35, None),
+        (2, "dash", "#8e44ad", 1.0, None),
+        (3, "dash", "#7f8c8d", 0.75, None),
+    ]
+    for k, dash, color, width, label in sigma_styles:
+        if k == 0:
+            fig.add_shape(
+                type="line",
+                x0=mu,
+                x1=mu,
+                y0=0,
+                y1=ymax_ref * 1.08,
+                line=dict(color=color, width=width, dash=dash),
+            )
+            fig.add_annotation(
+                x=mu,
+                y=ymax_ref * 1.06,
+                text=label,
+                showarrow=False,
+                font=dict(size=11, color=color),
+                yshift=0,
+            )
+        else:
+            for sign in (-1, 1):
+                xv = mu + sign * k * sigma
+                fig.add_shape(
+                    type="line",
+                    x0=xv,
+                    x1=xv,
+                    y0=0,
+                    y1=ymax_ref * 1.02,
+                    line=dict(color=color, width=width, dash=dash),
+                )
+                fig.add_annotation(
+                    x=xv,
+                    y=ymax_ref * (1.02 + 0.05 * (4 - k)),
+                    text=f"{sign * k:+d}σ",
+                    showarrow=False,
+                    font=dict(size=10, color=color),
+                )
+
+    # Rug: actual observations along the x-axis
+    rug_y = -0.06 * ymax_ref
+    fig.add_trace(
+        go.Scatter(
+            x=s.values,
+            y=np.full(n, rug_y),
+            mode="markers",
+            marker=dict(
+                symbol="line-ns-open",
+                line=dict(width=1.5, color="rgba(44, 62, 80, 0.55)"),
+                size=14,
+            ),
+            name="Observations",
+        )
+    )
+
+    z_min = (float(s.min()) - mu) / sigma
+    z_max = (float(s.max()) - mu) / sigma
+    z_med = (float(s.median()) - mu) / sigma
+
+    fig.update_layout(
+        title=f"Normal approximation — {metric_label} "
+        f"(μ̂={mu:.4g}, σ̂={sigma:.4g}, n={n})",
+        xaxis_title=metric_label,
+        yaxis_title="Probability density",
+        yaxis=dict(range=[rug_y * 2.2, ymax_ref * 1.22]),
+        showlegend=True,
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+        margin=dict(t=56),
+    )
+
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        f"Curve uses the sample mean and sample standard deviation of the values in this view. "
+        f"Vertical marks show the mean (μ) and ±1σ … ±3σ. Distance from mean in σ: "
+        f"min ≈ {z_min:+.2f}, median ≈ {z_med:+.2f}, max ≈ {z_max:+.2f}."
+    )
+
+def cross_judge_benchmarking_page():
+    """Cross-judge metrics: judge-level bars or judge×competition matrix."""
+    st.header("Cross-judge benchmarking")
+    st.caption(
+        "Compare judges using the same metric definitions as elsewhere in this app. "
+        "Average deviation uses absolute panel mean deviation per judge "
+        "(PCS and elements combined with score-weighted averaging when both are selected). "
+        "Optional competition scope filters linked officials types on each competition. "
+        "When any scope other than all competitions is selected, discipline filters use "
+        "Singles / Pairs / Ice Dance / Synchronized only."
+    )
 
     # Heatmap configuration
-    st.subheader("Heatmap Configuration")
+    st.subheader("Configuration")
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        heatmap_type = st.selectbox("Heatmap Type",
+        heatmap_type = st.selectbox("View",
                                     ["Judge Overview", "Judge vs Competition"])
 
     with col2:
@@ -125,7 +373,7 @@ def judge_performance_heatmap():
                                   "throwout_rate": "Throwout Rate (%)",
                                   "anomaly_rate": "Anomaly Rate (%)",
                                   "rule_error_rate": "Rule Error Rate (%)",
-                                  "avg_deviation": "Average Deviation",
+                                  "avg_deviation": "Avg deviation (abs panel mean)",
                                   "excess_anomalies": "Total Excess Anomalies",
                                   "rule_errors": "Total Rule Errors"
                               }[x])
@@ -137,6 +385,28 @@ def judge_performance_heatmap():
                                       "pcs": "PCS Only",
                                       "element": "Elements Only"
                                   }[x])
+
+    competition_scope_label = st.selectbox(
+        "Competition scope",
+        list(_COMPETITION_SCOPE_LABELS),
+        index=0,
+        help=(
+            "Qualifying: linked officials type is set and not id 11 (nonqualifying). "
+            "NQS: linked officials type id 10. "
+            "Sectionals & championships: types 1–9 (excludes NQS and nonqualifying). "
+            "Championships only: types 4 (US Championships) and 8 (US Synchro Championships)."
+        ),
+    )
+    competition_scope = _competition_scope_key(competition_scope_label)
+
+    metric_names = {
+        "throwout_rate": "Throwout Rate (%)",
+        "anomaly_rate": "Anomaly Rate (%)",
+        "rule_error_rate": "Rule Error Rate (%)",
+        "avg_deviation": "Avg deviation (abs panel mean)",
+        "excess_anomalies": "Total Excess Anomalies",
+        "rule_errors": "Total Rule Errors"
+    }
 
     if heatmap_type == "Judge Overview":
         # Filters for judge overview
@@ -150,7 +420,7 @@ def judge_performance_heatmap():
             year_filter = None if year_filter == "All Years" else year_filter
 
         with col2:
-            competitions = analytics.get_competitions()
+            competitions = analytics.get_competitions(competition_scope=competition_scope)
             competition_names = [
                 f"{name} ({year})" for comp_id, name, year in competitions
             ]
@@ -162,7 +432,11 @@ def judge_performance_heatmap():
             ] if selected_competitions else None
 
         with col3:
-            discipline_types = analytics.get_discipline_types()
+            discipline_types = (
+                analytics.qualifying_event_segment_discipline_types()
+                if competition_scope != COMPETITION_SCOPE_ALL
+                else analytics.get_discipline_types()
+            )
             discipline_names = [name for dt_id, name in discipline_types]
             selected_disciplines = st.multiselect("Filter by Discipline Type",
                                                   discipline_names)
@@ -173,40 +447,64 @@ def judge_performance_heatmap():
 
         # Get heatmap data with caching
         @st.cache_data(ttl=300)  # 5-minute cache
-        def get_cached_heatmap_data(metric, score_type, year_filter, competition_ids_tuple, discipline_ids_tuple):
+        def get_cached_heatmap_data(
+            metric,
+            score_type,
+            year_filter,
+            competition_ids_tuple,
+            discipline_ids_tuple,
+            competition_scope_key,
+        ):
             analytics = get_analytics_safe()
             return analytics.get_judge_performance_heatmap_data(
                 metric=metric,
                 score_type=score_type,
                 year_filter=year_filter,
                 competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
-                discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None)
+                discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
+                competition_scope=competition_scope_key,
+            )
 
-        with st.spinner("Loading heatmap data..."):
+        with st.spinner("Loading data..."):
             # Convert lists to tuples for caching
             comp_ids_tuple = tuple(competition_ids) if competition_ids else None
             disc_ids_tuple = tuple(discipline_ids) if discipline_ids else None
 
+            pm = _cached_pooled_cross_judge_metrics(
+                score_type,
+                year_filter,
+                comp_ids_tuple,
+                disc_ids_tuple,
+                competition_scope,
+            )
+            _render_pooled_benchmark_block(pm, score_type)
+
             heatmap_df = get_cached_heatmap_data(
-                metric, score_type, year_filter, comp_ids_tuple, disc_ids_tuple)
+                metric,
+                score_type,
+                year_filter,
+                comp_ids_tuple,
+                disc_ids_tuple,
+                competition_scope,
+            )
 
         if heatmap_df.empty:
             st.warning("No data found for selected filters")
             return
 
-        # Create bar chart for judge overview
-        metric_names = {
-            "throwout_rate": "Throwout Rate (%)",
-            "anomaly_rate": "Anomaly Rate (%)",
-            "rule_error_rate": "Rule Error Rate (%)",
-            "avg_deviation": "Average Deviation",
-            "excess_anomalies": "Total Excess Anomalies",
-            "rule_errors": "Total Rule Errors"
-        }
-
         # Sort by metric value for better visualization
         heatmap_df_sorted = heatmap_df.sort_values('metric_value',
                                                    ascending=True)
+
+        summary_df = _heatmap_metric_distribution_summary(
+            heatmap_df_sorted["metric_value"], "Judges (count)"
+        )
+        if not summary_df.empty:
+            st.subheader("Summary statistics")
+            st.dataframe(summary_df, width="stretch", hide_index=True)
+            _plot_summary_normal_curve(
+                heatmap_df_sorted["metric_value"], metric_names[metric]
+            )
 
         fig = px.bar(
             heatmap_df_sorted,
@@ -214,7 +512,7 @@ def judge_performance_heatmap():
             y='judge_name',
             orientation='h',
             title=
-            f"Judge Performance: {metric_names[metric]} ({score_type.upper()})",
+            f"Judge overview: {metric_names[metric]} ({score_type.upper()})",
             labels={
                 'metric_value': metric_names[metric],
                 'judge_name': 'Judge'
@@ -226,7 +524,7 @@ def judge_performance_heatmap():
         st.plotly_chart(fig, width="stretch")
 
         # Show data table
-        st.subheader("Judge Performance Data")
+        st.subheader("Judge-level data")
         display_df = heatmap_df_sorted[[
             'judge_name', 'metric_value', 'total_scores'
         ]].copy()
@@ -236,15 +534,38 @@ def judge_performance_heatmap():
         st.dataframe(display_df, width="stretch")
 
     else:  # Judge vs Competition
-        # Get heatmap data for judge vs competition
-        with st.spinner("Loading judge vs competition heatmap data..."):
+        pm_jc = _cached_pooled_cross_judge_metrics(
+            score_type, None, None, None, competition_scope
+        )
+        _render_pooled_benchmark_block(pm_jc, score_type)
+
+        @st.cache_data(ttl=300)
+        def get_cached_judge_comp_heatmap(metric, score_type, competition_scope_key):
             analytics = get_analytics_safe()
-            heatmap_df = analytics.get_judge_competition_heatmap_data(
-                metric=metric, score_type=score_type)
+            return analytics.get_judge_competition_heatmap_data(
+                metric=metric,
+                score_type=score_type,
+                competition_scope=competition_scope_key,
+            )
+
+        with st.spinner("Loading judge vs competition data..."):
+            heatmap_df = get_cached_judge_comp_heatmap(
+                metric, score_type, competition_scope
+            )
 
         if heatmap_df.empty:
             st.warning("No data found for judge vs competition analysis")
             return
+
+        summary_df = _heatmap_metric_distribution_summary(
+            heatmap_df["metric_value"], "Judge × competition cells (count)"
+        )
+        if not summary_df.empty:
+            st.subheader("Summary statistics")
+            st.dataframe(summary_df, width="stretch", hide_index=True)
+            _plot_summary_normal_curve(
+                heatmap_df["metric_value"], metric_names[metric]
+            )
 
         # Create pivot table for heatmap
         pivot_df = heatmap_df.pivot(index='judge_name',
@@ -252,15 +573,6 @@ def judge_performance_heatmap():
                                     values='metric_value')
 
         # Create heatmap
-        metric_names = {
-            "throwout_rate": "Throwout Rate (%)",
-            "anomaly_rate": "Anomaly Rate (%)",
-            "rule_error_rate": "Rule Error Rate (%)",
-            "avg_deviation": "Average Deviation",
-            "excess_anomalies": "Total Excess Anomalies",
-            "rule_errors": "Total Rule Errors"
-        }
-
         fig = px.imshow(
             pivot_df.values,
             x=pivot_df.columns,
@@ -268,7 +580,7 @@ def judge_performance_heatmap():
             aspect='auto',
             color_continuous_scale='Reds',
             title=
-            f"Judge vs Competition: {metric_names[metric]} ({score_type.upper()})"
+            f"Judge vs competition: {metric_names[metric]} ({score_type.upper()})"
         )
 
         fig.update_xaxes(side="bottom")
@@ -280,7 +592,7 @@ def judge_performance_heatmap():
         st.plotly_chart(fig, width="stretch")
 
         # Show raw data
-        st.subheader("Raw Data")
+        st.subheader("Cell-level data")
         display_df = heatmap_df[[
             'judge_name', 'competition', 'metric_value', 'total_scores'
         ]].copy()
@@ -323,6 +635,19 @@ def temporal_trend_analysis():
                                       "element": "Elements Only"
                                   }[x])
 
+    temporal_scope_label = st.selectbox(
+        "Competition scope",
+        list(_COMPETITION_SCOPE_LABELS),
+        index=0,
+        key="temporal_competition_scope",
+        help=(
+            "Restricts scores to competitions whose linked officials type matches the scope "
+            "(same as Cross-Judge and Individual Judge). Scoped modes use Singles / Pairs / "
+            "Ice Dance / Synchronized segments only."
+        ),
+    )
+    temporal_competition_scope = _competition_scope_key(temporal_scope_label)
+
     metric_names = {
         "throwout_rate": "Throwout Rate (%)",
         "anomaly_rate": "Anomaly Rate (%)",
@@ -333,26 +658,27 @@ def temporal_trend_analysis():
     if analysis_type == "Individual Judge Trends":
         # Judge selection
         analytics = get_analytics_safe()
-        judges = analytics.get_judges()
-        if not judges:
+        ig_labels, ig_map = _identity_group_options(analytics)
+        if not ig_labels:
             st.error("No judges found in database")
             return
 
-        judge_options = {f"{name} ({location or 'Unknown location'})": judge_id for judge_id, name, location in judges}
         selected_judge_display = st.selectbox("Select Judge",
-                                              list(judge_options.keys()))
-        selected_judge_id = judge_options[selected_judge_display]
+                                              ig_labels)
+        selected_judge_ids = ig_map[selected_judge_display]
 
         # Get temporal trends data
         with st.spinner("Loading temporal trends data..."):
             trends_df = analytics.get_temporal_trends_data(
-                judge_id=selected_judge_id,
+                judge_id=selected_judge_ids,
                 period='year',
                 metric=metric,
-                score_type=score_type)
-
-            consistency_metrics = analytics.get_judge_consistency_metrics(
-                selected_judge_id, metric, score_type)
+                score_type=score_type,
+                competition_scope=temporal_competition_scope,
+            )
+            consistency_metrics = JudgeAnalytics.consistency_metrics_from_trends_df(
+                trends_df
+            )
 
         if trends_df.empty:
             st.warning("No temporal data found for selected judge")
@@ -434,7 +760,9 @@ def temporal_trend_analysis():
                 judge_id=None,
                 period='year',
                 metric=metric,
-                score_type=score_type)
+                score_type=score_type,
+                competition_scope=temporal_competition_scope,
+            )
 
         if trends_df.empty:
             st.warning("No system-wide temporal data found")
@@ -526,55 +854,25 @@ def temporal_trend_analysis():
         st.dataframe(display_df, width="stretch")
 
     else:  # Judge Consistency Ranking
-        # Get all judges and their consistency metrics
+        # One row per identity group (merged judge names sharing one directory official)
         analytics = get_analytics_safe()
-        judges = analytics.get_judges()
-        if not judges:
+        ig_labels, ig_map = _identity_group_options(analytics)
+        if not ig_labels:
             st.error("No judges found in database")
             return
 
-        consistency_data = []
-
         with st.spinner("Calculating consistency metrics for all judges..."):
-            for judge_id, judge_name, location in judges:
-                consistency_metrics = analytics.get_judge_consistency_metrics(
-                    judge_id, metric, score_type)
+            consistency_df = analytics.get_identity_group_consistency_ranking(
+                ig_map,
+                metric=metric,
+                score_type=score_type,
+                competition_scope=temporal_competition_scope,
+            )
 
-                # Get total scores for this judge
-                trends_df = analytics.get_temporal_trends_data(
-                    judge_id=judge_id,
-                    period='year',
-                    metric=metric,
-                    score_type=score_type)
-
-                if not trends_df.empty:
-                    total_scores = trends_df['total_scores'].sum()
-                    years_active = len(trends_df)
-
-                    consistency_data.append({
-                        'judge_name':
-                        judge_name,
-                        'location':
-                        location or 'Unknown',
-                        'consistency_score':
-                        consistency_metrics['consistency_score'],
-                        'trend_direction':
-                        consistency_metrics['trend_direction'],
-                        'trend_strength':
-                        consistency_metrics['trend_strength'],
-                        'coefficient_variation':
-                        consistency_metrics['coefficient_variation'],
-                        'total_scores':
-                        total_scores,
-                        'years_active':
-                        years_active
-                    })
-
-        if not consistency_data:
+        if consistency_df.empty:
             st.warning("No consistency data found")
             return
 
-        consistency_df = pd.DataFrame(consistency_data)
         consistency_df = consistency_df.sort_values('consistency_score',
                                                     ascending=False)
 
@@ -612,368 +910,36 @@ def temporal_trend_analysis():
         st.dataframe(display_df, width="stretch")
 
 
-def statistical_bias_detection():
-    """Statistical Bias Detection Analysis"""
-    st.header("Statistical Bias Detection")
-
-    # Analysis configuration
-    st.subheader("Analysis Configuration")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        analysis_mode = st.selectbox("Analysis Mode", [
-            "Individual Judge Analysis", "System-Wide Bias Summary",
-            "Judge Comparison"
-        ])
-
-    with col2:
-        significance_level = st.selectbox(
-            "Significance Level", [0.05, 0.01, 0.001],
-            format_func=lambda x:
-            f"α = {x} ({'95%' if x == 0.05 else '99%' if x == 0.01 else '99.9%'} confidence)"
-        )
-
-    # Filters
-    st.subheader("Filters")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        analytics = get_analytics_safe()
-        years = analytics.get_years()
-        year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
-        year_filter = None if year_filter == "All Years" else year_filter
-
-    with col2:
-        competitions = analytics.get_competitions()
-        competition_names = [
-            f"{name} ({year})" for comp_id, name, year in competitions
-        ]
-        selected_competitions = st.multiselect("Filter by Competitions",
-                                               competition_names)
-        competition_ids = [
-            comp_id for comp_id, name, year in competitions
-            if f"{name} ({year})" in selected_competitions
-        ] if selected_competitions else None
-
-    with col3:
-        discipline_types = analytics.get_discipline_types()
-        discipline_names = [name for dt_id, name in discipline_types]
-        selected_disciplines = st.multiselect("Filter by Discipline Type",
-                                              discipline_names)
-        discipline_ids = [
-            dt_id for dt_id, name in discipline_types
-            if name in selected_disciplines
-        ] if selected_disciplines else None
-
-    if analysis_mode == "Individual Judge Analysis":
-        # Judge selection
-        judges = analytics.get_judges()
-        if not judges:
-            st.error("No judges found in database")
-            return
-
-        judge_options = {
-            f"{name}": judge_id
-            for judge_id, name, location in judges
-        }
-        selected_judge_display = st.selectbox("Select Judge",
-                                              list(judge_options.keys()))
-        selected_judge_id = judge_options[selected_judge_display]
-
-        # Get statistical significance results
-        with st.spinner("Running statistical bias tests..."):
-            significance_results = analytics.calculate_statistical_significance(
-                selected_judge_id, competition_ids, discipline_ids,
-                year_filter)
-
-        if not significance_results['pcs_tests'] and not significance_results[
-                'element_tests']:
-            st.warning("No data found for selected judge with current filters")
-            return
-
-        # Overall bias assessment
-        st.subheader("Bias Detection Summary")
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            bias_status = "🔴 BIAS DETECTED" if significance_results[
-                'bias_detected'] else "🟢 NO BIAS DETECTED"
-            st.metric("Bias Status", bias_status)
-
-        with col2:
-            overall_sig = "Yes" if significance_results[
-                'overall_significance'] else "No"
-            st.metric("Statistical Significance", overall_sig)
-
-        with col3:
-            sig_ratio = significance_results.get('significance_ratio', 0)
-            st.metric("Significance Ratio", f"{sig_ratio:.0%}")
-
-        with col4:
-            confidence_level = f"{(1-significance_level)*100:.0f}%"
-            st.metric("Confidence Level", confidence_level)
-
-        # PCS Tests
-        if significance_results['pcs_tests']:
-            st.subheader("PCS Statistical Tests")
-
-            for test_name, test_result in significance_results[
-                    'pcs_tests'].items():
-                with st.expander(f"PCS {test_name.replace('_', ' ').title()}",
-                                 expanded=False):
-                    test_cols = st.columns(3)
-
-                    with test_cols[0]:
-                        if 'statistic' in test_result:
-                            st.metric("Test Statistic",
-                                      f"{test_result['statistic']:.4f}")
-
-                    with test_cols[1]:
-                        if 'p_value' in test_result:
-                            p_val = test_result['p_value']
-                            significance_indicator = "🔴 Significant" if p_val < significance_level else "🟢 Not Significant"
-                            st.metric("P-Value", f"{p_val:.4f}")
-                            st.write(significance_indicator)
-
-                    with test_cols[2]:
-                        st.write("**Interpretation:**")
-                        st.write(test_result['interpretation'])
-
-                    # Additional metrics for specific tests
-                    if test_name == 'throwout_chi2':
-                        st.write(
-                            f"Actual throwout rate: {test_result['actual_rate']:.2f}%"
-                        )
-                        st.write(
-                            f"Expected throwout rate: {test_result['expected_rate']:.2f}%"
-                        )
-                    elif test_name == 'outlier_analysis':
-                        st.write(
-                            f"Outlier count: {test_result['outlier_count']}")
-                        st.write(
-                            f"Outlier rate: {test_result['outlier_rate']:.2f}%"
-                        )
-
-        # Element Tests
-        if significance_results['element_tests']:
-            st.subheader("Element Statistical Tests")
-
-            for test_name, test_result in significance_results[
-                    'element_tests'].items():
-                with st.expander(
-                        f"Element {test_name.replace('_', ' ').title()}",
-                        expanded=False):
-                    test_cols = st.columns(3)
-
-                    with test_cols[0]:
-                        if 'statistic' in test_result:
-                            st.metric("Test Statistic",
-                                      f"{test_result['statistic']:.4f}")
-
-                    with test_cols[1]:
-                        if 'p_value' in test_result:
-                            p_val = test_result['p_value']
-                            significance_indicator = "🔴 Significant" if p_val < significance_level else "🟢 Not Significant"
-                            st.metric("P-Value", f"{p_val:.4f}")
-                            st.write(significance_indicator)
-
-                    with test_cols[2]:
-                        st.write("**Interpretation:**")
-                        st.write(test_result['interpretation'])
-
-                    # Additional metrics for specific tests
-                    if test_name == 'throwout_chi2':
-                        st.write(
-                            f"Actual throwout rate: {test_result['actual_rate']:.2f}%"
-                        )
-                        st.write(
-                            f"Expected throwout rate: {test_result['expected_rate']:.2f}%"
-                        )
-                    elif test_name == 'outlier_analysis':
-                        st.write(
-                            f"Outlier count: {test_result['outlier_count']}")
-                        st.write(
-                            f"Outlier rate: {test_result['outlier_rate']:.2f}%"
-                        )
-
-    elif analysis_mode == "System-Wide Bias Summary":
-        # Get bias detection summary for all judges
-        with st.spinner("Analyzing bias across all judges..."):
-            analytics = get_analytics_safe()
-            bias_summary_df = analytics.get_bias_detection_summary(
-                competition_ids, discipline_ids, year_filter)
-
-        if bias_summary_df.empty:
-            st.warning("No data found for bias analysis")
-            return
-
-        # System statistics
-        st.subheader("System-Wide Bias Statistics")
-        col1, col2, col3, col4 = st.columns(4)
-
-        total_judges = len(bias_summary_df)
-        bias_detected_count = bias_summary_df['bias_detected'].sum()
-        significance_count = bias_summary_df['overall_significance'].sum()
-        avg_significance_ratio = bias_summary_df['significance_ratio'].mean()
-
-        with col1:
-            st.metric("Total Judges Analyzed", total_judges)
-
-        with col2:
-            bias_rate = (bias_detected_count / total_judges *
-                         100) if total_judges > 0 else 0
-            st.metric("Judges with Bias Detected",
-                      f"{bias_detected_count} ({bias_rate:.1f}%)")
-
-        with col3:
-            sig_rate = (significance_count / total_judges *
-                        100) if total_judges > 0 else 0
-            st.metric("Judges with Significance",
-                      f"{significance_count} ({sig_rate:.1f}%)")
-
-        with col4:
-            st.metric("Avg Significance Ratio",
-                      f"{avg_significance_ratio:.1%}")
-
-        # Bias detection results
-        st.subheader("Bias Detection Results")
-
-        # Sort by bias detected and significance ratio
-        bias_summary_sorted = bias_summary_df.sort_values(
-            ['bias_detected', 'significance_ratio'], ascending=[False, False])
-
-        # Create visualization
-        fig = px.scatter(
-            bias_summary_sorted,
-            x='significance_ratio',
-            y='total_scores',
-            color='bias_detected',
-            size='total_scores',
-            hover_data=['judge_name', 'location'],
-            title="Judge Bias Detection: Significance Ratio vs Total Scores",
-            labels={
-                'significance_ratio': 'Significance Ratio',
-                'total_scores': 'Total Scores',
-                'bias_detected': 'Bias Detected'
-            },
-            color_discrete_map={
-                True: 'red',
-                False: 'green'
-            })
-
-        st.plotly_chart(fig, width="stretch")
-
-        # Detailed results table
-        st.subheader("Detailed Bias Analysis")
-        display_df = bias_summary_sorted[[
-            'judge_name', 'location', 'bias_detected', 'overall_significance',
-            'significance_ratio', 'total_scores', 'pcs_throwout_rate',
-            'element_throwout_rate'
-        ]].copy()
-        display_df.columns = [
-            'Judge', 'Location', 'Bias Detected', 'Statistical Significance',
-            'Significance Ratio', 'Total Scores', 'PCS Throwout Rate (%)',
-            'Element Throwout Rate (%)'
-        ]
-
-        # Format percentages
-        for col in [
-                'Significance Ratio', 'PCS Throwout Rate (%)',
-                'Element Throwout Rate (%)'
-        ]:
-            display_df[col] = display_df[col].round(1)
-
-        st.dataframe(display_df, width="stretch")
-
-    else:  # Judge Comparison
-        # Select two judges for comparison
-        analytics = get_analytics_safe()
-        judges = analytics.get_judges()
-        if len(judges) < 2:
-            st.error("Need at least 2 judges for comparison")
-            return
-
-        judge_options = {
-            f"{name}": judge_id
-            for judge_id, name, location in judges
-        }
-
-        col1, col2 = st.columns(2)
-        with col1:
-            judge_1_display = st.selectbox("Select First Judge",
-                                           list(judge_options.keys()))
-            judge_1_id = judge_options[judge_1_display]
-
-        with col2:
-            remaining_judges = [
-                j for j in judge_options.keys() if j != judge_1_display
-            ]
-            judge_2_display = st.selectbox("Select Second Judge",
-                                           remaining_judges)
-            judge_2_id = judge_options[judge_2_display]
-
-        score_type = st.selectbox("Score Type", ["both", "pcs", "element"],
-                                  format_func=lambda x: {
-                                      "both": "Both PCS & Elements",
-                                      "pcs": "PCS Only",
-                                      "element": "Elements Only"
-                                  }[x])
-
-        # Run comparison
-        with st.spinner("Comparing judge distributions..."):
-            comparison_results = analytics.compare_judge_distributions(
-                judge_1_id, judge_2_id, score_type)
-
-        if not comparison_results:
-            st.warning("No comparable data found between selected judges")
-            return
-
-        st.subheader(
-            f"Statistical Comparison: {judge_1_display} vs {judge_2_display}")
-
-        for score_category, tests in comparison_results.items():
-            st.write(f"**{score_category.upper()} Comparison:**")
-
-            for test_name, test_result in tests.items():
-                with st.expander(f"{test_name.replace('_', ' ').title()}",
-                                 expanded=False):
-                    test_cols = st.columns(3)
-
-                    with test_cols[0]:
-                        st.metric("Test Statistic",
-                                  f"{test_result['statistic']:.4f}")
-
-                    with test_cols[1]:
-                        p_val = test_result['p_value']
-                        significance_indicator = "🔴 Significant" if p_val < significance_level else "🟢 Not Significant"
-                        st.metric("P-Value", f"{p_val:.4f}")
-                        st.write(significance_indicator)
-
-                    with test_cols[2]:
-                        st.write("**Interpretation:**")
-                        st.write(test_result['interpretation'])
-
-
 if page == "Individual Judge Analysis":
     st.header("Individual Judge Analysis")
 
     # Judge selection
     analytics = get_analytics_safe()
-    judges = analytics.get_judges()
-    if not judges:
+    ig_labels, ig_map = _identity_group_options(analytics)
+    if not ig_labels:
         st.error("No judges found in database")
         st.stop()
 
-    judge_options = {
-        f"{name}": judge_id
-        for judge_id, name, location in judges
-    }
     selected_judge_display = st.selectbox("Select Judge",
-                                          list(judge_options.keys()))
-    selected_judge_id = judge_options[selected_judge_display]
+                                          ig_labels)
+    selected_judge_ids = ig_map[selected_judge_display]
 
     # Filters
     st.subheader("Filters")
+    individual_scope_label = st.selectbox(
+        "Competition scope",
+        list(_COMPETITION_SCOPE_LABELS),
+        index=0,
+        key="individual_judge_competition_scope",
+        help=(
+            "Qualifying: linked officials type is set and not id 11 (nonqualifying). "
+            "NQS: linked officials type id 10. "
+            "Sectionals & championships: types 1–9 (excludes NQS and nonqualifying). "
+            "Championships only: types 4 (US Championships) and 8 (US Synchro Championships)."
+        ),
+    )
+    individual_competition_scope = _competition_scope_key(individual_scope_label)
+
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -982,20 +948,32 @@ if page == "Individual Judge Analysis":
         year_filter = None if year_filter == "All Years" else year_filter
 
     with col2:
-        # Get competitions where this judge participated
-        judge_competitions = analytics.get_judge_competitions(selected_judge_id)
+        # Scored events plus protocol appearances (segment_official) for linked directory official
+        judge_competitions = analytics.get_judge_competitions(
+            selected_judge_ids,
+            competition_scope=individual_competition_scope,
+        )
         competition_names = [
             f"{name} ({year})" for comp_id, name, year in judge_competitions
         ]
-        selected_competitions = st.multiselect("Filter by Competitions",
-                                               competition_names)
+        selected_competitions = st.multiselect(
+            "Filter by Competitions",
+            competition_names,
+            help="Ordered by event date (start date, or end date if missing), newest first. "
+            "Includes scored events and protocol appearances (segment_official). "
+            "Only competitions matching the competition scope above are listed.",
+        )
         competition_ids = [
             comp_id for comp_id, name, year in judge_competitions
             if f"{name} ({year})" in selected_competitions
         ] if selected_competitions else None
 
     with col3:
-        discipline_types = analytics.get_discipline_types()
+        discipline_types = (
+            analytics.qualifying_event_segment_discipline_types()
+            if individual_competition_scope != COMPETITION_SCOPE_ALL
+            else analytics.get_discipline_types()
+        )
         discipline_names = [name for dt_id, name in discipline_types]
         selected_disciplines = st.multiselect("Filter by Discipline Type",
                                               discipline_names)
@@ -1006,427 +984,480 @@ if page == "Individual Judge Analysis":
 
     # Get data
     with st.spinner("Loading judge data..."):
-        pcs_df = analytics.get_judge_pcs_stats(selected_judge_id, year_filter,
-                                               competition_ids, discipline_ids)
-        element_df = analytics.get_judge_element_stats(selected_judge_id,
-                                                       year_filter,
-                                                       competition_ids,
-                                                       discipline_ids)
-        segment_df = analytics.get_judge_segment_stats(selected_judge_id, year_filter,
-                                                      competition_ids, discipline_ids)
+        pcs_df = analytics.get_judge_pcs_stats(
+            selected_judge_ids,
+            year_filter,
+            competition_ids,
+            discipline_ids,
+            competition_scope=individual_competition_scope,
+        )
+        element_df = analytics.get_judge_element_stats(
+            selected_judge_ids,
+            year_filter,
+            competition_ids,
+            discipline_ids,
+            competition_scope=individual_competition_scope,
+        )
+        segment_df = analytics.get_judge_segment_stats(
+            selected_judge_ids,
+            year_filter,
+            competition_ids,
+            discipline_ids,
+            competition_scope=individual_competition_scope,
+        )
+
+    comp_pairs = _individual_judge_protocol_competition_pairs(
+        judge_competitions,
+        pcs_df,
+        element_df,
+        year_filter,
+        competition_ids,
+    )
 
     if pcs_df.empty and element_df.empty:
-        st.warning("No data found for selected judge with current filters")
-    else:
-        # Summary statistics
-        stats = analytics.calculate_judge_summary_stats(pcs_df, element_df)
+        st.warning(
+            "No PCS or element score data for this judge with the selected filters. "
+            "The protocol roles table below may still list competitions from segment_official."
+        )
 
-        st.subheader("Summary Statistics")
-        col1, col2 = st.columns(2)
+    if comp_pairs:
+        st.subheader("Competitions & protocol roles")
+        roles_df, roles_cap = analytics.get_judge_competition_protocol_roles_rows(
+            selected_judge_ids,
+            comp_pairs,
+            competition_scope=individual_competition_scope,
+        )
+        if roles_cap:
+            st.caption(roles_cap)
+        st.dataframe(
+            roles_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Distinct protocol roles": st.column_config.TextColumn(
+                    "Distinct protocol roles",
+                    width="large",
+                    help="Distinct appointment/protocol roles from segment_official for this judge's "
+                    "linked official, sorted alphabetically within each competition.",
+                ),
+            },
+        )
+        st.caption(
+            "Rows ordered by competition event date (start, else end), newest first; missing dates "
+            "last. Roles within a row are alphabetical. Includes competitions from score filters "
+            "plus protocol-only events in the competition filter."
+        )
 
+    # Summary statistics
+    stats = analytics.calculate_judge_summary_stats(pcs_df, element_df)
+
+    st.subheader("Summary Statistics")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**PCS Statistics**")
+        st.metric("Total PCS Scores", stats['pcs_total_scores'])
+        st.metric("PCS Throwout Rate",
+                  f"{stats['pcs_throwout_rate']:.1f}%")
+        st.metric("PCS Anomaly Rate", f"{stats['pcs_anomaly_rate']:.1f}%")
+        st.metric("PCS Rule Error Rate",
+                  f"{stats['pcs_rule_error_rate']:.1f}%")
+
+    with col2:
+        st.write("**Element Statistics**")
+        st.metric("Total Element Scores", stats['element_total_scores'])
+        st.metric("Element Throwout Rate",
+                  f"{stats['element_throwout_rate']:.1f}%")
+        st.metric("Element Anomaly Rate",
+                  f"{stats['element_anomaly_rate']:.1f}%")
+        st.metric("Element Rule Error Rate",
+                  f"{stats['element_rule_error_rate']:.1f}%")
+
+    # Analysis Tables - Elements first, then PCS
+    if not element_df.empty:
+        st.subheader("Element Analysis")
+
+        # Element analysis by type with high/low breakdown
+        def analyze_element_issues(group):
+            total_scores = len(group)
+            throwouts = group['thrown_out'].sum()
+            anomalies = group['anomaly'].sum()
+            rule_errors = group['is_rule_error'].sum()
+
+            # High/Low breakdown for throwouts and anomalies
+            throwout_high = ((group['thrown_out'] == True) &
+                             (group['deviation'] > 0)).sum()
+            throwout_low = ((group['thrown_out'] == True) &
+                            (group['deviation'] < 0)).sum()
+            anomaly_high = ((group['anomaly'] == True) &
+                            (group['deviation'] > 0)).sum()
+            anomaly_low = ((group['anomaly'] == True) &
+                           (group['deviation'] < 0)).sum()
+
+            return pd.Series({
+                'total_scores': total_scores,
+                'throwouts': throwouts,
+                'throwout_high': throwout_high,
+                'throwout_low': throwout_low,
+                'anomalies': anomalies,
+                'anomaly_high': anomaly_high,
+                'anomaly_low': anomaly_low,
+                'rule_errors': rule_errors
+            })
+
+        element_summary = element_df.groupby('element_type_name').apply(
+            analyze_element_issues, include_groups=False).reset_index()
+        element_summary['throwout_rate'] = (
+            element_summary['throwouts'] /
+            element_summary['total_scores']) * 100
+        element_summary['anomaly_rate'] = (
+            element_summary['anomalies'] /
+            element_summary['total_scores']) * 100
+        element_summary['rule_error_rate'] = (
+            element_summary['rule_errors'] /
+            element_summary['total_scores']) * 100
+
+        # Display as table with high/low breakdown
+        st.subheader("Element Rates by Element Type")
+        display_summary = element_summary[[
+            'element_type_name', 'total_scores', 'throwouts',
+            'throwout_high', 'throwout_low', 'throwout_rate', 'anomalies',
+            'anomaly_high', 'anomaly_low', 'anomaly_rate', 'rule_errors',
+            'rule_error_rate'
+        ]].copy()
+        display_summary.columns = [
+            'Element Type', 'Total Scores', 'Throwouts', 'High Throwouts',
+            'Low Throwouts', 'Throwout Rate (%)', 'Anomalies (>2.0)',
+            'High Anomalies', 'Low Anomalies', 'Anomaly Rate (%)',
+            'Rule Errors', 'Rule Error Rate (%)'
+        ]
+        for col in [
+                'Throwout Rate (%)', 'Anomaly Rate (%)',
+                'Rule Error Rate (%)'
+        ]:
+            display_summary[col] = display_summary[col].round(1)
+        st.dataframe(display_summary, width="stretch")
+
+        # Detailed element scores with issues
+        st.subheader("Element Scores with Issues")
+
+        # Issue type filters
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.write("**PCS Statistics**")
-            st.metric("Total PCS Scores", stats['pcs_total_scores'])
-            st.metric("PCS Throwout Rate",
-                      f"{stats['pcs_throwout_rate']:.1f}%")
-            st.metric("PCS Anomaly Rate", f"{stats['pcs_anomaly_rate']:.1f}%")
-            st.metric("PCS Rule Error Rate",
-                      f"{stats['pcs_rule_error_rate']:.1f}%")
-
+            show_thrown_out = st.checkbox("Thrown Out",
+                                          value=True,
+                                          key="elem_thrown_out")
         with col2:
-            st.write("**Element Statistics**")
-            st.metric("Total Element Scores", stats['element_total_scores'])
-            st.metric("Element Throwout Rate",
-                      f"{stats['element_throwout_rate']:.1f}%")
-            st.metric("Element Anomaly Rate",
-                      f"{stats['element_anomaly_rate']:.1f}%")
-            st.metric("Element Rule Error Rate",
-                      f"{stats['element_rule_error_rate']:.1f}%")
+            show_anomalies = st.checkbox("Anomalies",
+                                         value=True,
+                                         key="elem_anomalies")
+        with col3:
+            show_rule_errors = st.checkbox("Rule Errors",
+                                           value=True,
+                                           key="elem_rule_errors")
 
-        # Analysis Tables - Elements first, then PCS
-        if not element_df.empty:
-            st.subheader("Element Analysis")
+        # Filter based on selected issue types
+        issue_filter = ((element_df['thrown_out'] & show_thrown_out) |
+                        (element_df['anomaly'] & show_anomalies) |
+                        (element_df['is_rule_error'] & show_rule_errors))
+        problem_elements = element_df[issue_filter].copy()
 
-            # Element analysis by type with high/low breakdown
-            def analyze_element_issues(group):
-                total_scores = len(group)
-                throwouts = group['thrown_out'].sum()
-                anomalies = group['anomaly'].sum()
-                rule_errors = group['is_rule_error'].sum()
+        if not problem_elements.empty:
 
-                # High/Low breakdown for throwouts and anomalies
-                throwout_high = ((group['thrown_out'] == True) &
-                                 (group['deviation'] > 0)).sum()
-                throwout_low = ((group['thrown_out'] == True) &
-                                (group['deviation'] < 0)).sum()
-                anomaly_high = ((group['anomaly'] == True) &
-                                (group['deviation'] > 0)).sum()
-                anomaly_low = ((group['anomaly'] == True) &
-                               (group['deviation'] < 0)).sum()
+            def get_issue_type(row):
+                issues = []
+                if row['thrown_out']:
+                    direction = 'High' if row['deviation'] > 0 else 'Low'
+                    issues.append(f'Thrown Out ({direction})')
+                if row['anomaly']:
+                    direction = 'High' if row['deviation'] > 0 else 'Low'
+                    issues.append(f'Anomaly ({direction})')
+                if row['is_rule_error']:
+                    issues.append('Rule Error')
+                return ', '.join(issues)
 
-                return pd.Series({
-                    'total_scores': total_scores,
-                    'throwouts': throwouts,
-                    'throwout_high': throwout_high,
-                    'throwout_low': throwout_low,
-                    'anomalies': anomalies,
-                    'anomaly_high': anomaly_high,
-                    'anomaly_low': anomaly_low,
-                    'rule_errors': rule_errors
-                })
+            problem_elements['issue_type'] = problem_elements.apply(
+                get_issue_type, axis=1)
 
-            element_summary = element_df.groupby('element_type_name').apply(
-                analyze_element_issues, include_groups=False).reset_index()
-            element_summary['throwout_rate'] = (
-                element_summary['throwouts'] /
-                element_summary['total_scores']) * 100
-            element_summary['anomaly_rate'] = (
-                element_summary['anomalies'] /
-                element_summary['total_scores']) * 100
-            element_summary['rule_error_rate'] = (
-                element_summary['rule_errors'] /
-                element_summary['total_scores']) * 100
-
-            # Display as table with high/low breakdown
-            st.subheader("Element Rates by Element Type")
-            display_summary = element_summary[[
-                'element_type_name', 'total_scores', 'throwouts',
-                'throwout_high', 'throwout_low', 'throwout_rate', 'anomalies',
-                'anomaly_high', 'anomaly_low', 'anomaly_rate', 'rule_errors',
-                'rule_error_rate'
+            # Create display dataframe with proper competition links
+            display_df = problem_elements[[
+                'competition_name', 'competition_url', 'year',
+                'segment_name', 'skater_name', 'element_name',
+                'element_type_name', 'judge_score', 'panel_average',
+                'deviation', 'issue_type'
             ]].copy()
-            display_summary.columns = [
-                'Element Type', 'Total Scores', 'Throwouts', 'High Throwouts',
-                'Low Throwouts', 'Throwout Rate (%)', 'Anomalies (>2.0)',
-                'High Anomalies', 'Low Anomalies', 'Anomaly Rate (%)',
-                'Rule Errors', 'Rule Error Rate (%)'
-            ]
-            for col in [
-                    'Throwout Rate (%)', 'Anomaly Rate (%)',
-                    'Rule Error Rate (%)'
-            ]:
-                display_summary[col] = display_summary[col].round(1)
-            st.dataframe(display_summary, width="stretch")
 
-            # Detailed element scores with issues
-            st.subheader("Element Scores with Issues")
+            st.dataframe(display_df.drop('competition_url', axis=1),
+                         width="stretch")
 
-            # Issue type filters
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                show_thrown_out = st.checkbox("Thrown Out",
+            # Show competition links separately
+            if 'competition_url' in problem_elements.columns and not problem_elements['competition_url'].isna().all():
+                st.subheader("Competition Links")
+                unique_competitions = problem_elements[[
+                    'competition_name', 'competition_url'
+                ]].drop_duplicates()
+                for _, row in unique_competitions.iterrows():
+                    if pd.notna(row['competition_url']) and row['competition_url']:
+                        st.markdown(
+                            f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
+                        )
+        else:
+            st.info(
+                "No element scores with issues found for selected filters")
+
+    if not pcs_df.empty:
+        st.subheader("PCS Analysis")
+
+        # PCS throwout and deviation rates by type with high/low breakdown
+        def analyze_pcs_issues(group):
+            total_scores = len(group)
+            throwouts = group['thrown_out'].sum()
+            anomalies = group['anomaly'].sum()
+            rule_errors = group['is_rule_error'].sum()
+
+            # High/Low breakdown for throwouts and anomalies
+            throwout_high = ((group['thrown_out'] == True) &
+                             (group['deviation'] > 0)).sum()
+            throwout_low = ((group['thrown_out'] == True) &
+                            (group['deviation'] < 0)).sum()
+            anomaly_high = ((group['anomaly'] == True) &
+                            (group['deviation'] > 0)).sum()
+            anomaly_low = ((group['anomaly'] == True) &
+                           (group['deviation'] < 0)).sum()
+
+            return pd.Series({
+                'total_scores': total_scores,
+                'throwouts': throwouts,
+                'throwout_high': throwout_high,
+                'throwout_low': throwout_low,
+                'anomalies': anomalies,
+                'anomaly_high': anomaly_high,
+                'anomaly_low': anomaly_low,
+                'rule_errors': rule_errors
+            })
+
+        pcs_summary = pcs_df.groupby('pcs_type_name').apply(
+            analyze_pcs_issues, include_groups=False).reset_index()
+        pcs_summary['throwout_rate'] = (pcs_summary['throwouts'] /
+                                        pcs_summary['total_scores']) * 100
+        pcs_summary['anomaly_rate'] = (pcs_summary['anomalies'] /
+                                       pcs_summary['total_scores']) * 100
+        pcs_summary['rule_error_rate'] = (
+            pcs_summary['rule_errors'] / pcs_summary['total_scores']) * 100
+
+        # Display as table with high/low breakdown
+        st.subheader("PCS Rates by Component Type")
+        display_summary = pcs_summary[[
+            'pcs_type_name', 'total_scores', 'throwouts', 'throwout_high',
+            'throwout_low', 'throwout_rate', 'anomalies', 'anomaly_high',
+            'anomaly_low', 'anomaly_rate', 'rule_errors', 'rule_error_rate'
+        ]].copy()
+        display_summary.columns = [
+            'PCS Component', 'Total Scores', 'Throwouts', 'High Throwouts',
+            'Low Throwouts', 'Throwout Rate (%)', 'Anomalies (>1.5)',
+            'High Anomalies', 'Low Anomalies', 'Anomaly Rate (%)',
+            'Rule Errors', 'Rule Error Rate (%)'
+        ]
+        for col in [
+                'Throwout Rate (%)', 'Anomaly Rate (%)',
+                'Rule Error Rate (%)'
+        ]:
+            display_summary[col] = display_summary[col].round(1)
+        st.dataframe(display_summary, width="stretch")
+
+        # Detailed PCS scores with issues
+        st.subheader("PCS Scores with Issues")
+
+        # Issue type filters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            show_thrown_out_pcs = st.checkbox("Thrown Out",
                                               value=True,
-                                              key="elem_thrown_out")
-            with col2:
-                show_anomalies = st.checkbox("Anomalies",
+                                              key="pcs_thrown_out")
+        with col2:
+            show_anomalies_pcs = st.checkbox("Anomalies",
                                              value=True,
-                                             key="elem_anomalies")
-            with col3:
-                show_rule_errors = st.checkbox("Rule Errors",
+                                             key="pcs_anomalies")
+        with col3:
+            show_rule_errors_pcs = st.checkbox("Rule Errors",
                                                value=True,
-                                               key="elem_rule_errors")
+                                               key="pcs_rule_errors")
 
-            # Filter based on selected issue types
-            issue_filter = ((element_df['thrown_out'] & show_thrown_out) |
-                            (element_df['anomaly'] & show_anomalies) |
-                            (element_df['is_rule_error'] & show_rule_errors))
-            problem_elements = element_df[issue_filter].copy()
+        # Filter based on selected issue types
+        issue_filter_pcs = (
+            (pcs_df['thrown_out'] & show_thrown_out_pcs) |
+            (pcs_df['anomaly'] & show_anomalies_pcs) |
+            (pcs_df['is_rule_error'] & show_rule_errors_pcs))
+        problem_pcs = pcs_df[issue_filter_pcs].copy()
 
-            if not problem_elements.empty:
+        if not problem_pcs.empty:
 
-                def get_issue_type(row):
-                    issues = []
-                    if row['thrown_out']:
-                        direction = 'High' if row['deviation'] > 0 else 'Low'
-                        issues.append(f'Thrown Out ({direction})')
-                    if row['anomaly']:
-                        direction = 'High' if row['deviation'] > 0 else 'Low'
-                        issues.append(f'Anomaly ({direction})')
-                    if row['is_rule_error']:
-                        issues.append('Rule Error')
-                    return ', '.join(issues)
+            def get_issue_type(row):
+                issues = []
+                if row['thrown_out']:
+                    direction = 'High' if row['deviation'] > 0 else 'Low'
+                    issues.append(f'Thrown Out ({direction})')
+                if row['anomaly']:
+                    direction = 'High' if row['deviation'] > 0 else 'Low'
+                    issues.append(f'Anomaly ({direction})')
+                if row['is_rule_error']:
+                    issues.append('Rule Error')
+                return ', '.join(issues)
 
-                problem_elements['issue_type'] = problem_elements.apply(
-                    get_issue_type, axis=1)
+            problem_pcs['issue_type'] = problem_pcs.apply(get_issue_type,
+                                                          axis=1)
 
-                # Create display dataframe with proper competition links
-                display_df = problem_elements[[
-                    'competition_name', 'competition_url', 'year',
-                    'segment_name', 'skater_name', 'element_name',
-                    'element_type_name', 'judge_score', 'panel_average',
-                    'deviation', 'issue_type'
-                ]].copy()
-
-                st.dataframe(display_df.drop('competition_url', axis=1),
-                             width="stretch")
-
-                # Show competition links separately
-                if 'competition_url' in problem_elements.columns and not problem_elements['competition_url'].isna().all():
-                    st.subheader("Competition Links")
-                    unique_competitions = problem_elements[[
-                        'competition_name', 'competition_url'
-                    ]].drop_duplicates()
-                    for _, row in unique_competitions.iterrows():
-                        if pd.notna(row['competition_url']) and row['competition_url']:
-                            st.markdown(
-                                f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
-                            )
-            else:
-                st.info(
-                    "No element scores with issues found for selected filters")
-
-        if not pcs_df.empty:
-            st.subheader("PCS Analysis")
-
-            # PCS throwout and deviation rates by type with high/low breakdown
-            def analyze_pcs_issues(group):
-                total_scores = len(group)
-                throwouts = group['thrown_out'].sum()
-                anomalies = group['anomaly'].sum()
-                rule_errors = group['is_rule_error'].sum()
-
-                # High/Low breakdown for throwouts and anomalies
-                throwout_high = ((group['thrown_out'] == True) &
-                                 (group['deviation'] > 0)).sum()
-                throwout_low = ((group['thrown_out'] == True) &
-                                (group['deviation'] < 0)).sum()
-                anomaly_high = ((group['anomaly'] == True) &
-                                (group['deviation'] > 0)).sum()
-                anomaly_low = ((group['anomaly'] == True) &
-                               (group['deviation'] < 0)).sum()
-
-                return pd.Series({
-                    'total_scores': total_scores,
-                    'throwouts': throwouts,
-                    'throwout_high': throwout_high,
-                    'throwout_low': throwout_low,
-                    'anomalies': anomalies,
-                    'anomaly_high': anomaly_high,
-                    'anomaly_low': anomaly_low,
-                    'rule_errors': rule_errors
-                })
-
-            pcs_summary = pcs_df.groupby('pcs_type_name').apply(
-                analyze_pcs_issues, include_groups=False).reset_index()
-            pcs_summary['throwout_rate'] = (pcs_summary['throwouts'] /
-                                            pcs_summary['total_scores']) * 100
-            pcs_summary['anomaly_rate'] = (pcs_summary['anomalies'] /
-                                           pcs_summary['total_scores']) * 100
-            pcs_summary['rule_error_rate'] = (
-                pcs_summary['rule_errors'] / pcs_summary['total_scores']) * 100
-
-            # Display as table with high/low breakdown
-            st.subheader("PCS Rates by Component Type")
-            display_summary = pcs_summary[[
-                'pcs_type_name', 'total_scores', 'throwouts', 'throwout_high',
-                'throwout_low', 'throwout_rate', 'anomalies', 'anomaly_high',
-                'anomaly_low', 'anomaly_rate', 'rule_errors', 'rule_error_rate'
-            ]].copy()
-            display_summary.columns = [
-                'PCS Component', 'Total Scores', 'Throwouts', 'High Throwouts',
-                'Low Throwouts', 'Throwout Rate (%)', 'Anomalies (>1.5)',
-                'High Anomalies', 'Low Anomalies', 'Anomaly Rate (%)',
-                'Rule Errors', 'Rule Error Rate (%)'
-            ]
-            for col in [
-                    'Throwout Rate (%)', 'Anomaly Rate (%)',
-                    'Rule Error Rate (%)'
-            ]:
-                display_summary[col] = display_summary[col].round(1)
-            st.dataframe(display_summary, width="stretch")
-
-            # Detailed PCS scores with issues
-            st.subheader("PCS Scores with Issues")
-
-            # Issue type filters
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                show_thrown_out_pcs = st.checkbox("Thrown Out",
-                                                  value=True,
-                                                  key="pcs_thrown_out")
-            with col2:
-                show_anomalies_pcs = st.checkbox("Anomalies",
-                                                 value=True,
-                                                 key="pcs_anomalies")
-            with col3:
-                show_rule_errors_pcs = st.checkbox("Rule Errors",
-                                                   value=True,
-                                                   key="pcs_rule_errors")
-
-            # Filter based on selected issue types
-            issue_filter_pcs = (
-                (pcs_df['thrown_out'] & show_thrown_out_pcs) |
-                (pcs_df['anomaly'] & show_anomalies_pcs) |
-                (pcs_df['is_rule_error'] & show_rule_errors_pcs))
-            problem_pcs = pcs_df[issue_filter_pcs].copy()
-
-            if not problem_pcs.empty:
-
-                def get_issue_type(row):
-                    issues = []
-                    if row['thrown_out']:
-                        direction = 'High' if row['deviation'] > 0 else 'Low'
-                        issues.append(f'Thrown Out ({direction})')
-                    if row['anomaly']:
-                        direction = 'High' if row['deviation'] > 0 else 'Low'
-                        issues.append(f'Anomaly ({direction})')
-                    if row['is_rule_error']:
-                        issues.append('Rule Error')
-                    return ', '.join(issues)
-
-                problem_pcs['issue_type'] = problem_pcs.apply(get_issue_type,
-                                                              axis=1)
-
-                # Create display dataframe with proper competition links
-                display_df_pcs = problem_pcs[[
-                    'competition_name', 'competition_url', 'year',
-                    'segment_name', 'skater_name', 'pcs_type_name',
-                    'judge_score', 'panel_average', 'deviation', 'issue_type'
-                ]].copy()
-
-                st.dataframe(display_df_pcs.drop('competition_url', axis=1),
-                             width="stretch")
-
-                # Show competition links separately
-                if 'competition_url' in problem_pcs.columns and not problem_pcs['competition_url'].isna().all():
-                    st.subheader("Competition Links")
-                    unique_competitions_pcs = problem_pcs[[
-                        'competition_name', 'competition_url'
-                    ]].drop_duplicates()
-                    for _, row in unique_competitions_pcs.iterrows():
-                        if pd.notna(row['competition_url']) and row['competition_url']:
-                            st.markdown(
-                                f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
-                            )
-            else:
-                st.info("No PCS scores with issues found for selected filters")
-
-        # Segment Statistics
-        if not segment_df.empty:
-            st.subheader("Segment Statistics")
-            st.write("Performance summary for segments judged by this judge:")
-
-            # Sort by total anomalies + rule errors descending
-            segment_display = segment_df.copy()
-            segment_display['total_issues'] = segment_display['total_anomalies'] + segment_display['total_rule_errors']
-            segment_display = segment_display.sort_values('total_issues', ascending=False)
-
-            # Calculate allowed errors and excess
-            def calculate_allowed_errors(skater_count):
-                if skater_count <= 10:
-                    return 1
-                elif skater_count <= 20:
-                    return 2
-                elif skater_count <= 30:
-                    return 3
-                elif skater_count <= 40:
-                    return 4
-                return 5
-
-            segment_display['allowed_errors'] = segment_display['skater_count'].apply(calculate_allowed_errors)
-            segment_display['excess_anomalies'] = segment_display['total_anomalies'] - segment_display['allowed_errors']
-            segment_display['excess_anomalies'] = segment_display['excess_anomalies'].apply(lambda x: max(0, x))
-
-            # Format the display columns
-            segment_display_cols = segment_display[[
-                'competition_name', 'competition_year', 'discipline', 'segment_name',
-                'skater_count', 'allowed_errors', 'total_anomalies', 'excess_anomalies',
-                'pcs_anomalies', 'element_anomalies', 'total_rule_errors', 
-                'pcs_rule_errors', 'element_rule_errors'
+            # Create display dataframe with proper competition links
+            display_df_pcs = problem_pcs[[
+                'competition_name', 'competition_url', 'year',
+                'segment_name', 'skater_name', 'pcs_type_name',
+                'judge_score', 'panel_average', 'deviation', 'issue_type'
             ]].copy()
 
-            segment_display_cols.columns = [
-                'Competition', 'Year', 'Discipline', 'Segment',
-                'Skaters', 'Allowed Errors', 'Total Anomalies', 'Excess Anomalies',
-                'PCS Anomalies', 'Element Anomalies', 'Total Rule Errors', 
-                'PCS Rule Errors', 'Element Rule Errors'
-            ]
+            st.dataframe(display_df_pcs.drop('competition_url', axis=1),
+                         width="stretch")
 
-            # Add totals row
-            totals_row = pd.DataFrame([{
-                'Competition': 'TOTAL',
-                'Year': '',
-                'Discipline': '',
-                'Segment': '',
-                'Skaters': segment_display_cols['Skaters'].sum(),
-                'Allowed Errors': segment_display_cols['Allowed Errors'].sum(),
-                'Total Anomalies': segment_display_cols['Total Anomalies'].sum(),
-                'Excess Anomalies': segment_display_cols['Excess Anomalies'].sum(),
-                'PCS Anomalies': segment_display_cols['PCS Anomalies'].sum(),
-                'Element Anomalies': segment_display_cols['Element Anomalies'].sum(),
-                'Total Rule Errors': segment_display_cols['Total Rule Errors'].sum(),
-                'PCS Rule Errors': segment_display_cols['PCS Rule Errors'].sum(),
-                'Element Rule Errors': segment_display_cols['Element Rule Errors'].sum()
-            }])
-
-            segment_display_with_totals = pd.concat([segment_display_cols, totals_row], ignore_index=True)
-
-            st.dataframe(segment_display_with_totals, width="stretch")
+            # Show competition links separately
+            if 'competition_url' in problem_pcs.columns and not problem_pcs['competition_url'].isna().all():
+                st.subheader("Competition Links")
+                unique_competitions_pcs = problem_pcs[[
+                    'competition_name', 'competition_url'
+                ]].drop_duplicates()
+                for _, row in unique_competitions_pcs.iterrows():
+                    if pd.notna(row['competition_url']) and row['competition_url']:
+                        st.markdown(
+                            f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
+                        )
         else:
-            st.info("No segment data found for selected filters")
+            st.info("No PCS scores with issues found for selected filters")
 
-        # Download Report
-        st.divider()
-        st.subheader("Download Judge Report")
-        st.write(
-            "Download a report for this judge containing only their data — "
-            "safe to share without exposing other judges' information."
-        )
+    # Segment Statistics
+    if not segment_df.empty:
+        st.subheader("Segment Statistics")
+        st.write("Performance summary for segments judged by this judge:")
 
-        safe_name = selected_judge_display.replace(' ', '_').replace('/', '_')
-        single_competition_display_name = None
-        report_filter_lines = None
-        if competition_ids is not None and len(competition_ids) == 1:
-            _cid = competition_ids[0]
-            for comp_id, name, year in judge_competitions:
-                if comp_id == _cid:
-                    single_competition_display_name = f"{name} ({year})"
-                    break
+        # Sort by total anomalies + rule errors descending
+        segment_display = segment_df.copy()
+        segment_display['total_issues'] = segment_display['total_anomalies'] + segment_display['total_rule_errors']
+        segment_display = segment_display.sort_values('total_issues', ascending=False)
+
+        # Calculate allowed errors and excess
+        def calculate_allowed_errors(skater_count):
+            if skater_count <= 10:
+                return 1
+            elif skater_count <= 20:
+                return 2
+            elif skater_count <= 30:
+                return 3
+            elif skater_count <= 40:
+                return 4
+            return 5
+
+        segment_display['allowed_errors'] = segment_display['skater_count'].apply(calculate_allowed_errors)
+        segment_display['excess_anomalies'] = segment_display['total_anomalies'] - segment_display['allowed_errors']
+        segment_display['excess_anomalies'] = segment_display['excess_anomalies'].apply(lambda x: max(0, x))
+
+        # Format the display columns
+        segment_display_cols = segment_display[[
+            'competition_name', 'competition_year', 'discipline', 'segment_name',
+            'skater_count', 'allowed_errors', 'total_anomalies', 'excess_anomalies',
+            'pcs_anomalies', 'element_anomalies', 'total_rule_errors', 
+            'pcs_rule_errors', 'element_rule_errors'
+        ]].copy()
+
+        segment_display_cols.columns = [
+            'Competition', 'Year', 'Discipline', 'Segment',
+            'Skaters', 'Allowed Errors', 'Total Anomalies', 'Excess Anomalies',
+            'PCS Anomalies', 'Element Anomalies', 'Total Rule Errors', 
+            'PCS Rule Errors', 'Element Rule Errors'
+        ]
+
+        # Add totals row
+        totals_row = pd.DataFrame([{
+            'Competition': 'TOTAL',
+            'Year': '',
+            'Discipline': '',
+            'Segment': '',
+            'Skaters': segment_display_cols['Skaters'].sum(),
+            'Allowed Errors': segment_display_cols['Allowed Errors'].sum(),
+            'Total Anomalies': segment_display_cols['Total Anomalies'].sum(),
+            'Excess Anomalies': segment_display_cols['Excess Anomalies'].sum(),
+            'PCS Anomalies': segment_display_cols['PCS Anomalies'].sum(),
+            'Element Anomalies': segment_display_cols['Element Anomalies'].sum(),
+            'Total Rule Errors': segment_display_cols['Total Rule Errors'].sum(),
+            'PCS Rule Errors': segment_display_cols['PCS Rule Errors'].sum(),
+            'Element Rule Errors': segment_display_cols['Element Rule Errors'].sum()
+        }])
+
+        segment_display_with_totals = pd.concat([segment_display_cols, totals_row], ignore_index=True)
+
+        st.dataframe(segment_display_with_totals, width="stretch")
+    else:
+        st.info("No segment data found for selected filters")
+
+    # Download Report
+    st.divider()
+    st.subheader("Download Judge Report")
+    st.write(
+        "Download a report for this judge containing only their data — "
+        "safe to share without exposing other judges' information."
+    )
+
+    safe_name = selected_judge_display.replace(' ', '_').replace('/', '_')
+    single_competition_display_name = None
+    report_filter_lines = None
+    if competition_ids is not None and len(competition_ids) == 1:
+        _cid = competition_ids[0]
+        for comp_id, name, year in judge_competitions:
+            if comp_id == _cid:
+                single_competition_display_name = f"{name} ({year})"
+                break
+    else:
+        scope_summary_line = f"Competition scope: {individual_scope_label}"
+        report_filter_lines = [scope_summary_line]
+        if year_filter is not None:
+            report_filter_lines.append(f"Year: {year_filter}")
         else:
-            report_filter_lines = []
-            if year_filter is not None:
-                report_filter_lines.append(f"Year: {year_filter}")
-            else:
-                report_filter_lines.append("Year: All years")
-            if selected_competitions:
-                report_filter_lines.append(
-                    "Competitions: " + ", ".join(selected_competitions)
-                )
-            else:
-                report_filter_lines.append(
-                    "Competitions: All (this judge's events)"
-                )
-            if selected_disciplines:
-                report_filter_lines.append(
-                    "Discipline types: " + ", ".join(selected_disciplines)
-                )
-            else:
-                report_filter_lines.append("Discipline types: All")
-
-        html_bytes = build_judge_report_html(
-            selected_judge_display,
-            stats,
-            pcs_df,
-            element_df,
-            segment_df,
-            single_competition_display_name=single_competition_display_name,
-            filter_summary_lines=report_filter_lines,
-        )
-        _dn_comp = ""
-        if single_competition_display_name:
-            _dn_comp = (
-                "_"
-                + single_competition_display_name.replace(" ", "_")
-                .replace("/", "_")
-                .replace("(", "")
-                .replace(")", "")
+            report_filter_lines.append("Year: All years")
+        if selected_competitions:
+            report_filter_lines.append(
+                "Competitions: " + ", ".join(selected_competitions)
             )
-        st.download_button(
-            label="Download Interactive HTML Report",
-            data=html_bytes,
-            file_name=f"judge_report_{safe_name}{_dn_comp}.html",
-            mime="text/html",
+        else:
+            report_filter_lines.append(
+                "Competitions: All (this judge's events)"
+            )
+        if selected_disciplines:
+            report_filter_lines.append(
+                "Discipline types: " + ", ".join(selected_disciplines)
+            )
+        else:
+            report_filter_lines.append("Discipline types: All")
+
+    html_bytes = build_judge_report_html(
+        selected_judge_display,
+        stats,
+        pcs_df,
+        element_df,
+        segment_df,
+        single_competition_display_name=single_competition_display_name,
+        filter_summary_lines=report_filter_lines,
+    )
+    _dn_comp = ""
+    if single_competition_display_name:
+        _dn_comp = (
+            "_"
+            + single_competition_display_name.replace(" ", "_")
+            .replace("/", "_")
+            .replace("(", "")
+            .replace(")", "")
         )
+    st.download_button(
+        label="Download Interactive HTML Report",
+        data=html_bytes,
+        file_name=f"judge_report_{safe_name}{_dn_comp}.html",
+        mime="text/html",
+    )
 
 elif page == "Rule Errors Analysis":
     st.header("Rule Errors Analysis")
@@ -1435,7 +1466,7 @@ elif page == "Rule Errors Analysis":
 
     # Filters
     st.subheader("Filters")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         years = analytics.get_years()
@@ -1443,7 +1474,24 @@ elif page == "Rule Errors Analysis":
         year_filter = None if year_filter == "All Years" else year_filter
 
     with col2:
-        competitions = analytics.get_competitions()
+        qualifying_scope_label = st.selectbox(
+            "Competition scope",
+            list(_COMPETITION_SCOPE_LABELS),
+            index=0,
+            key="rule_errors_qualifying",
+            help=(
+                "Qualifying: linked officials type is set and not id 11. "
+                "NQS: linked officials type id 10. "
+                "Sectionals & championships: types 1–9. "
+                "Championships only: types 4 and 8."
+            ),
+        )
+        rule_errors_competition_scope = _competition_scope_key(qualifying_scope_label)
+
+    with col3:
+        competitions = analytics.get_competitions(
+            competition_scope=rule_errors_competition_scope
+        )
         competition_names = [f"{name} ({year})" for comp_id, name, year in competitions]
         selected_competitions = st.multiselect("Filter by Competitions", competition_names, key="rule_errors_comps")
         competition_ids = [
@@ -1451,18 +1499,25 @@ elif page == "Rule Errors Analysis":
             if f"{name} ({year})" in selected_competitions
         ] if selected_competitions else None
 
-    with col3:
-        judges = analytics.get_judges()
-        judge_names = [name for judge_id, name, location in judges]
-        selected_judges = st.multiselect("Filter by Judges", judge_names, key="rule_errors_judges")
-        judge_ids = [
-            judge_id for judge_id, name, location in judges
-            if name in selected_judges
-        ] if selected_judges else None
+    with col4:
+        _re_labels, _re_map = _identity_group_options(analytics)
+        selected_judge_identities = st.multiselect(
+            "Filter by Judges",
+            _re_labels,
+            key="rule_errors_judges",
+        )
+        judge_ids = sorted(
+            {jid for lab in selected_judge_identities for jid in _re_map[lab]}
+        ) if selected_judge_identities else None
 
     # Get rule errors data
     with st.spinner("Loading rule errors data..."):
-        rule_errors_df = analytics.get_all_rule_errors(year_filter, competition_ids, judge_ids)
+        rule_errors_df = analytics.get_all_rule_errors(
+            year_filter,
+            competition_ids,
+            judge_ids,
+            competition_scope=rule_errors_competition_scope,
+        )
 
     if rule_errors_df.empty:
         st.warning("No rule errors found with selected filters")
@@ -1554,6 +1609,58 @@ elif page == "Competition Analysis":
     if selected_competition:
         competition_id = competition_options[selected_competition]
 
+        st.subheader("Competition officials")
+        st.caption(
+            "One row per official per discipline. Roles lists distinct appointments/protocol roles "
+            "for that segment category only (directory appointment names when linked, else short IJS-style labels)."
+        )
+        with st.spinner("Loading officials..."):
+            officials_df = _cached_competition_segment_officials(competition_id)
+        if officials_df.empty:
+            st.info(
+                "No segment_official rows for this competition. "
+                "Import or backfill protocol panel data to populate this list."
+            )
+        else:
+            display_off = (
+                officials_df[
+                    ["official", "mbr_number", "discipline", "panel_roles"]
+                ]
+                .rename(
+                    columns={
+                        "official": "Official",
+                        "mbr_number": "Member #",
+                        "discipline": "Discipline",
+                        "panel_roles": "Roles",
+                    }
+                )
+            )
+            st.dataframe(
+                display_off,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Official": st.column_config.TextColumn(
+                        "Official",
+                        width="medium",
+                    ),
+                    "Member #": st.column_config.TextColumn(
+                        "Member #",
+                        width="small",
+                    ),
+                    "Discipline": st.column_config.TextColumn(
+                        "Discipline",
+                        width="small",
+                        help="Segment discipline_type (e.g. Singles, Pairs).",
+                    ),
+                    "Roles": st.column_config.TextColumn(
+                        "Roles",
+                        width="large",
+                        help="Distinct roles this official held in this discipline at this competition.",
+                    ),
+                },
+            )
+
         # Get segment statistics for all judges in this competition efficiently
         with st.spinner("Loading competition data..."):
             segment_stats = st.cache_data(
@@ -1597,9 +1704,9 @@ elif page == "Competition Analysis":
                 aggfunc='sum'
             )
 
-            # Replace 0s with empty strings for display but keep numeric for calculations
-            anomalies_grid_display = anomalies_grid.replace(0, '')
-            excess_grid_display = excess_grid.replace(0, '')
+            # Blank cells for zeros; all-string cells so PyArrow can serialize judge columns
+            anomalies_grid_display = _streamlit_safe_judge_pivot_display(anomalies_grid)
+            excess_grid_display = _streamlit_safe_judge_pivot_display(excess_grid)
 
             # Display total anomalies grid
             st.subheader("Total Anomalies by Judge and Segment")
@@ -2021,635 +2128,11 @@ elif page == "Competition Analysis":
             else:
                 st.info("No segments found for this competition")
 
-elif page == "Multi-Judge Comparison":
-    st.header("Multi-Judge Comparison")
-
-    # Judge selection
-    analytics = get_analytics_safe()
-    judges = analytics.get_judges()
-    if not judges:
-        st.error("No judges found in database")
-        st.stop()
-
-    judge_options = {
-        f"{name}": judge_id
-        for judge_id, name, location in judges
-    }
-    selected_judges_display = st.multiselect("Select Judges to Compare",
-                                             list(judge_options.keys()))
-
-    if not selected_judges_display:
-        st.warning("Please select at least one judge to compare")
-    else:
-        selected_judge_ids = [
-            judge_options[judge_display]
-            for judge_display in selected_judges_display
-        ]
-
-        # Filters
-        st.subheader("Filters")
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            years = analytics.get_years()
-            year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
-            year_filter = None if year_filter == "All Years" else year_filter
-
-        with col2:
-            competitions = analytics.get_competitions()
-            competition_names = [
-                f"{name} ({year})" for comp_id, name, year in competitions
-            ]
-            selected_competitions = st.multiselect("Filter by Competitions",
-                                                   competition_names)
-            competition_ids = [
-                comp_id for comp_id, name, year in competitions
-                if f"{name} ({year})" in selected_competitions
-            ] if selected_competitions else None
-
-        with col3:
-            discipline_types = analytics.get_discipline_types()
-            discipline_names = [name for dt_id, name in discipline_types]
-            selected_disciplines = st.multiselect("Filter by Discipline Type",
-                                                  discipline_names)
-            discipline_ids = [
-                dt_id for dt_id, name in discipline_types
-                if name in selected_disciplines
-            ] if selected_disciplines else None
-
-        # Get comparison data
-        with st.spinner("Loading comparison data..."):
-            pcs_comparison_df = analytics.get_multi_judge_pcs_comparison(
-                selected_judge_ids, year_filter, competition_ids,
-                discipline_ids)
-            element_comparison_df = analytics.get_multi_judge_element_comparison(
-                selected_judge_ids, year_filter, competition_ids,
-                discipline_ids)
-
-        if pcs_comparison_df.empty and element_comparison_df.empty:
-            st.warning(
-                "No data found for selected judges with current filters")
-        else:
-            # Summary comparison table
-            st.subheader("Judge Comparison Summary")
-
-            summary_data = []
-            for judge_id in selected_judge_ids:
-                judge_name = next(name for jid, name, _ in judges
-                                  if jid == judge_id)
-
-                # PCS stats
-                judge_pcs = pcs_comparison_df[
-                    pcs_comparison_df['judge_id'] ==
-                    judge_id] if not pcs_comparison_df.empty else pd.DataFrame(
-                    )
-                # Element stats
-                judge_elements = element_comparison_df[
-                    element_comparison_df['judge_id'] ==
-                    judge_id] if not element_comparison_df.empty else pd.DataFrame(
-                    )
-
-                pcs_throwout_rate = (judge_pcs['thrown_out'].sum() /
-                                     len(judge_pcs) *
-                                     100) if not judge_pcs.empty else 0
-                pcs_anomaly_rate = (judge_pcs['anomaly'].sum() /
-                                    len(judge_pcs) *
-                                    100) if not judge_pcs.empty else 0
-                pcs_rule_error_rate = (judge_pcs['is_rule_error'].sum() /
-                                       len(judge_pcs) *
-                                       100) if not judge_pcs.empty else 0
-                element_throwout_rate = (
-                    judge_elements['thrown_out'].sum() / len(judge_elements) *
-                    100) if not judge_elements.empty else 0
-                element_anomaly_rate = (judge_elements['anomaly'].sum() /
-                                        len(judge_elements) *
-                                        100) if not judge_elements.empty else 0
-                element_rule_error_rate = (
-                    judge_elements['is_rule_error'].sum() /
-                    len(judge_elements) *
-                    100) if not judge_elements.empty else 0
-
-                summary_data.append({
-                    'Judge':
-                    judge_name,
-                    'PCS Scores':
-                    len(judge_pcs),
-                    'PCS Throwout Rate (%)':
-                    round(pcs_throwout_rate, 1),
-                    'PCS Anomaly Rate (%)':
-                    round(pcs_anomaly_rate, 1),
-                    'PCS Rule Error Rate (%)':
-                    round(pcs_rule_error_rate, 1),
-                    'Element Scores':
-                    len(judge_elements),
-                    'Element Throwout Rate (%)':
-                    round(element_throwout_rate, 1),
-                    'Element Anomaly Rate (%)':
-                    round(element_anomaly_rate, 1),
-                    'Element Rule Error Rate (%)':
-                    round(element_rule_error_rate, 1)
-                })
-
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, width="stretch")
-
-            # Comparison tables
-            if not pcs_comparison_df.empty:
-                st.subheader("PCS Comparison Analysis")
-
-                # PCS throwout rates by judge
-                pcs_judge_summary = pcs_comparison_df.groupby(
-                    'judge_name').agg({
-                        'thrown_out': ['sum', 'count'],
-                        'anomaly': 'sum',
-                        'is_rule_error': 'sum'
-                    }).round(2)
-
-                pcs_judge_summary.columns = [
-                    'throwouts', 'total_scores', 'anomalies', 'rule_errors'
-                ]
-                pcs_judge_summary['throwout_rate'] = (
-                    pcs_judge_summary['throwouts'] /
-                    pcs_judge_summary['total_scores']) * 100
-                pcs_judge_summary['anomaly_rate'] = (
-                    pcs_judge_summary['anomalies'] /
-                    pcs_judge_summary['total_scores']) * 100
-                pcs_judge_summary['rule_error_rate'] = (
-                    pcs_judge_summary['rule_errors'] /
-                    pcs_judge_summary['total_scores']) * 100
-                pcs_judge_summary = pcs_judge_summary.reset_index()
-
-                # Display PCS comparison as table
-                st.subheader("PCS Judge Comparison Table")
-                display_pcs = pcs_judge_summary[[
-                    'judge_name', 'total_scores', 'throwouts', 'throwout_rate',
-                    'anomalies', 'anomaly_rate', 'rule_errors',
-                    'rule_error_rate'
-                ]].copy()
-                display_pcs.columns = [
-                    'Judge', 'Total PCS Scores', 'Throwouts',
-                    'Throwout Rate (%)', 'Anomalies (>1.5)',
-                    'Anomaly Rate (%)', 'Rule Errors', 'Rule Error Rate (%)'
-                ]
-                for col in [
-                        'Throwout Rate (%)', 'Anomaly Rate (%)',
-                        'Rule Error Rate (%)'
-                ]:
-                    display_pcs[col] = display_pcs[col].round(1)
-                st.dataframe(display_pcs, width="stretch")
-
-            if not element_comparison_df.empty:
-                st.subheader("Element Comparison Analysis")
-
-                # Element throwout rates by judge
-                element_judge_summary = element_comparison_df.groupby(
-                    'judge_name').agg({
-                        'thrown_out': ['sum', 'count'],
-                        'anomaly': 'sum',
-                        'is_rule_error': 'sum'
-                    }).round(2)
-
-                element_judge_summary.columns = [
-                    'throwouts', 'total_scores', 'anomalies', 'rule_errors'
-                ]
-                element_judge_summary['throwout_rate'] = (
-                    element_judge_summary['throwouts'] /
-                    element_judge_summary['total_scores']) * 100
-                element_judge_summary['anomaly_rate'] = (
-                    element_judge_summary['anomalies'] /
-                    element_judge_summary['total_scores']) * 100
-                element_judge_summary['rule_error_rate'] = (
-                    element_judge_summary['rule_errors'] /
-                    element_judge_summary['total_scores']) * 100
-                element_judge_summary = element_judge_summary.reset_index()
-
-                # Display Element comparison as table
-                st.subheader("Element Judge Comparison Table")
-                display_elements = element_judge_summary[[
-                    'judge_name', 'total_scores', 'throwouts', 'throwout_rate',
-                    'anomalies', 'anomaly_rate', 'rule_errors',
-                    'rule_error_rate'
-                ]].copy()
-                display_elements.columns = [
-                    'Judge', 'Total Element Scores', 'Throwouts',
-                    'Throwout Rate (%)', 'Anomalies (>2.0)',
-                    'Anomaly Rate (%)', 'Rule Errors', 'Rule Error Rate (%)'
-                ]
-                for col in [
-                        'Throwout Rate (%)', 'Anomaly Rate (%)',
-                        'Rule Error Rate (%)'
-                ]:
-                    display_elements[col] = display_elements[col].round(1)
-                st.dataframe(display_elements, width="stretch")
-
-            # Export functionality
-            st.subheader("Export Data")
-            if st.button("Export Summary Data to CSV"):
-                csv_data = summary_df.to_csv(index=False)
-                st.download_button(label="Download CSV",
-                                   data=csv_data,
-                                   file_name="judge_comparison_summary.csv",
-                                   mime="text/csv")
-
-elif page == "Judge Performance Heatmap":
-    judge_performance_heatmap()
+elif page == "Cross-Judge Benchmarking":
+    cross_judge_benchmarking_page()
 
 elif page == "Temporal Trend Analysis":
     temporal_trend_analysis()
-
-elif page == "Admin Tools":
-    st.header("Admin Tools")
-
-    # --- Password gate ---
-    _admin_pw = _os.environ.get("ADMIN_PASSWORD", "")
-    if _admin_pw and not st.session_state.get("admin_authenticated"):
-        st.info("This section is password protected.")
-        _entered = st.text_input("Admin password", type="password",
-                                 key="admin_pw_input")
-        if st.button("Unlock", key="admin_pw_btn"):
-            if _entered == _admin_pw:
-                st.session_state["admin_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.stop()
-    # --- End password gate ---
-
-    st.subheader("Merge Judges")
-    st.write(
-        "Use this when the same judge appears under two different names. "
-        "All scores from the **duplicate** will be reassigned to the **judge to keep**, "
-        "then the duplicate record will be deleted. This cannot be undone."
-    )
-
-    analytics = get_analytics_safe()
-    judges = analytics.get_judges()
-    if not judges:
-        st.error("No judges found in database.")
-        st.stop()
-
-    judge_options = {name: judge_id for judge_id, name, location in judges}
-    judge_names = list(judge_options.keys())
-
-    col1, col2 = st.columns(2)
-    with col1:
-        keep_name = st.selectbox("Judge to keep (primary)", judge_names,
-                                 key="merge_keep")
-    with col2:
-        dupe_options = [n for n in judge_names if n != keep_name]
-        dupe_name = st.selectbox("Judge to merge & remove (duplicate)",
-                                 dupe_options, key="merge_dupe")
-
-    keep_id = judge_options[keep_name]
-    dupe_id = judge_options[dupe_name]
-
-    # Preview counts
-    session = analytics.session
-    from sqlalchemy import text as sqlt
-
-    pcs_count = session.execute(
-        sqlt("SELECT COUNT(*) FROM pcs_score_per_judge WHERE judge_id = :id"),
-        {"id": dupe_id}).scalar()
-    elem_count = session.execute(
-        sqlt("SELECT COUNT(*) FROM element_score_per_judge WHERE judge_id = :id"),
-        {"id": dupe_id}).scalar()
-
-    st.markdown("---")
-    st.write("**Preview — scores that will be reassigned:**")
-    preview_col1, preview_col2 = st.columns(2)
-    with preview_col1:
-        st.metric("PCS scores", pcs_count)
-    with preview_col2:
-        st.metric("Element scores", elem_count)
-
-    if pcs_count == 0 and elem_count == 0:
-        st.warning(
-            f"**{dupe_name}** has no scores in the database. "
-            "Only the judge record itself will be deleted."
-        )
-
-    st.markdown("---")
-    confirmed = st.checkbox(
-        f'I understand this will permanently merge "{dupe_name}" into "{keep_name}" '
-        f'and delete the "{dupe_name}" record.')
-
-    if st.button("Execute Merge", disabled=not confirmed, type="primary"):
-        try:
-            session.execute(
-                sqlt("UPDATE pcs_score_per_judge SET judge_id = :keep WHERE judge_id = :dupe"),
-                {"keep": keep_id, "dupe": dupe_id})
-            session.execute(
-                sqlt("UPDATE element_score_per_judge SET judge_id = :keep WHERE judge_id = :dupe"),
-                {"keep": keep_id, "dupe": dupe_id})
-            # Clear precomputed cache rows for both judges if the tables exist
-            for tbl in ("judge_excess_anomalies_cache", "judge_summary_cache"):
-                try:
-                    session.execute(sqlt("SAVEPOINT merge_cache"))
-                    session.execute(
-                        sqlt(f"DELETE FROM {tbl} WHERE judge_id IN (:keep, :dupe)"),
-                        {"keep": keep_id, "dupe": dupe_id})
-                    session.execute(sqlt("RELEASE SAVEPOINT merge_cache"))
-                except Exception:
-                    session.execute(sqlt("ROLLBACK TO SAVEPOINT merge_cache"))
-            session.execute(
-                sqlt("DELETE FROM judge WHERE id = :dupe"),
-                {"dupe": dupe_id})
-            session.commit()
-            st.cache_resource.clear()
-            st.success(
-                f"Done! **{pcs_count}** PCS scores and **{elem_count}** element scores "
-                f"have been moved to **{keep_name}**. "
-                f'The record for "{dupe_name}" has been deleted.'
-            )
-        except Exception as e:
-            session.rollback()
-            st.error(f"Merge failed and was rolled back: {e}")
-
-    # ── Manage Judge Emails ────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Manage Judge Emails")
-    st.write(
-        "Upload a spreadsheet (CSV or Excel) with two columns: **Name** and **Email**. "
-        "Existing entries are updated by name; new entries are added. "
-        "Column headers must be exactly `Name` and `Email`."
-    )
-
-    from email_reports import (ensure_email_table, get_email_list,
-                                upsert_email_list, delete_email_entry)
-
-    _em_session = get_analytics_safe().session
-    ensure_email_table(_em_session)
-
-    uploaded_email_file = st.file_uploader(
-        "Upload Name/Email spreadsheet", type=["csv", "xlsx", "xls"],
-        key="email_list_upload"
-    )
-    if uploaded_email_file:
-        try:
-            if uploaded_email_file.name.endswith(".csv"):
-                email_upload_df = pd.read_csv(uploaded_email_file)
-            else:
-                email_upload_df = pd.read_excel(uploaded_email_file)
-
-            # Flexible column detection (map existing col name -> target name)
-            col_map = {}
-            for col in email_upload_df.columns:
-                if col.strip().lower() == "name":
-                    col_map[col] = "judge_name"
-                elif col.strip().lower() == "email":
-                    col_map[col] = "email"
-
-            if "judge_name" not in col_map.values() or "email" not in col_map.values():
-                st.error(
-                    f"Could not find 'Name' and 'Email' columns. "
-                    f"Found: {list(email_upload_df.columns)}"
-                )
-            else:
-                email_upload_df = email_upload_df.rename(columns=col_map)[
-                    ["judge_name", "email"]
-                ]
-                ins, upd = upsert_email_list(_em_session, email_upload_df)
-                st.success(f"Done — {ins} new entries added, {upd} updated.")
-        except Exception as _e:
-            st.error(f"Failed to read file: {_e}")
-
-    email_list_df = get_email_list(_em_session)
-    if email_list_df.empty:
-        st.info("No judge emails stored yet. Upload a spreadsheet above to get started.")
-    else:
-        st.write(f"**{len(email_list_df)} judges** in email list:")
-        st.dataframe(email_list_df.rename(columns={"judge_name": "Name", "email": "Email"}),
-                     width="stretch", hide_index=True)
-
-        with st.expander("Remove an entry"):
-            del_name = st.selectbox("Select judge to remove",
-                                    email_list_df["judge_name"].tolist(),
-                                    key="del_email_name")
-            if st.button("Remove", key="del_email_btn"):
-                delete_email_entry(_em_session, del_name)
-                st.success(f'Removed "{del_name}" from the email list.')
-                st.rerun()
-
-    # ── Email Competition Reports ──────────────────────────────────────────────
-    st.divider()
-    st.subheader("Email Competition Reports")
-    st.write(
-        "Select a competition and send each judge their individual HTML report by email. "
-        "Judges not in the email list will be listed so you can decide what to do — "
-        "their reports are still generated but won't be sent."
-    )
-
-    from email_reports import (match_judge_to_email, build_report_for_judge,
-                                send_report_email, DEFAULT_EMAIL_SUBJECT,
-                                DEFAULT_EMAIL_BODY)
-
-    _all_comps = get_analytics_safe().get_competitions()
-    if not _all_comps:
-        st.info("No competitions found in the database.")
-    else:
-        comp_options = {f"{name} ({year})": cid for cid, name, year in _all_comps}
-        selected_comp_label = st.selectbox("Competition", list(comp_options.keys()),
-                                           key="email_comp_select")
-        selected_comp_id = comp_options[selected_comp_label]
-        selected_comp_name = selected_comp_label
-
-        _email_list_df = get_email_list(_em_session)
-
-        # Find judges who scored in this competition
-        _comp_df = get_analytics_safe().get_competition_segment_statistics(
-            int(selected_comp_id)
-        )
-        _judge_map = {}  # judge_id -> judge_name
-        if not _comp_df.empty and "judge_id" in _comp_df.columns:
-            for _, _jrow in _comp_df[["judge_id", "judge_name"]].drop_duplicates().iterrows():
-                _judge_map[_jrow["judge_id"]] = _jrow["judge_name"]
-
-        if not _judge_map:
-            st.info("No judges found for this competition.")
-        else:
-            # Build match preview
-            matched, unmatched = [], []
-            for jid, jname in _judge_map.items():
-                em = match_judge_to_email(jname, _email_list_df)
-                if em:
-                    matched.append({"Judge": jname, "Email": em, "judge_id": jid})
-                else:
-                    unmatched.append({"Judge": jname})
-
-            col_m, col_u = st.columns(2)
-            with col_m:
-                st.write(f"**Will send ({len(matched)})**")
-                if matched:
-                    st.dataframe(pd.DataFrame(matched)[["Judge", "Email"]],
-                                 width="stretch", hide_index=True)
-                else:
-                    st.info("None matched — upload an email list above first.")
-            with col_u:
-                st.write(f"**No email — skip ({len(unmatched)})**")
-                if unmatched:
-                    st.dataframe(pd.DataFrame(unmatched),
-                                 width="stretch", hide_index=True)
-                else:
-                    st.info("All judges matched!")
-
-            if matched:
-                st.markdown("---")
-                with st.expander("Email server settings", expanded=True):
-                    st.write(
-                        "These credentials are used only for this session and are "
-                        "never stored. For Gmail, use an "
-                        "[App Password](https://myaccount.google.com/apppasswords) "
-                        "rather than your regular password."
-                    )
-                    _sc1, _sc2 = st.columns([3, 1])
-                    with _sc1:
-                        _smtp_host = st.text_input(
-                            "SMTP host",
-                            value=st.session_state.get("smtp_host", ""),
-                            placeholder="smtp.gmail.com",
-                            key="smtp_host_input"
-                        )
-                    with _sc2:
-                        _smtp_port = st.number_input(
-                            "Port", min_value=1, max_value=65535,
-                            value=st.session_state.get("smtp_port", 587),
-                            key="smtp_port_input"
-                        )
-                    _smtp_user = st.text_input(
-                        "From email address",
-                        value=st.session_state.get("smtp_user", ""),
-                        placeholder="yourname@gmail.com",
-                        key="smtp_user_input"
-                    )
-                    _smtp_pass = st.text_input(
-                        "Password / App password",
-                        type="password",
-                        key="smtp_pass_input"
-                    )
-                    _smtp_from_name = st.text_input(
-                        "Sender display name",
-                        value=st.session_state.get("smtp_from_name",
-                                                    "Figure Skating Officials"),
-                        key="smtp_from_name_input"
-                    )
-                    # Persist non-sensitive fields across reruns
-                    st.session_state["smtp_host"] = _smtp_host
-                    st.session_state["smtp_port"] = _smtp_port
-                    st.session_state["smtp_user"] = _smtp_user
-                    st.session_state["smtp_from_name"] = _smtp_from_name
-
-                _smtp_ready = all([_smtp_host.strip(), _smtp_user.strip(),
-                                   _smtp_pass.strip()])
-
-                st.markdown("**Email content**")
-                st.caption(
-                    "Use `{judge_name}`, `{competition_name}`, and `{from_name}` "
-                    "anywhere — they'll be filled in individually for each judge."
-                )
-                _email_subject = st.text_input(
-                    "Subject line",
-                    value=st.session_state.get("email_subject", DEFAULT_EMAIL_SUBJECT),
-                    key="email_subject_input"
-                )
-                _email_body = st.text_area(
-                    "Email body",
-                    value=st.session_state.get("email_body", DEFAULT_EMAIL_BODY),
-                    height=220,
-                    key="email_body_input"
-                )
-                st.session_state["email_subject"] = _email_subject
-                st.session_state["email_body"] = _email_body
-
-                if st.button("Send reports", type="primary",
-                             key="send_reports_btn",
-                             disabled=not _smtp_ready):
-                    _smtp_cfg = {
-                        "host": _smtp_host.strip(),
-                        "port": int(_smtp_port),
-                        "user": _smtp_user.strip(),
-                        "password": _smtp_pass.strip(),
-                        "from_name": _smtp_from_name.strip() or "Figure Skating Officials",
-                    }
-                    import traceback as _tb
-
-                    # Pre-flight: show any non-ASCII in the strings we're about to use
-                    def _find_nonascii(label, s):
-                        hits = [(i, repr(ch), f'U+{ord(ch):04X}')
-                                for i, ch in enumerate(str(s)) if ord(ch) > 127]
-                        return hits
-
-                    _debug_lines = []
-                    for _lbl, _val in [
-                        ("subject template", _email_subject),
-                        ("body template",    _email_body),
-                        ("from_name",        _smtp_from_name),
-                        ("competition name", selected_comp_name),
-                        ("SMTP username",    _smtp_user),
-                    ]:
-                        _hits = _find_nonascii(_lbl, _val)
-                        if _hits:
-                            _debug_lines.append(
-                                f"⚠️ Non-ASCII in **{_lbl}**: " +
-                                ", ".join(f"pos {p}: {ch} ({cp})" for p, ch, cp in _hits)
-                            )
-                    # Check password without revealing its value
-                    _pass_hits = _find_nonascii("password", _smtp_pass)
-                    if _pass_hits:
-                        _debug_lines.append(
-                            f"⚠️ Non-ASCII character(s) found in **password** at "
-                            f"{len(_pass_hits)} position(s) — these will be automatically "
-                            f"replaced with regular spaces. This commonly happens when "
-                            f"copy-pasting a Gmail App Password from a browser."
-                        )
-                    for _jrow in matched:
-                        _hits = _find_nonascii("judge name", _jrow["Judge"])
-                        if _hits:
-                            _debug_lines.append(
-                                f"⚠️ Non-ASCII in judge **{_jrow['Judge']}**: " +
-                                ", ".join(f"pos {p}: {ch} ({cp})" for p, ch, cp in _hits)
-                            )
-
-                    if _debug_lines:
-                        with st.expander("Non-ASCII characters detected (may cause errors)"):
-                            for _dl in _debug_lines:
-                                st.markdown(_dl)
-
-                    _analytics = get_analytics_safe()
-                    results = []
-                    prog = st.progress(0)
-                    for i, row in enumerate(matched):
-                        _step = "building report"
-                        try:
-                            html_bytes, _ = build_report_for_judge(
-                                _analytics, int(row["judge_id"]),
-                                int(selected_comp_id)
-                            )
-                            _step = "sending email"
-                            send_report_email(
-                                _smtp_cfg, row["Email"], row["Judge"],
-                                selected_comp_name, html_bytes,
-                                subject_template=_email_subject,
-                                body_template=_email_body,
-                            )
-                            results.append((row["Judge"], row["Email"], True, "", ""))
-                        except Exception as _exc:
-                            results.append((row["Judge"], row["Email"], False,
-                                            f"[{_step}] {_exc}",
-                                            _tb.format_exc()))
-                        prog.progress((i + 1) / len(matched))
-
-                    sent = [r for r in results if r[2]]
-                    failed = [r for r in results if not r[2]]
-                    if sent:
-                        st.success(f"Sent {len(sent)} report(s) successfully.")
-                    if failed:
-                        st.error(f"{len(failed)} failed to send:")
-                        for name, addr, _, err, tb in failed:
-                            st.write(f"- **{name}** ({addr}): {err}")
-                            with st.expander(f"Full traceback — {name}"):
-                                st.code(tb)
-                elif not _smtp_ready:
-                    st.caption("Fill in the email server settings above to enable sending.")
 
 elif page == "Load Competition":
     st.header("Load Competition")
@@ -2682,6 +2165,39 @@ elif page == "Load Competition":
         "Season year code",
         value="2526",
         help="e.g. 2526 for the 2025-26 season, 2425 for 2024-25",
+    )
+    _load_analytics = get_analytics_safe()
+    _oa_types = _load_analytics.get_officials_analysis_competition_types()
+    if not _oa_types:
+        st.error(
+            "No **officials_analysis.competition_type** rows found. Import activity or directory "
+            "data first, then load competitions."
+        )
+        st.stop()
+
+    _oa_ids_sorted = sorted(tid for tid, _ in _oa_types)
+
+    def _fmt_oa_competition_type(opt_id: int) -> str:
+        tname = next((n for tid, n in _oa_types if tid == opt_id), "")
+        return format_officials_competition_type_select_label(opt_id, tname or None)
+
+    load_oa_competition_type_id = st.selectbox(
+        "Officials competition type",
+        options=_oa_ids_sorted,
+        format_func=_fmt_oa_competition_type,
+        help=(
+            "Required. Links to ``officials_analysis.competition_type`` (SPD vs SYS sectionals "
+            "are grouped in the label). Qualifying/NQS flags are set from this id."
+        ),
+        key="load_competition_officials_analysis_ct",
+    )
+    load_oa_competition_type_id = int(load_oa_competition_type_id)
+    load_qualifying, load_nqs = competition_load_flags_from_officials_type_id(
+        load_oa_competition_type_id
+    )
+    st.caption(
+        f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs} "
+        "(nonqualifying id 11 → qualifying false; National Qualifying Series id 10 → nqs true)."
     )
     # pdf_folder = st.text_input(
     #     "PDF output folder (leave blank if not saving PDFs)",
@@ -2741,6 +2257,10 @@ elif page == "Load Competition":
                 specific_exclude=specific_exclude.strip(),
                 use_html=True,
                 isFSM=isFSM,
+                qualifying=load_qualifying,
+                nqs=load_nqs,
+                officials_analysis_competition_type_id=load_oa_competition_type_id,
+                update_officials_competition_type=True,
             )
 
             status_area = st.empty()
@@ -2754,8 +2274,8 @@ elif page == "Load Competition":
             except Exception as _exc:
                 status_area.error(f"Scrape failed: {_exc}")
 
-else:  # Statistical Bias Detection
-    statistical_bias_detection()
+else:
+    st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")
 
 # Sidebar information
 st.sidebar.markdown("---")
@@ -2769,3 +2289,15 @@ This dashboard analyzes figure skating judge performance by examining:
 
 Use the filters to focus your analysis on specific years, competitions, or discipline types.
 """)
+
+_admin_py = _os.path.join(_os.path.dirname(__file__), "pages", "admin.py")
+if _os.path.isfile(_admin_py):
+    st.sidebar.markdown("---")
+    if st.sidebar.button(
+        "Admin",
+        help="Open password-protected admin tools (directory import, merge judges, …)",
+        type="secondary",
+        width="stretch",
+        key="sidebar_open_admin",
+    ):
+        st.switch_page("pages/admin.py")

@@ -1,33 +1,406 @@
+from typing import Optional
+
 import pandas as pd
 import numpy as np
+import re
+import unicodedata
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, text, select, case
 from scipy import stats
 from scipy.stats import linregress
 from collections import defaultdict
 from models import (
-    Judge, Competition, Segment, DisciplineType, ElementType, 
-    PcsScorePerJudge, ElementScorePerJudge, Element, SkaterSegment,
-    Skater, PcsType
+    Judge,
+    Competition,
+    Segment,
+    DisciplineType,
+    ElementType,
+    PcsScorePerJudge,
+    ElementScorePerJudge,
+    Element,
+    SkaterSegment,
+    Skater,
+    PcsType,
+    JudgeOfficialLink,
+    SegmentOfficial,
+    AppointmentTypes,
+    Officials,
 )
 
+from officials_competition_types import (
+    COMPETITION_SCOPE_ALL,
+    COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    COMPETITION_SCOPE_NQS,
+    COMPETITION_SCOPE_QUALIFYING,
+    COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
+    OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING,
+    OFFICIALS_COMPETITION_TYPE_ID_NQS,
+    OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY,
+    OFFICIALS_COMPETITION_TYPE_IDS_SECTIONALS_AND_CHAMPIONSHIPS,
+)
+
+
+def _normalize_person_name_key(s: str) -> str:
+    """Lowercase compare-key for person labels (hyphens, punctuation, Unicode quirks)."""
+    if not s:
+        return ""
+    t = unicodedata.normalize("NFKC", str(s))
+    t = t.strip().lower()
+    t = re.sub(r"[-_/.,;:+]+", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _panel_role_summary_label(role: str) -> str:
+    """Map ``segment_official.role`` / appointment label to a short IJS-style tag (activity tracker)."""
+    r = (role or "").strip()
+    if not r:
+        return ""
+    rl = r.lower()
+    if rl.startswith("judge"):
+        return "Judge"
+    if "referee" in rl:
+        return "Referee"
+    if "technical controller" in rl:
+        return "Technical Controller"
+    if "assistant technical specialist" in rl or "technical specialist" in rl:
+        return "Technical Specialist"
+    if "data operator" in rl or "replay operator" in rl:
+        return "Data/Replay operator"
+    return r
+
+
+def _panel_role_base_label(
+    appointment_name: Optional[str], protocol_role: Optional[str]
+) -> str:
+    """
+    Role text without discipline: directory appointment name when linked, else protocol role
+    (with IJS-style shortening when there is no appointment name).
+    """
+    appt = (appointment_name or "").strip()
+    proto = (protocol_role or "").strip()
+    if appt:
+        return appt
+    if proto:
+        return _panel_role_summary_label(proto) or proto
+    return ""
+
+
 class JudgeAnalytics:
+    """Analytics over judge scores; qualifying/NQS scope uses linked officials competition types."""
+
+    @staticmethod
+    def normalize_judge_ids(judge_ids):
+        """Accept a single id or iterable of ids; return a deduped ordered list."""
+        if judge_ids is None:
+            raise TypeError("judge_ids is required")
+        if isinstance(judge_ids, int):
+            return [judge_ids]
+        out = []
+        for x in judge_ids:
+            xi = int(x)
+            if xi not in out:
+                out.append(xi)
+        return out
+
+    def _competition_scope_clause(self, competition_scope: str):
+        """Restrict competitions by linked ``officials_analysis.competition_type`` id."""
+        if not competition_scope or competition_scope == COMPETITION_SCOPE_ALL:
+            return None
+        if competition_scope == COMPETITION_SCOPE_QUALIFYING:
+            return and_(
+                Competition.officials_analysis_competition_type_id.isnot(None),
+                Competition.officials_analysis_competition_type_id
+                != OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING,
+            )
+        if competition_scope == COMPETITION_SCOPE_NQS:
+            return (
+                Competition.officials_analysis_competition_type_id
+                == OFFICIALS_COMPETITION_TYPE_ID_NQS
+            )
+        if competition_scope == COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS:
+            return Competition.officials_analysis_competition_type_id.in_(
+                OFFICIALS_COMPETITION_TYPE_IDS_SECTIONALS_AND_CHAMPIONSHIPS
+            )
+        if competition_scope == COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY:
+            return Competition.officials_analysis_competition_type_id.in_(
+                OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY
+            )
+        return None
+
+    def _filter_orm_competition_scope(self, query, competition_scope: str):
+        clause = self._competition_scope_clause(competition_scope)
+        if clause is not None:
+            query = query.filter(clause)
+        return query
+
+    def _filter_select_competition_scope(self, sel, competition_scope: str):
+        clause = self._competition_scope_clause(competition_scope)
+        if clause is not None:
+            sel = sel.filter(clause)
+        return sel
+
+    @staticmethod
+    def _qualifying_core_disciplines_active(competition_scope: str) -> bool:
+        """Narrow to core disciplines for every scope except *all*."""
+        return bool(competition_scope and competition_scope != COMPETITION_SCOPE_ALL)
+
+    def get_officials_analysis_competition_types(self) -> list[tuple[int, str]]:
+        """Rows from ``officials_analysis.competition_type`` for linking ``public.competition``."""
+        try:
+            rows = self.session.execute(
+                text(
+                    "SELECT id, name FROM officials_analysis.competition_type "
+                    "ORDER BY lower(name)"
+                )
+            ).fetchall()
+            return [(int(r[0]), str(r[1])) for r in rows]
+        except Exception:
+            return []
+
+    def get_public_competition_officials_type_breakdown(self) -> pd.DataFrame:
+        """Counts of ``public.competition`` rows per linked officials competition type."""
+        try:
+            rows = self.session.execute(
+                text(
+                    """
+                    SELECT ct.id AS officials_competition_type_id,
+                           ct.name AS officials_competition_type_name,
+                           COUNT(pc.id)::bigint AS public_competition_count
+                    FROM officials_analysis.competition_type ct
+                    LEFT JOIN public.competition pc
+                      ON pc.officials_analysis_competition_type_id = ct.id
+                    GROUP BY ct.id, ct.name
+                    ORDER BY lower(ct.name)
+                    """
+                )
+            ).fetchall()
+            unlinked = self.session.execute(
+                text(
+                    """
+                    SELECT COUNT(*)::bigint FROM public.competition
+                    WHERE officials_analysis_competition_type_id IS NULL
+                    """
+                )
+            ).scalar_one()
+            cols = [
+                "officials_competition_type_id",
+                "officials_competition_type_name",
+                "public_competition_count",
+            ]
+            df = pd.DataFrame(
+                [
+                    {
+                        "officials_competition_type_id": int(r[0]),
+                        "officials_competition_type_name": str(r[1]),
+                        "public_competition_count": int(r[2]),
+                    }
+                    for r in rows
+                ],
+                columns=cols,
+            )
+            if int(unlinked or 0) > 0:
+                df = pd.concat(
+                    [
+                        df,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "officials_competition_type_id": pd.NA,
+                                    "officials_competition_type_name": "(Not linked)",
+                                    "public_competition_count": int(unlinked),
+                                }
+                            ]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+            return df
+        except Exception:
+            return pd.DataFrame(
+                columns=[
+                    "officials_competition_type_id",
+                    "officials_competition_type_name",
+                    "public_competition_count",
+                ]
+            )
+
+    def get_judge_analysis_identity_groups(self) -> list:
+        """
+        Select-box rows for UI: judges linked to the same officials_analysis.official
+        (status linked, official_id set) with 2+ judge records are merged into one option.
+        Each group has ``label`` and ``judge_ids`` (list).
+        """
+        judges = (
+            self.session.query(Judge.id, Judge.name, Judge.location)
+            .order_by(Judge.name)
+            .all()
+        )
+        judge_map = {r.id: (r.name, r.location or "") for r in judges}
+
+        linked_rows = (
+            self.session.query(JudgeOfficialLink.judge_id, JudgeOfficialLink.official_id)
+            .filter(JudgeOfficialLink.status == "linked")
+            .filter(JudgeOfficialLink.official_id.isnot(None))
+            .all()
+        )
+        by_official = defaultdict(list)
+        for jid, oid in linked_rows:
+            jid = int(jid)
+            if jid in judge_map:
+                by_official[int(oid)].append(jid)
+
+        multi_assigned = set()
+        merged_groups = []
+        for oid in sorted(by_official.keys()):
+            jids = sorted(set(by_official[oid]))
+            if len(jids) < 2:
+                continue
+            multi_assigned.update(jids)
+            names = sorted({judge_map[j][0] for j in jids}, key=str.lower)
+            off = self.session.get(Officials, oid)
+            directory_name = (off.full_name or "").strip() if off else ""
+            dn_key = _normalize_person_name_key(directory_name)
+            # Dedupe by normalized spelling so Official vs Judge minor punctuation mismatches
+            # do not repeat (e.g. "Einstein" hyphen vs space).
+            by_norm = {}
+            for n in names:
+                nk = _normalize_person_name_key(n)
+                if nk == dn_key:
+                    continue
+                prev = by_norm.get(nk)
+                if prev is None or len(n.strip()) > len(prev.strip()):
+                    by_norm[nk] = n
+            alias_names = sorted(by_norm.values(), key=str.lower)
+
+            if directory_name:
+                if alias_names:
+                    label = f"{directory_name} · " + " · ".join(alias_names)
+                else:
+                    label = directory_name
+            else:
+                label = " · ".join(names) + " (same directory official)"
+            merged_groups.append(
+                {"label": label, "judge_ids": jids, "official_id": oid}
+            )
+
+        singleton_labels_seen = set()
+        singleton_groups = []
+        for jid in sorted(judge_map.keys(), key=lambda x: judge_map[x][0].lower()):
+            if jid in multi_assigned:
+                continue
+            nm, loc = judge_map[jid]
+            base = nm if not loc else f"{nm} ({loc})"
+            if base in singleton_labels_seen:
+                label = f"{base} [judge id {jid}]"
+            else:
+                singleton_labels_seen.add(base)
+                label = base
+            singleton_groups.append(
+                {"label": label, "judge_ids": [jid], "official_id": None}
+            )
+
+        all_groups = merged_groups + singleton_groups
+        all_groups.sort(key=lambda g: g["label"].lower())
+        return all_groups
+
+    def _event_dates_for_competition_ids(self, competition_ids):
+        """Map competition id → event date for sorting (start_date, else end_date)."""
+        if not competition_ids:
+            return {}
+        uniq = list({int(c) for c in competition_ids})
+        rows = (
+            self.session.query(
+                Competition.id,
+                Competition.start_date,
+                Competition.end_date,
+            )
+            .filter(Competition.id.in_(uniq))
+            .all()
+        )
+        out = {}
+        for cid, sd, ed in rows:
+            out[int(cid)] = sd or ed
+        return out
+
+    _QUALIFYING_SCOPE_DISCIPLINE_NAMES = frozenset(
+        {"singles", "pairs", "ice dance", "synchronized"}
+    )
+
     def __init__(self, session: Session):
         self.session = session
+
+    def _qualifying_core_discipline_type_ids(self):
+        """Discipline_type ids for Singles, Pairs, Ice Dance, Synchronized (name match)."""
+        out = []
+        for dt_id, name in self.session.query(DisciplineType.id, DisciplineType.name).all():
+            if name is None:
+                continue
+            key = name.strip().lower()
+            if key in self._QUALIFYING_SCOPE_DISCIPLINE_NAMES:
+                out.append(dt_id)
+        return out
+
+    def qualifying_event_segment_discipline_types(self):
+        """(id, name) rows for disciplines counted in qualifying-only benchmarking."""
+        ids = self._qualifying_core_discipline_type_ids()
+        if not ids:
+            return []
+        rows = (
+            self.session.query(DisciplineType.id, DisciplineType.name)
+            .filter(DisciplineType.id.in_(ids))
+            .order_by(DisciplineType.name)
+            .all()
+        )
+        return [(r[0], r[1]) for r in rows]
+
+    def _merged_segment_discipline_ids(self, narrow_core_disciplines, discipline_type_ids):
+        """
+        Segment discipline filter for queries.
+        Returns None if no restriction; otherwise a list (possibly empty = no matching segments).
+        """
+        if narrow_core_disciplines:
+            allowed = self._qualifying_core_discipline_type_ids()
+            if discipline_type_ids:
+                return [i for i in discipline_type_ids if i in allowed]
+            return allowed
+        if discipline_type_ids:
+            return discipline_type_ids
+        return None
 
     def get_judges(self):
         """Get all judges in alphabetical order"""
         judges = self.session.query(Judge).order_by(Judge.name).all()
         return [(judge.id, judge.name, judge.location) for judge in judges]
 
-    def get_competitions(self):
-        """Get all competitions"""
-        competitions = self.session.query(Competition).order_by(Competition.year.desc(), Competition.name).all()
+    def get_competitions(self, competition_scope: str = COMPETITION_SCOPE_ALL):
+        """Competitions optionally scoped by linked ``officials_analysis`` competition type."""
+        q = self.session.query(Competition).order_by(
+            Competition.year.desc(), Competition.name
+        )
+        q = self._filter_orm_competition_scope(q, competition_scope)
+        competitions = q.all()
         return [(comp.id, comp.name, comp.year) for comp in competitions]
 
-    def get_judge_competitions(self, judge_id):
-        """Get competitions where a specific judge participated"""
-        # Get competitions from PCS scores
+    def get_judge_competitions(
+        self,
+        judge_ids,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """Competitions for these judge record(s): scored segments plus protocol panel rows.
+
+        Includes competitions where the judge has PCS/element scores. When a judge is
+        ``linked`` in ``judge_official_link`` to a directory official, also includes any
+        competition where that official appears on ``segment_official`` (any role), even
+        if there are no scores under this judge id for that event.
+
+        Returned rows are ordered by competition event date (``start_date``, else ``end_date``)
+        descending, then season year and name; competitions missing both dates sort last.
+
+        When ``competition_scope`` is not *all*, only competitions whose linked officials
+        type matches that scope are included (same semantics as other analytics filters).
+        """
+        ids = self.normalize_judge_ids(judge_ids)
         pcs_competitions = self.session.query(Competition).join(
             Segment, Segment.competition_id == Competition.id
         ).join(
@@ -35,10 +408,9 @@ class JudgeAnalytics:
         ).join(
             PcsScorePerJudge, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
         ).filter(
-            PcsScorePerJudge.judge_id == judge_id
+            PcsScorePerJudge.judge_id.in_(ids)
         ).distinct()
 
-        # Get competitions from element scores  
         element_competitions = self.session.query(Competition).join(
             Segment, Segment.competition_id == Competition.id
         ).join(
@@ -48,21 +420,75 @@ class JudgeAnalytics:
         ).join(
             ElementScorePerJudge, ElementScorePerJudge.element_id == Element.id
         ).filter(
-            ElementScorePerJudge.judge_id == judge_id
+            ElementScorePerJudge.judge_id.in_(ids)
         ).distinct()
 
-        # Combine and deduplicate
         all_competitions = set()
         for comp in pcs_competitions:
             all_competitions.add((comp.id, comp.name, comp.year))
         for comp in element_competitions:
             all_competitions.add((comp.id, comp.name, comp.year))
 
-        # Sort by year desc, then name
-        return sorted(list(all_competitions), key=lambda x: (x[2], x[1]), reverse=True)
+        linked_official_ids = [
+            oid
+            for (oid,) in self.session.query(JudgeOfficialLink.official_id)
+            .filter(JudgeOfficialLink.judge_id.in_(ids))
+            .filter(JudgeOfficialLink.status == "linked")
+            .filter(JudgeOfficialLink.official_id.isnot(None))
+            .distinct()
+            .all()
+            if oid is not None
+        ]
+        if linked_official_ids:
+            protocol_competitions = (
+                self.session.query(Competition)
+                .join(Segment, Segment.competition_id == Competition.id)
+                .join(SegmentOfficial, SegmentOfficial.segment_id == Segment.id)
+                .filter(SegmentOfficial.official_id.in_(linked_official_ids))
+                .distinct()
+            )
+            for comp in protocol_competitions:
+                all_competitions.add((comp.id, comp.name, comp.year))
 
-    def get_judge_segment_stats(self, judge_id, year_filter=None, competition_ids=None, discipline_type_ids=None):
-        """Get segment statistics for a specific judge"""
+        rows = list(all_competitions)
+        if not rows:
+            return []
+        date_map = self._event_dates_for_competition_ids([r[0] for r in rows])
+
+        def _sort_key(row):
+            cid, name, year = row
+            ev = date_map.get(int(cid))
+            missing = ev is None
+            neg_ord = -ev.toordinal() if ev else 0
+            return (missing, neg_ord, str(year), str(name).lower())
+
+        rows = sorted(rows, key=_sort_key)
+        if competition_scope and competition_scope != COMPETITION_SCOPE_ALL:
+            cids = [r[0] for r in rows]
+            if not cids:
+                return []
+            scoped = self._filter_orm_competition_scope(
+                self.session.query(Competition.id).filter(Competition.id.in_(cids)),
+                competition_scope,
+            ).all()
+            allowed = {int(r[0]) for r in scoped}
+            rows = [r for r in rows if int(r[0]) in allowed]
+        return rows
+
+    def get_judge_segment_stats(
+        self,
+        judge_ids,
+        year_filter=None,
+        competition_ids=None,
+        discipline_type_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """Segment statistics for one judge or merged identities (multiple judge ids)."""
+        ids = self.normalize_judge_ids(judge_ids)
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
         # Base query for segments this judge scored
         segment_query = self.session.query(Segment).join(
             Competition, Segment.competition_id == Competition.id
@@ -75,8 +501,13 @@ class JudgeAnalytics:
             segment_query = segment_query.filter(Competition.year == year_filter)
         if competition_ids:
             segment_query = segment_query.filter(Segment.competition_id.in_(competition_ids))
-        if discipline_type_ids:
-            segment_query = segment_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        if seg_discipline_ids is not None:
+            segment_query = segment_query.filter(
+                Segment.discipline_type_id.in_(seg_discipline_ids)
+            )
+        segment_query = self._filter_orm_competition_scope(
+            segment_query, competition_scope
+        )
 
         # Get segments where this judge has PCS scores
         pcs_segments = segment_query.join(
@@ -84,10 +515,10 @@ class JudgeAnalytics:
         ).join(
             PcsScorePerJudge, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
         ).filter(
-            PcsScorePerJudge.judge_id == judge_id
+            PcsScorePerJudge.judge_id.in_(ids)
         ).distinct()
 
-        # Get segments where this judge has element scores
+        # Get segments where these judges have element scores
         element_segments = segment_query.join(
             SkaterSegment, SkaterSegment.segment_id == Segment.id
         ).join(
@@ -95,7 +526,7 @@ class JudgeAnalytics:
         ).join(
             ElementScorePerJudge, ElementScorePerJudge.element_id == Element.id
         ).filter(
-            ElementScorePerJudge.judge_id == judge_id
+            ElementScorePerJudge.judge_id.in_(ids)
         ).distinct()
 
         segment_stats = []
@@ -109,7 +540,7 @@ class JudgeAnalytics:
 
         all_segment_ids = [segment.id for segment in all_segments]
 
-            # --- Pre-calculate skater counts ---
+        # --- Pre-calculate skater counts ---
         segment_skater_counts = dict(
             self.session.execute(
                 select(SkaterSegment.segment_id, func.count())
@@ -127,7 +558,7 @@ class JudgeAnalytics:
             )
             .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(all_segment_ids))
-            .filter(PcsScorePerJudge.judge_id == judge_id)
+            .filter(PcsScorePerJudge.judge_id.in_(ids))
             .filter(or_(func.abs(PcsScorePerJudge.deviation) >= 1.5, PcsScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id)
         ).all()
@@ -145,16 +576,13 @@ class JudgeAnalytics:
             .join(Element, ElementScorePerJudge.element_id == Element.id)
             .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(all_segment_ids))
-            .filter(ElementScorePerJudge.judge_id == judge_id)
+            .filter(ElementScorePerJudge.judge_id.in_(ids))
             .filter(or_(func.abs(ElementScorePerJudge.deviation) >= 2, ElementScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id)
         ).all()
 
         element_counts_dict = {seg_id: (elem_anom, elem_rule)
                             for seg_id, elem_anom, elem_rule in element_counts}
-
-        # --- Fetch judge info once ---
-        judge = self.session.get(Judge, judge_id)
 
         # --- Assemble statistics ---
         segment_stats = []
@@ -198,6 +626,98 @@ class JudgeAnalytics:
         segments = [segment[0] for segment in segments_raw]
 
         return pd.DataFrame(self.get_segment_statistics(segments))
+
+    def get_competition_segment_officials_display(self, competition_id: int) -> pd.DataFrame:
+        """
+        One row per official **per discipline** at this competition from ``segment_official``.
+
+        Columns: official name, member number, discipline (segment category), and **panel_roles**
+        (comma-separated distinct roles in that discipline only). Directory appointment names are
+        preferred when linked; otherwise protocol roles use the short IJS-style mapping.
+        """
+        stmt = (
+            select(
+                SegmentOfficial.official_id.label("official_id"),
+                SegmentOfficial.official_name.label("protocol_name"),
+                Officials.full_name.label("directory_name"),
+                Officials.mbr_number.label("mbr_number"),
+                AppointmentTypes.name.label("appointment_name"),
+                SegmentOfficial.role.label("protocol_role"),
+                DisciplineType.name.label("discipline"),
+            )
+            .select_from(SegmentOfficial)
+            .join(Segment, SegmentOfficial.segment_id == Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+            .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)
+            .outerjoin(Officials, SegmentOfficial.official_id == Officials.id)
+            .outerjoin(
+                AppointmentTypes,
+                SegmentOfficial.appointment_type_id == AppointmentTypes.id,
+            )
+            .where(Competition.id == int(competition_id))
+        )
+        rows = self.session.execute(stmt).all()
+        if not rows:
+            return pd.DataFrame()
+
+        states: dict[tuple, dict] = {}
+
+        for r in rows:
+            oid, proto, dir_name, mbr, appt_name, proto_role, discipline = r
+            proto_s = (proto or "").strip()
+            dir_s = (dir_name or "").strip()
+            display_name = dir_s or proto_s or "—"
+            mbr_s = (mbr or "").strip() if mbr else ""
+            disc_label = (discipline or "").strip() or "Unknown"
+
+            if oid is not None:
+                dedup_k = ("id", int(oid))
+            else:
+                name_src = proto_s if proto_s else dir_s if dir_s else display_name
+                dedup_k = ("name", _normalize_person_name_key(name_src))
+
+            if dedup_k not in states:
+                states[dedup_k] = {
+                    "official": display_name,
+                    "mbr_number": mbr_s,
+                    "has_dir": bool(dir_s),
+                    "roles_by_discipline": defaultdict(set),
+                }
+            st = states[dedup_k]
+            base = _panel_role_base_label(appt_name, proto_role)
+            if base:
+                st["roles_by_discipline"][disc_label].add(base)
+            else:
+                # Keep discipline row even if protocol/appointment role text is empty
+                _ = st["roles_by_discipline"][disc_label]
+            if dir_s:
+                if not st["has_dir"]:
+                    st["official"] = dir_s
+                    st["has_dir"] = True
+                st["mbr_number"] = mbr_s or st["mbr_number"]
+            else:
+                st["mbr_number"] = st["mbr_number"] or mbr_s
+                if st["official"] in ("", "—") and display_name not in ("", "—"):
+                    st["official"] = display_name
+
+        records = []
+        for st in states.values():
+            by_d = st["roles_by_discipline"]
+            for disc, role_set in sorted(by_d.items(), key=lambda x: x[0].lower()):
+                roles_str = ", ".join(sorted(role_set, key=str.lower))
+                records.append(
+                    {
+                        "official": st["official"],
+                        "mbr_number": st["mbr_number"],
+                        "discipline": disc,
+                        "panel_roles": roles_str,
+                    }
+                )
+
+        records.sort(
+            key=lambda x: (x["official"].lower(), x["discipline"].lower())
+        )
+        return pd.DataFrame(records)
 
 
     def get_segment_statistics(self, segments):
@@ -291,8 +811,14 @@ class JudgeAnalytics:
 
         return segment_stats
 
-    def get_all_rule_errors(self, year_filter=None, competition_ids=None, judge_ids=None):
-        """Get all rule errors with optional filters"""
+    def get_all_rule_errors(
+        self,
+        year_filter=None,
+        competition_ids=None,
+        judge_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """Get all rule errors with optional filters."""
         # PCS rule errors
         pcs_query = self.session.query(
             PcsScorePerJudge.judge_id,
@@ -371,8 +897,10 @@ class JudgeAnalytics:
         if judge_ids:
             pcs_query = pcs_query.filter(Judge.id.in_(judge_ids))
             element_query = element_query.filter(Judge.id.in_(judge_ids))
-
-        # Execute queries and convert to DataFrames
+        pcs_query = self._filter_orm_competition_scope(pcs_query, competition_scope)
+        element_query = self._filter_orm_competition_scope(
+            element_query, competition_scope
+        )
         pcs_results = pcs_query.all()
         element_results = element_query.all()
 
@@ -432,8 +960,20 @@ class JudgeAnalytics:
         element_types = self.session.query(ElementType).all()
         return [(et.id, et.name) for et in element_types]
 
-    def get_judge_pcs_stats(self, judge_id, year_filter=None, competition_ids=None, discipline_type_ids=None):
-        """Get PCS statistics for a specific judge"""
+    def get_judge_pcs_stats(
+        self,
+        judge_ids,
+        year_filter=None,
+        competition_ids=None,
+        discipline_type_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """PCS statistics for one judge id or merged identities (multiple ids)."""
+        ids = self.normalize_judge_ids(judge_ids)
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
         query = self.session.query(
             PcsScorePerJudge.thrown_out,
             PcsScorePerJudge.deviation,
@@ -454,15 +994,16 @@ class JudgeAnalytics:
          .join(Competition, Segment.competition_id == Competition.id)\
          .join(Skater, SkaterSegment.skater_id == Skater.id)\
          .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)\
-         .filter(Judge.id == judge_id)
+         .filter(Judge.id.in_(ids))
 
         # Apply filters
         if year_filter:
             query = query.filter(Competition.year == year_filter)
         if competition_ids:
             query = query.filter(Competition.id.in_(competition_ids))
-        if discipline_type_ids:
-            query = query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        if seg_discipline_ids is not None:
+            query = query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        query = self._filter_orm_competition_scope(query, competition_scope)
 
         results = query.all()
 
@@ -487,8 +1028,20 @@ class JudgeAnalytics:
 
         return df
 
-    def get_judge_element_stats(self, judge_id, year_filter=None, competition_ids=None, discipline_type_ids=None):
-        """Get element statistics for a specific judge"""
+    def get_judge_element_stats(
+        self,
+        judge_ids,
+        year_filter=None,
+        competition_ids=None,
+        discipline_type_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """Element statistics for one judge id or merged identities."""
+        ids = self.normalize_judge_ids(judge_ids)
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
         query = self.session.query(
             ElementScorePerJudge.thrown_out,
             ElementScorePerJudge.deviation,
@@ -512,15 +1065,16 @@ class JudgeAnalytics:
          .join(Competition, Segment.competition_id == Competition.id)\
          .join(Skater, SkaterSegment.skater_id == Skater.id)\
          .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)\
-         .filter(Judge.id == judge_id)
+         .filter(Judge.id.in_(ids))
 
         # Apply filters
         if year_filter:
             query = query.filter(Competition.year == year_filter)
         if competition_ids:
             query = query.filter(Competition.id.in_(competition_ids))
-        if discipline_type_ids:
-            query = query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        if seg_discipline_ids is not None:
+            query = query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        query = self._filter_orm_competition_scope(query, competition_scope)
 
         results = query.all()
 
@@ -684,10 +1238,22 @@ class JudgeAnalytics:
 
         return stats
 
-    def get_judge_performance_heatmap_data(self, metric='throwout_rate', score_type='both', year_filter=None, competition_ids=None, discipline_type_ids=None):
+    def get_judge_performance_heatmap_data(
+        self,
+        metric='throwout_rate',
+        score_type='both',
+        year_filter=None,
+        competition_ids=None,
+        discipline_type_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
         """Get data for judge performance heatmap"""
 
         judges = self.session.query(Judge.id, Judge.name).all()
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
 
         # --- Precompute PCS stats grouped by judge ---
         pcs_query = select(
@@ -696,7 +1262,8 @@ class JudgeAnalytics:
             func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
             func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
                             PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
-            func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
+            func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors"),
+            func.avg(PcsScorePerJudge.deviation).label("pcs_avg_deviation"),
         ).join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
         ).join(Segment, SkaterSegment.segment_id == Segment.id
         ).join(Competition, Segment.competition_id == Competition.id)
@@ -706,13 +1273,25 @@ class JudgeAnalytics:
             pcs_query = pcs_query.filter(Competition.year == year_filter)
         if competition_ids:
             pcs_query = pcs_query.filter(Competition.id.in_(competition_ids))
-        if discipline_type_ids:
-            pcs_query = pcs_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        if seg_discipline_ids is not None:
+            pcs_query = pcs_query.filter(
+                Segment.discipline_type_id.in_(seg_discipline_ids)
+            )
+        pcs_query = self._filter_select_competition_scope(
+            pcs_query, competition_scope
+        )
 
         pcs_stats = self.session.execute(pcs_query.group_by(PcsScorePerJudge.judge_id)).all()
-        pcs_dict = {judge_id: dict(total=pcs_total, throwouts=pcs_thr,
-                                anomalies=pcs_anom, rule_errors=pcs_rules)
-                    for judge_id, pcs_total, pcs_thr, pcs_anom, pcs_rules in pcs_stats}
+        pcs_dict = {
+            judge_id: dict(
+                total=pcs_total,
+                throwouts=pcs_thr,
+                anomalies=pcs_anom,
+                rule_errors=pcs_rules,
+                avg_dev=pcs_avg_dev,
+            )
+            for judge_id, pcs_total, pcs_thr, pcs_anom, pcs_rules, pcs_avg_dev in pcs_stats
+        }
 
         # --- Precompute Element stats grouped by judge ---
         elem_query = select(
@@ -721,7 +1300,8 @@ class JudgeAnalytics:
             func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
             func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
                             ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
-            func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors")
+            func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors"),
+            func.avg(ElementScorePerJudge.deviation).label("elem_avg_deviation"),
         ).join(Element, ElementScorePerJudge.element_id == Element.id
         ).join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id
         ).join(Segment, SkaterSegment.segment_id == Segment.id
@@ -732,18 +1312,35 @@ class JudgeAnalytics:
             elem_query = elem_query.filter(Competition.year == year_filter)
         if competition_ids:
             elem_query = elem_query.filter(Competition.id.in_(competition_ids))
-        if discipline_type_ids:
-            elem_query = elem_query.filter(Segment.discipline_type_id.in_(discipline_type_ids))
+        if seg_discipline_ids is not None:
+            elem_query = elem_query.filter(
+                Segment.discipline_type_id.in_(seg_discipline_ids)
+            )
+        elem_query = self._filter_select_competition_scope(
+            elem_query, competition_scope
+        )
 
         elem_stats = self.session.execute(elem_query.group_by(ElementScorePerJudge.judge_id)).all()
-        elem_dict = {judge_id: dict(total=elem_total, throwouts=elem_thr,
-                                    anomalies=elem_anom, rule_errors=elem_rules)
-                    for judge_id, elem_total, elem_thr, elem_anom, elem_rules in elem_stats}
+        elem_dict = {
+            judge_id: dict(
+                total=elem_total,
+                throwouts=elem_thr,
+                anomalies=elem_anom,
+                rule_errors=elem_rules,
+                avg_dev=elem_avg_dev,
+            )
+            for judge_id, elem_total, elem_thr, elem_anom, elem_rules, elem_avg_dev in elem_stats
+        }
         # --- Precompute excess anomalies once for all judges ---
         excess_anomalies = None
         if metric == 'excess_anomalies':
             excess_anomalies = self._calculate_all_judge_excess_anomalies(
-                year_filter=year_filter, competition_ids=competition_ids, discipline_ids=discipline_type_ids, score_type=score_type, by_competition=False
+                year_filter=year_filter,
+                competition_ids=competition_ids,
+                discipline_ids=seg_discipline_ids,
+                score_type=score_type,
+                by_competition=False,
+                competition_scope=competition_scope,
             )
 
         # --- Assemble heatmap data ---
@@ -796,12 +1393,26 @@ class JudgeAnalytics:
                 value = excess_anomalies.get(judge_id, 0)
                 if value == 0:
                     continue
+            elif metric == 'avg_deviation':
+                pcs_mean = float(pcs.get("avg_dev") or 0)
+                elem_mean = float(elem.get("avg_dev") or 0)
+                if score_type == 'pcs':
+                    value = abs(pcs_mean) if pcs_scores else 0
+                elif score_type == 'element':
+                    value = abs(elem_mean) if element_scores else 0
+                else:
+                    if total_scores <= 0:
+                        continue
+                    value = (
+                        abs(pcs_mean) * pcs_scores + abs(elem_mean) * element_scores
+                    ) / total_scores
+                value = round(value, 4)
             else:
                 continue
 
             heatmap_data.append({
                 'judge_name': judge_name,
-                'metric_value': round(value, 2) if isinstance(value, (int, float)) else value,
+                'metric_value': value if metric == 'avg_deviation' else round(value, 2),
                 'total_scores': total_scores,
                 'pcs_scores': pcs_scores,
                 'element_scores': element_scores
@@ -809,14 +1420,279 @@ class JudgeAnalytics:
 
         return pd.DataFrame(heatmap_data)
 
-    def get_judge_competition_heatmap_data(self, metric='throwout_rate', score_type='both'):
+    def get_pooled_cross_judge_metrics(
+        self,
+        score_type="both",
+        year_filter=None,
+        competition_ids=None,
+        discipline_type_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """
+        Aggregate all judge scores matching the same filters as cross-judge benchmarking.
+        Rates are global counts / total scores (each score weighted equally, not each judge).
+        """
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
+
+        def _filter_segment_scope(q):
+            if year_filter:
+                q = q.filter(Competition.year == year_filter)
+            if competition_ids:
+                q = q.filter(Competition.id.in_(competition_ids))
+            if seg_discipline_ids is not None:
+                q = q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+            q = self._filter_select_competition_scope(q, competition_scope)
+            return q
+
+        pcs_sel = (
+            select(
+                func.count().label("n"),
+                func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("thr"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                PcsScorePerJudge.is_rule_error,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("anom"),
+                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label(
+                    "re"
+                ),
+                func.avg(func.abs(PcsScorePerJudge.deviation)).label("avg_abs_dev"),
+            )
+            .select_from(PcsScorePerJudge)
+            .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+            .join(Segment, SkaterSegment.segment_id == Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+        )
+        pcs_sel = _filter_segment_scope(pcs_sel)
+        pcs_row = self.session.execute(pcs_sel).one()
+
+        elem_sel = (
+            select(
+                func.count().label("n"),
+                func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label(
+                    "thr"
+                ),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(ElementScorePerJudge.deviation) >= 2,
+                                ElementScorePerJudge.is_rule_error,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("anom"),
+                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label(
+                    "re"
+                ),
+                func.avg(func.abs(ElementScorePerJudge.deviation)).label("avg_abs_dev"),
+            )
+            .select_from(ElementScorePerJudge)
+            .join(Element, ElementScorePerJudge.element_id == Element.id)
+            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+            .join(Segment, SkaterSegment.segment_id == Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+        )
+        elem_sel = _filter_segment_scope(elem_sel)
+        elem_row = self.session.execute(elem_sel).one()
+
+        def _unpack(row):
+            n = int(row.n or 0)
+            thr = int(row.thr or 0)
+            anom = int(row.anom or 0)
+            re = int(row.re or 0)
+            avg_abs = float(row.avg_abs_dev or 0.0) if n else 0.0
+            return n, thr, anom, re, avg_abs
+
+        pn, pthr, panom, pre, pavg_abs = _unpack(pcs_row)
+        en, ethr, eanom, ere, eavg_abs = _unpack(elem_row)
+
+        if score_type == "pcs":
+            total_scores = pn
+            throwouts = pthr
+            anomalies = panom
+            rule_errors = pre
+            avg_abs_pool = pavg_abs if pn else 0.0
+        elif score_type == "element":
+            total_scores = en
+            throwouts = ethr
+            anomalies = eanom
+            rule_errors = ere
+            avg_abs_pool = eavg_abs if en else 0.0
+        else:
+            total_scores = pn + en
+            throwouts = pthr + ethr
+            anomalies = panom + eanom
+            rule_errors = pre + ere
+            if total_scores <= 0:
+                avg_abs_pool = 0.0
+            else:
+                avg_abs_pool = (pavg_abs * pn + eavg_abs * en) / total_scores
+
+        excess_map = self._calculate_all_judge_excess_anomalies(
+            year_filter=year_filter,
+            competition_ids=competition_ids,
+            discipline_ids=seg_discipline_ids,
+            score_type=score_type,
+            by_competition=False,
+            competition_scope=competition_scope,
+        )
+        total_excess = int(sum(excess_map.values()))
+
+        if total_scores <= 0:
+            return {
+                "total_scores": 0,
+                "throwouts": 0,
+                "throwout_rate_pct": 0.0,
+                "anomalies": 0,
+                "anomaly_rate_pct": 0.0,
+                "rule_errors": 0,
+                "rule_error_rate_pct": 0.0,
+                "avg_abs_deviation": 0.0,
+                "total_excess_anomalies": total_excess,
+                "pcs_scores": pn,
+                "element_scores": en,
+            }
+
+        return {
+            "total_scores": total_scores,
+            "throwouts": throwouts,
+            "throwout_rate_pct": (throwouts / total_scores) * 100,
+            "anomalies": anomalies,
+            "anomaly_rate_pct": (anomalies / total_scores) * 100,
+            "rule_errors": rule_errors,
+            "rule_error_rate_pct": (rule_errors / total_scores) * 100,
+            "avg_abs_deviation": round(avg_abs_pool, 6),
+            "total_excess_anomalies": total_excess,
+            "pcs_scores": pn,
+            "element_scores": en,
+        }
+
+    def get_judge_competition_protocol_roles_rows(
+        self,
+        judge_ids,
+        competition_pairs: list,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """
+        For competitions in ``competition_pairs``, list distinct protocol roles from
+        segment_official when any of these judge records shares a linked directory official.
+
+        judge_ids: one id or merged identities (same as elsewhere in this module).
+
+        competition_pairs: [(competition_name, year_str), ...]; row order is re-sorted by
+        competition event date (``start_date``, else ``end_date``) descending, then label.
+
+        ``competition_scope`` should match the scope used to build ``competition_pairs`` so
+        label→competition id resolution agrees with the individual-judge competition picker.
+
+        Returns (DataFrame, optional caption when roles unavailable).
+        """
+        caption = ""
+        roles_by_comp_id = defaultdict(set)
+        ids = self.normalize_judge_ids(judge_ids)
+
+        official_id = None
+        for jid in ids:
+            link = self.session.get(JudgeOfficialLink, jid)
+            if link and link.official_id:
+                official_id = int(link.official_id)
+                break
+
+        if official_id is not None:
+            stmt = (
+                select(
+                    Competition.id.label("cid"),
+                    func.coalesce(AppointmentTypes.name, SegmentOfficial.role).label(
+                        "lbl"
+                    ),
+                )
+                .select_from(SegmentOfficial)
+                .join(Segment, SegmentOfficial.segment_id == Segment.id)
+                .join(Competition, Segment.competition_id == Competition.id)
+                .outerjoin(
+                    AppointmentTypes,
+                    SegmentOfficial.appointment_type_id == AppointmentTypes.id,
+                )
+                .where(SegmentOfficial.official_id == official_id)
+            )
+            for cid, lbl in self.session.execute(stmt):
+                if lbl is not None and str(lbl).strip():
+                    roles_by_comp_id[int(cid)].add(str(lbl).strip())
+        else:
+            caption = (
+                "Link this judge to a directory official under Admin Tools to populate "
+                "protocol roles from segment_official data."
+            )
+
+        id_by_label = {
+            (str(nm), str(yr)): int(cid)
+            for cid, nm, yr in self.get_judge_competitions(ids, competition_scope)
+        }
+
+        rows = []
+        for name, year in competition_pairs:
+            yr = str(year)
+            cid = id_by_label.get((str(name), yr))
+            labels = roles_by_comp_id.get(cid, set()) if cid is not None else set()
+            if labels:
+                role_cell = ", ".join(sorted(labels, key=str.lower))
+            else:
+                role_cell = "—"
+            rows.append(
+                {
+                    "Competition": f"{name} ({yr})",
+                    "Distinct protocol roles": role_cell,
+                    "_sort_cid": cid,
+                }
+            )
+
+        cids_for_dates = [r["_sort_cid"] for r in rows if r["_sort_cid"] is not None]
+        date_map = self._event_dates_for_competition_ids(cids_for_dates)
+
+        def _row_sort_key(r):
+            cid = r["_sort_cid"]
+            ev = date_map.get(int(cid)) if cid is not None else None
+            missing = ev is None
+            neg_ord = -ev.toordinal() if ev else 0
+            return (missing, neg_ord, r["Competition"].lower())
+
+        rows.sort(key=_row_sort_key)
+        for r in rows:
+            del r["_sort_cid"]
+
+        return pd.DataFrame(rows), caption
+
+    def get_judge_competition_heatmap_data(
+        self,
+        metric='throwout_rate',
+        score_type='both',
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
         """Fast version: judge vs competition heatmap with batch queries"""
 
-        competitions = self.session.query(Competition.id, Competition.name, Competition.year).all()
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(core_disc, None)
+
+        comp_q = self.session.query(Competition.id, Competition.name, Competition.year)
+        comp_q = self._filter_orm_competition_scope(comp_q, competition_scope)
+        competitions = comp_q.all()
         judges = self.session.query(Judge.id, Judge.name).all()
 
         # --- Precompute PCS stats grouped by (competition, judge) ---
-        pcs_stats = self.session.execute(
+        pcs_q = (
             select(
                 Competition.id.label("competition_id"),
                 PcsScorePerJudge.judge_id,
@@ -824,20 +1700,33 @@ class JudgeAnalytics:
                 func.sum(case((PcsScorePerJudge.is_throwout, 1), else_=0)).label("pcs_throwouts"),
                 func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
                                 PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
-                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors")
+                func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors"),
+                func.avg(PcsScorePerJudge.deviation).label("pcs_avg_deviation"),
             )
             .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
             .join(Segment, SkaterSegment.segment_id == Segment.id)
             .join(Competition, Segment.competition_id == Competition.id)
-            .group_by(Competition.id, PcsScorePerJudge.judge_id)
+        )
+        pcs_q = self._filter_select_competition_scope(pcs_q, competition_scope)
+        if seg_discipline_ids is not None:
+            pcs_q = pcs_q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        pcs_stats = self.session.execute(
+            pcs_q.group_by(Competition.id, PcsScorePerJudge.judge_id)
         ).all()
 
-        pcs_dict = {(comp_id, judge_id): dict(total=pcs_total, throwouts=pcs_thr,
-                                            anomalies=pcs_anom, rule_errors=pcs_rules)
-                    for comp_id, judge_id, pcs_total, pcs_thr, pcs_anom, pcs_rules in pcs_stats}
+        pcs_dict = {
+            (comp_id, judge_id): dict(
+                total=pcs_total,
+                throwouts=pcs_thr,
+                anomalies=pcs_anom,
+                rule_errors=pcs_rules,
+                avg_dev=pcs_avg_dev,
+            )
+            for comp_id, judge_id, pcs_total, pcs_thr, pcs_anom, pcs_rules, pcs_avg_dev in pcs_stats
+        }
 
         # --- Precompute Element stats grouped by (competition, judge) ---
-        elem_stats = self.session.execute(
+        elem_q = (
             select(
                 Competition.id.label("competition_id"),
                 ElementScorePerJudge.judge_id,
@@ -845,25 +1734,42 @@ class JudgeAnalytics:
                 func.sum(case((ElementScorePerJudge.is_throwout, 1), else_=0)).label("elem_throwouts"),
                 func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
                                 ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
-                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors")
+                func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors"),
+                func.avg(ElementScorePerJudge.deviation).label("elem_avg_deviation"),
             )
             .join(Element, ElementScorePerJudge.element_id == Element.id)
             .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
             .join(Segment, SkaterSegment.segment_id == Segment.id)
             .join(Competition, Segment.competition_id == Competition.id)
-            .group_by(Competition.id, ElementScorePerJudge.judge_id)
+        )
+        elem_q = self._filter_select_competition_scope(elem_q, competition_scope)
+        if seg_discipline_ids is not None:
+            elem_q = elem_q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        elem_stats = self.session.execute(
+            elem_q.group_by(Competition.id, ElementScorePerJudge.judge_id)
         ).all()
 
-        elem_dict = {(comp_id, judge_id): dict(total=elem_total, throwouts=elem_thr,
-                                            anomalies=elem_anom, rule_errors=elem_rules)
-                    for comp_id, judge_id, elem_total, elem_thr, elem_anom, elem_rules in elem_stats}
+        elem_dict = {
+            (comp_id, judge_id): dict(
+                total=elem_total,
+                throwouts=elem_thr,
+                anomalies=elem_anom,
+                rule_errors=elem_rules,
+                avg_dev=elem_avg_dev,
+            )
+            for comp_id, judge_id, elem_total, elem_thr, elem_anom, elem_rules, elem_avg_dev in elem_stats
+        }
 
         # --- Precompute excess anomalies for all competitions ---
         excess_anomalies = None
         if metric == 'excess_anomalies':
             excess_anomalies = self._calculate_all_judge_excess_anomalies(
-                year_filter=None, competition_ids=None, discipline_ids=None,
-                score_type=score_type, by_competition=True
+                year_filter=None,
+                competition_ids=None,
+                discipline_ids=seg_discipline_ids,
+                score_type=score_type,
+                by_competition=True,
+                competition_scope=competition_scope,
             )
             # structure: {(judge_id, competition_id): excess}
 
@@ -912,13 +1818,29 @@ class JudgeAnalytics:
                     value = excess_anomalies.get((judge_id, comp_id), 0)
                     if value == 0:
                         continue
+                elif metric == 'avg_deviation':
+                    pcs_mean = float(pcs.get("avg_dev") or 0)
+                    elem_mean = float(elem.get("avg_dev") or 0)
+                    pcs_n = pcs.get("total", 0)
+                    elem_n = elem.get("total", 0)
+                    if score_type == 'pcs':
+                        value = abs(pcs_mean) if pcs_n else 0
+                    elif score_type == 'element':
+                        value = abs(elem_mean) if elem_n else 0
+                    else:
+                        if total_scores <= 0:
+                            continue
+                        value = (
+                            abs(pcs_mean) * pcs_n + abs(elem_mean) * elem_n
+                        ) / total_scores
+                    value = round(value, 4)
                 else:
                     continue
 
                 heatmap_data.append({
                     'judge_name': judge_name,
                     'competition': f"{comp_name} ({comp_year})",
-                    'metric_value': round(value, 2) if isinstance(value, (int, float)) else value,
+                    'metric_value': value if metric == 'avg_deviation' else round(value, 2),
                     'total_scores': total_scores
                 })
 
@@ -935,8 +1857,14 @@ class JudgeAnalytics:
                     return 3
 
     def _calculate_all_judge_excess_anomalies(
-    self, year_filter=None, competition_ids=None, discipline_ids=None,
-    score_type='both', by_competition=False):  
+        self,
+        year_filter=None,
+        competition_ids=None,
+        discipline_ids=None,
+        score_type='both',
+        by_competition=False,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
         """
         Calculate excess anomalies for judges.
         If by_competition=True, returns {(judge_id, competition_id): excess}.
@@ -952,8 +1880,11 @@ class JudgeAnalytics:
             base_query = base_query.filter(Competition.year == year_filter)
         if competition_ids:
             base_query = base_query.filter(Competition.id.in_(competition_ids))
-        if discipline_ids:
+        if discipline_ids is not None:
             base_query = base_query.filter(Segment.discipline_type_id.in_(discipline_ids))
+        clause = self._competition_scope_clause(competition_scope)
+        if clause is not None:
+            base_query = base_query.filter(clause)
 
         segments_raw = self.session.execute(base_query).all()
         segments = [seg[0] for seg in segments_raw]
@@ -1056,267 +1987,515 @@ class JudgeAnalytics:
 
         return rule_errors_per_judge
 
+    @staticmethod
+    def _summary_stats_from_aggregate_tuples(
+        pcs_t: Optional[tuple],
+        elem_t: Optional[tuple],
+    ) -> dict:
+        """
+        Build the same shape as calculate_judge_summary_stats from SQL aggregates.
 
+        Each tuple is (count, throwouts, anomalies, rule_errors, avg_deviation).
+        """
+        stats: dict = {}
+        if pcs_t is not None and pcs_t[0]:
+            n = int(pcs_t[0])
+            thr, anom, re, avg_dev = pcs_t[1], pcs_t[2], pcs_t[3], pcs_t[4]
+            stats["pcs_total_scores"] = n
+            stats["pcs_throwout_rate"] = float(thr) / n * 100
+            stats["pcs_anomaly_rate"] = float(anom) / n * 100
+            stats["pcs_rule_error_rate"] = float(re) / n * 100
+            stats["pcs_avg_deviation"] = (
+                float(avg_dev) if avg_dev is not None else 0.0
+            )
+        else:
+            stats["pcs_total_scores"] = 0
+            stats["pcs_throwout_rate"] = 0
+            stats["pcs_anomaly_rate"] = 0
+            stats["pcs_rule_error_rate"] = 0
+            stats["pcs_avg_deviation"] = 0
 
-    def get_temporal_trends_data(self, judge_id=None, period='year', metric='throwout_rate', score_type='both'):
+        if elem_t is not None and elem_t[0]:
+            n = int(elem_t[0])
+            thr, anom, re, avg_dev = elem_t[1], elem_t[2], elem_t[3], elem_t[4]
+            stats["element_total_scores"] = n
+            stats["element_throwout_rate"] = float(thr) / n * 100
+            stats["element_anomaly_rate"] = float(anom) / n * 100
+            stats["element_rule_error_rate"] = float(re) / n * 100
+            stats["element_avg_deviation"] = (
+                float(avg_dev) if avg_dev is not None else 0.0
+            )
+        else:
+            stats["element_total_scores"] = 0
+            stats["element_throwout_rate"] = 0
+            stats["element_anomaly_rate"] = 0
+            stats["element_rule_error_rate"] = 0
+            stats["element_avg_deviation"] = 0
+
+        return stats
+
+    @staticmethod
+    def _metric_value_for_temporal_summary(
+        stats: dict, metric: str, score_type: str
+    ) -> Optional[float]:
+        """Single-judge metric for temporal plots; None means skip (no usable scores)."""
+        if metric == "throwout_rate":
+            if score_type == "pcs":
+                return stats["pcs_throwout_rate"]
+            if score_type == "element":
+                return stats["element_throwout_rate"]
+            total_scores = stats["pcs_total_scores"] + stats["element_total_scores"]
+            if total_scores <= 0:
+                return None
+            total_throwouts = (
+                stats["pcs_throwout_rate"] * stats["pcs_total_scores"] / 100
+                + stats["element_throwout_rate"]
+                * stats["element_total_scores"]
+                / 100
+            )
+            return (total_throwouts / total_scores) * 100
+
+        if metric == "anomaly_rate":
+            if score_type == "pcs":
+                return stats["pcs_anomaly_rate"]
+            if score_type == "element":
+                return stats["element_anomaly_rate"]
+            total_scores = stats["pcs_total_scores"] + stats["element_total_scores"]
+            if total_scores <= 0:
+                return None
+            total_anomalies = (
+                stats["pcs_anomaly_rate"] * stats["pcs_total_scores"] / 100
+                + stats["element_anomaly_rate"]
+                * stats["element_total_scores"]
+                / 100
+            )
+            return (total_anomalies / total_scores) * 100
+
+        if metric == "rule_error_rate":
+            if score_type == "pcs":
+                return stats["pcs_rule_error_rate"]
+            if score_type == "element":
+                return stats["element_rule_error_rate"]
+            total_scores = stats["pcs_total_scores"] + stats["element_total_scores"]
+            if total_scores <= 0:
+                return None
+            total_rule_errors = (
+                stats["pcs_rule_error_rate"] * stats["pcs_total_scores"] / 100
+                + stats["element_rule_error_rate"]
+                * stats["element_total_scores"]
+                / 100
+            )
+            return (total_rule_errors / total_scores) * 100
+
+        # avg_deviation
+        if score_type == "pcs":
+            return (
+                abs(stats["pcs_avg_deviation"])
+                if stats["pcs_total_scores"] > 0
+                else 0
+            )
+        if score_type == "element":
+            return (
+                abs(stats["element_avg_deviation"])
+                if stats["element_total_scores"] > 0
+                else 0
+            )
+        total_scores = stats["pcs_total_scores"] + stats["element_total_scores"]
+        if total_scores <= 0:
+            return None
+        weighted_avg = (
+            abs(stats["pcs_avg_deviation"]) * stats["pcs_total_scores"]
+            + abs(stats["element_avg_deviation"]) * stats["element_total_scores"]
+        ) / total_scores
+        return weighted_avg
+
+    @staticmethod
+    def _merge_aggregate_tuple_list(parts: list[tuple]) -> Optional[tuple]:
+        """Merge SQL PCS/element aggregate rows into one tuple."""
+        if not parts:
+            return None
+        n_total = sum(int(p[0]) for p in parts if p and p[0])
+        if n_total <= 0:
+            return None
+        thr = sum(int(p[1]) for p in parts)
+        anom = sum(int(p[2]) for p in parts)
+        re = sum(int(p[3]) for p in parts)
+        w_avg = (
+            sum(float(p[4] or 0) * int(p[0]) for p in parts) / n_total
+        )
+        return (n_total, thr, anom, re, w_avg)
+
+    def _yearly_pcs_elem_combined_map(
+        self,
+        competition_scope: str,
+        judge_ids_filter: Optional[set[int]] = None,
+    ) -> dict:
+        """Map (judge_id, season_year) -> {\"pcs\": tuple | None, \"elem\": tuple | None}."""
+        if judge_ids_filter is not None and not judge_ids_filter:
+            return {}
+
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(core_disc, None)
+
+        pcs_q = (
+            select(
+                PcsScorePerJudge.judge_id,
+                Competition.year,
+                func.count().label("pcs_total"),
+                func.sum(
+                    case((PcsScorePerJudge.thrown_out, 1), else_=0)
+                ).label("pcs_throwouts"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                PcsScorePerJudge.is_rule_error,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("pcs_anomalies"),
+                func.sum(
+                    case((PcsScorePerJudge.is_rule_error, 1), else_=0)
+                ).label("pcs_rule_errors"),
+                func.avg(PcsScorePerJudge.deviation).label("pcs_avg_deviation"),
+            )
+            .select_from(PcsScorePerJudge)
+            .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+            .join(Segment, SkaterSegment.segment_id == Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+        )
+        if judge_ids_filter is not None:
+            pcs_q = pcs_q.where(PcsScorePerJudge.judge_id.in_(list(judge_ids_filter)))
+        if seg_discipline_ids is not None:
+            pcs_q = pcs_q.where(Segment.discipline_type_id.in_(seg_discipline_ids))
+        pcs_q = self._filter_select_competition_scope(pcs_q, competition_scope)
+        pcs_q = pcs_q.group_by(PcsScorePerJudge.judge_id, Competition.year)
+
+        elem_q = (
+            select(
+                ElementScorePerJudge.judge_id,
+                Competition.year,
+                func.count().label("elem_total"),
+                func.sum(
+                    case((ElementScorePerJudge.thrown_out, 1), else_=0)
+                ).label("elem_throwouts"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                func.abs(ElementScorePerJudge.deviation) >= 2,
+                                ElementScorePerJudge.is_rule_error,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("elem_anomalies"),
+                func.sum(
+                    case((ElementScorePerJudge.is_rule_error, 1), else_=0)
+                ).label("elem_rule_errors"),
+                func.avg(ElementScorePerJudge.deviation).label("elem_avg_deviation"),
+            )
+            .select_from(ElementScorePerJudge)
+            .join(Element, ElementScorePerJudge.element_id == Element.id)
+            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+            .join(Segment, SkaterSegment.segment_id == Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+        )
+        if judge_ids_filter is not None:
+            elem_q = elem_q.where(
+                ElementScorePerJudge.judge_id.in_(list(judge_ids_filter))
+            )
+        if seg_discipline_ids is not None:
+            elem_q = elem_q.where(Segment.discipline_type_id.in_(seg_discipline_ids))
+        elem_q = self._filter_select_competition_scope(elem_q, competition_scope)
+        elem_q = elem_q.group_by(ElementScorePerJudge.judge_id, Competition.year)
+
+        pcs_rows = self.session.execute(pcs_q).all()
+        elem_rows = self.session.execute(elem_q).all()
+
+        combined: dict = {}
+        for row in pcs_rows:
+            jid, year = row[0], row[1]
+            combined[(jid, year)] = {
+                "pcs": tuple(row[2:7]),
+                "elem": None,
+            }
+        for row in elem_rows:
+            jid, year = row[0], row[1]
+            key = (jid, year)
+            tup = tuple(row[2:7])
+            if key not in combined:
+                combined[key] = {"pcs": None, "elem": tup}
+            else:
+                combined[key]["elem"] = tup
+        return combined
+
+    def _temporal_rows_for_judge_id_set(
+        self,
+        jid_set: set[int],
+        combined: dict,
+        metric: str,
+        score_type: str,
+        judge_row_id: int,
+        judge_combined_name: str,
+    ) -> list:
+        years = sorted({y for (jid, y) in combined if jid in jid_set})
+        out = []
+        for year in years:
+            pcs_parts = []
+            elem_parts = []
+            for jid in jid_set:
+                key = (jid, year)
+                if key not in combined:
+                    continue
+                pr = combined[key]
+                if pr["pcs"]:
+                    pcs_parts.append(pr["pcs"])
+                if pr["elem"]:
+                    elem_parts.append(pr["elem"])
+            pcs_m = self._merge_aggregate_tuple_list(pcs_parts)
+            elem_m = self._merge_aggregate_tuple_list(elem_parts)
+            stats = self._summary_stats_from_aggregate_tuples(pcs_m, elem_m)
+            value = self._metric_value_for_temporal_summary(
+                stats, metric, score_type
+            )
+            if value is None:
+                continue
+            out.append({
+                "judge_id": judge_row_id,
+                "judge_name": judge_combined_name,
+                "time_period": year,
+                "metric_value": round(value, 2),
+                "total_scores": stats["pcs_total_scores"]
+                + stats["element_total_scores"],
+                "pcs_scores": stats["pcs_total_scores"],
+                "element_scores": stats["element_total_scores"],
+            })
+        return out
+
+    @staticmethod
+    def consistency_metrics_from_trends_df(trends_df: pd.DataFrame) -> dict:
+        """Trend/variance metrics from a judge temporal trends dataframe."""
+        if trends_df.empty or len(trends_df) < 2:
+            return {
+                "trend_direction": "insufficient_data",
+                "trend_strength": 0,
+                "consistency_score": 0,
+                "variance": 0,
+                "coefficient_variation": 0,
+                "slope": 0,
+                "p_value": 1.0,
+            }
+
+        values = trends_df["metric_value"].values
+        time_periods = range(len(values))
+
+        try:
+            slope, _intercept, r_value, p_value, _std_err = linregress(
+                time_periods, values
+            )
+        except Exception:
+            slope, r_value, p_value = 0.0, 0.0, 1.0
+
+        if abs(slope) < 0.1:
+            trend_direction = "stable"
+        elif slope > 0:
+            trend_direction = "increasing"
+        else:
+            trend_direction = "decreasing"
+
+        variance = np.var(values)
+        mean_value = np.mean(values)
+        coefficient_variation = (
+            (np.std(values) / mean_value * 100) if mean_value > 0 else 0
+        )
+
+        max_possible_variance = (np.max(values) - np.min(values)) ** 2 / 4
+        consistency_score = (
+            max(0, 100 - (variance / max_possible_variance * 100))
+            if max_possible_variance > 0
+            else 100
+        )
+
+        return {
+            "trend_direction": trend_direction,
+            "trend_strength": abs(r_value),
+            "consistency_score": round(consistency_score, 2),
+            "variance": round(variance, 2),
+            "coefficient_variation": round(coefficient_variation, 2),
+            "slope": round(slope, 4),
+            "p_value": round(p_value, 4),
+        }
+
+    def get_identity_group_consistency_ranking(
+        self,
+        label_to_judge_ids: dict,
+        metric: str = "throwout_rate",
+        score_type: str = "both",
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ) -> pd.DataFrame:
+        """One row per identity group; uses two SQL aggregates total + O(groups) Python."""
+        all_ids: set[int] = set()
+        for jids in label_to_judge_ids.values():
+            all_ids.update(jids)
+        if not all_ids:
+            return pd.DataFrame()
+
+        combined = self._yearly_pcs_elem_combined_map(competition_scope, all_ids)
+
+        first_ids = [jids[0] for jids in label_to_judge_ids.values() if jids]
+        loc_map: dict[int, Optional[str]] = {}
+        if first_ids:
+            for jid, loc in (
+                self.session.query(Judge.id, Judge.location)
+                .filter(Judge.id.in_(first_ids))
+                .all()
+            ):
+                loc_map[int(jid)] = loc
+
+        rows_out = []
+        for judge_name, jids in label_to_judge_ids.items():
+            if not jids:
+                continue
+            jid_set = set(jids)
+            trends_data = self._temporal_rows_for_judge_id_set(
+                jid_set,
+                combined,
+                metric,
+                score_type,
+                jids[0],
+                judge_name,
+            )
+            trends_df = pd.DataFrame(trends_data)
+            if trends_df.empty:
+                continue
+            cm = self.consistency_metrics_from_trends_df(trends_df)
+            j0 = int(jids[0])
+            location = (loc_map.get(j0) if loc_map else None) or "Unknown"
+            rows_out.append(
+                {
+                    "judge_name": judge_name,
+                    "location": location,
+                    "consistency_score": cm["consistency_score"],
+                    "trend_direction": cm["trend_direction"],
+                    "trend_strength": cm["trend_strength"],
+                    "coefficient_variation": cm["coefficient_variation"],
+                    "total_scores": int(trends_df["total_scores"].sum()),
+                    "years_active": len(trends_df),
+                }
+            )
+        return pd.DataFrame(rows_out)
+
+    def get_temporal_trends_data(
+        self,
+        judge_id=None,
+        period="year",
+        metric="throwout_rate",
+        score_type="both",
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
         """Get temporal trends data for judge consistency over time"""
 
-        if period == 'year':
-            time_field = 'year'
-            time_label = 'Year'
-        elif period == 'quarter':
-            # Create quarters from competition dates or use year as fallback
-            time_field = 'year'  # For now, using year as fallback
-            time_label = 'Year'
-        else:  # month
-            time_field = 'year'  # For now, using year as fallback
-            time_label = 'Year'
+        if period == "year":
+            pass  # only period implemented for SQL aggregates
+        elif period == "quarter":
+            pass
+        else:
+            pass
 
         trends_data = []
 
         if judge_id:
-            # Single judge trends over time
-            years = self.session.query(Competition.year).distinct().order_by(Competition.year).all()
+            ids = self.normalize_judge_ids(judge_id)
+            name_parts = []
+            for i in ids:
+                nm = self.session.query(Judge.name).filter(Judge.id == i).scalar()
+                if nm:
+                    name_parts.append(nm)
+            judge_combined = " · ".join(sorted(set(name_parts), key=str.lower))
 
-            for year_tuple in years:
-                year = year_tuple[0]
+            combined = self._yearly_pcs_elem_combined_map(
+                competition_scope, set(ids)
+            )
+            trends_data = self._temporal_rows_for_judge_id_set(
+                set(ids),
+                combined,
+                metric,
+                score_type,
+                ids[0],
+                judge_combined,
+            )
+        else:
+            combined = self._yearly_pcs_elem_combined_map(
+                competition_scope, None
+            )
 
-                # Get data for this judge and year
-                pcs_df = self.get_judge_pcs_stats(judge_id, year, None, None)
-                element_df = self.get_judge_element_stats(judge_id, year, None, None)
-
-                if pcs_df.empty and element_df.empty:
+            year_metrics_map = defaultdict(list)
+            for (_jid, year), parts in combined.items():
+                stats = self._summary_stats_from_aggregate_tuples(
+                    parts["pcs"], parts["elem"]
+                )
+                value = self._metric_value_for_temporal_summary(
+                    stats, metric, score_type
+                )
+                if value is None:
                     continue
+                year_metrics_map[year].append(
+                    {
+                        "value": value,
+                        "total_scores": stats["pcs_total_scores"]
+                        + stats["element_total_scores"],
+                    }
+                )
 
-                stats = self.calculate_judge_summary_stats(pcs_df, element_df)
-
-                # Calculate the requested metric
-                if metric == 'throwout_rate':
-                    if score_type == 'pcs':
-                        value = stats['pcs_throwout_rate']
-                    elif score_type == 'element':
-                        value = stats['element_throwout_rate']
-                    else:  # both
-                        total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                        if total_scores > 0:
-                            total_throwouts = (stats['pcs_throwout_rate'] * stats['pcs_total_scores'] / 100) + \
-                                            (stats['element_throwout_rate'] * stats['element_total_scores'] / 100)
-                            value = (total_throwouts / total_scores) * 100
-                        else:
-                            continue
-                elif metric == 'anomaly_rate':
-                    if score_type == 'pcs':
-                        value = stats['pcs_anomaly_rate']
-                    elif score_type == 'element':
-                        value = stats['element_anomaly_rate']
-                    else:  # both
-                        total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                        if total_scores > 0:
-                            total_anomalies = (stats['pcs_anomaly_rate'] * stats['pcs_total_scores'] / 100) + \
-                                            (stats['element_anomaly_rate'] * stats['element_total_scores'] / 100)
-                            value = (total_anomalies / total_scores) * 100
-                        else:
-                            continue
-                elif metric == 'rule_error_rate':
-                    if score_type == 'pcs':
-                        value = stats['pcs_rule_error_rate']
-                    elif score_type == 'element':
-                        value = stats['element_rule_error_rate']
-                    else:  # both
-                        total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                        if total_scores > 0:
-                            total_rule_errors = (stats['pcs_rule_error_rate'] * stats['pcs_total_scores'] / 100) + \
-                                              (stats['element_rule_error_rate'] * stats['element_total_scores'] / 100)
-                            value = (total_rule_errors / total_scores) * 100
-                        else:
-                            continue
-                else:  # avg_deviation
-                    if score_type == 'pcs':
-                        value = abs(stats['pcs_avg_deviation']) if stats['pcs_total_scores'] > 0 else 0
-                    elif score_type == 'element':
-                        value = abs(stats['element_avg_deviation']) if stats['element_total_scores'] > 0 else 0
-                    else:  # both
-                        total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                        if total_scores > 0:
-                            weighted_avg = (abs(stats['pcs_avg_deviation']) * stats['pcs_total_scores'] + \
-                                          abs(stats['element_avg_deviation']) * stats['element_total_scores']) / total_scores
-                            value = weighted_avg
-                        else:
-                            continue
-
-                # Get judge name
-                judge_name = self.session.query(Judge.name).filter(Judge.id == judge_id).scalar()
+            for year in sorted(year_metrics_map.keys()):
+                year_metrics = year_metrics_map[year]
+                values = [m["value"] for m in year_metrics]
+                total_judges = len(year_metrics)
+                avg_value = float(np.mean(values))
+                median_value = float(np.median(values))
+                std_value = float(np.std(values))
 
                 trends_data.append({
-                    'judge_id': judge_id,
-                    'judge_name': judge_name,
-                    'time_period': year,
-                    'metric_value': round(value, 2),
-                    'total_scores': stats['pcs_total_scores'] + stats['element_total_scores'],
-                    'pcs_scores': stats['pcs_total_scores'],
-                    'element_scores': stats['element_total_scores']
+                    "time_period": year,
+                    "avg_metric_value": round(avg_value, 2),
+                    "median_metric_value": round(median_value, 2),
+                    "std_metric_value": round(std_value, 2),
+                    "total_judges": total_judges,
+                    "total_scores": sum(m["total_scores"] for m in year_metrics),
                 })
-        else:
-            # All judges trends over time (aggregated)
-            judges = self.session.query(Judge.id, Judge.name).all()
-            years = self.session.query(Competition.year).distinct().order_by(Competition.year).all()
-
-            for year_tuple in years:
-                year = year_tuple[0]
-                year_metrics = []
-
-                for judge_id, judge_name in judges:
-                    # Get data for this judge and year
-                    pcs_df = self.get_judge_pcs_stats(judge_id, year, None, None)
-                    element_df = self.get_judge_element_stats(judge_id, year, None, None)
-
-                    if pcs_df.empty and element_df.empty:
-                        continue
-
-                    stats = self.calculate_judge_summary_stats(pcs_df, element_df)
-
-                    # Calculate the requested metric
-                    if metric == 'throwout_rate':
-                        if score_type == 'pcs':
-                            value = stats['pcs_throwout_rate']
-                        elif score_type == 'element':
-                            value = stats['element_throwout_rate']
-                        else:  # both
-                            total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                            if total_scores > 0:
-                                total_throwouts = (stats['pcs_throwout_rate'] * stats['pcs_total_scores'] / 100) + \
-                                                (stats['element_throwout_rate'] * stats['element_total_scores'] / 100)
-                                value = (total_throwouts / total_scores) * 100
-                            else:
-                                continue
-                    elif metric == 'anomaly_rate':
-                        if score_type == 'pcs':
-                            value = stats['pcs_anomaly_rate']
-                        elif score_type == 'element':
-                            value = stats['element_anomaly_rate']
-                        else:  # both
-                            total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                            if total_scores > 0:
-                                total_anomalies = (stats['pcs_anomaly_rate'] * stats['pcs_total_scores'] / 100) + \
-                                                (stats['element_anomaly_rate'] * stats['element_total_scores'] / 100)
-                                value = (total_anomalies / total_scores) * 100
-                            else:
-                                continue
-                    elif metric == 'rule_error_rate':
-                        if score_type == 'pcs':
-                            value = stats['pcs_rule_error_rate']
-                        elif score_type == 'element':
-                            value = stats['element_rule_error_rate']
-                        else:  # both
-                            total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                            if total_scores > 0:
-                                total_rule_errors = (stats['pcs_rule_error_rate'] * stats['pcs_total_scores'] / 100) + \
-                                                  (stats['element_rule_error_rate'] * stats['element_total_scores'] / 100)
-                                value = (total_rule_errors / total_scores) * 100
-                            else:
-                                continue
-                    else:  # avg_deviation
-                        if score_type == 'pcs':
-                            value = abs(stats['pcs_avg_deviation']) if stats['pcs_total_scores'] > 0 else 0
-                        elif score_type == 'element':
-                            value = abs(stats['element_avg_deviation']) if stats['element_total_scores'] > 0 else 0
-                        else:  # both
-                            total_scores = stats['pcs_total_scores'] + stats['element_total_scores']
-                            if total_scores > 0:
-                                weighted_avg = (abs(stats['pcs_avg_deviation']) * stats['pcs_total_scores'] + \
-                                              abs(stats['element_avg_deviation']) * stats['element_total_scores']) / total_scores
-                                value = weighted_avg
-                            else:
-                                continue
-
-                    year_metrics.append({
-                        'judge_id': judge_id,
-                        'judge_name': judge_name,
-                        'value': value,
-                        'total_scores': stats['pcs_total_scores'] + stats['element_total_scores']
-                    })
-
-                if year_metrics:
-                    # Calculate aggregated metrics for this year
-                    values = [m['value'] for m in year_metrics]
-                    total_judges = len(year_metrics)
-                    avg_value = np.mean(values)
-                    median_value = np.median(values)
-                    std_value = np.std(values)
-
-                    trends_data.append({
-                        'time_period': year,
-                        'avg_metric_value': round(avg_value, 2),
-                        'median_metric_value': round(median_value, 2),
-                        'std_metric_value': round(std_value, 2),
-                        'total_judges': total_judges,
-                        'total_scores': sum(m['total_scores'] for m in year_metrics)
-                    })
 
         return pd.DataFrame(trends_data)
 
-    def get_judge_consistency_metrics(self, judge_id, metric='throwout_rate', score_type='both'):
-        """Calculate consistency metrics for a judge over time"""
+    def get_judge_consistency_metrics(
+        self,
+        judge_ids,
+        metric="throwout_rate",
+        score_type="both",
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ):
+        """Consistency metrics over time for one or merged judge identities."""
+        ids = self.normalize_judge_ids(judge_ids)
+        trends_df = self.get_temporal_trends_data(
+            ids,
+            "year",
+            metric,
+            score_type,
+            competition_scope,
+        )
+        return self.consistency_metrics_from_trends_df(trends_df)
 
-        # Get temporal data for this judge
-        trends_df = self.get_temporal_trends_data(judge_id, 'year', metric, score_type)
-
-        if trends_df.empty or len(trends_df) < 2:
-            return {
-                'trend_direction': 'insufficient_data',
-                'trend_strength': 0,
-                'consistency_score': 0,
-                'variance': 0,
-                'coefficient_variation': 0,
-                'slope': 0,
-                'p_value': 1.0
-            }
-
-        # Calculate trend metrics
-        values = trends_df['metric_value'].values
-        time_periods = range(len(values))
-
-        # Linear regression for trend
-        try:
-            slope, intercept, r_value, p_value, std_err = linregress(time_periods, values)
-        except Exception as e:
-            # Handle cases where linregress fails (e.g., all values are the same)
-            slope, r_value, p_value = 0.0, 0.0, 1.0
-
-        # Determine trend direction
-        if abs(slope) < 0.1:
-            trend_direction = 'stable'
-        elif slope > 0:
-            trend_direction = 'increasing'
-        else:
-            trend_direction = 'decreasing'
-
-        # Calculate consistency metrics
-        variance = np.var(values)
-        mean_value = np.mean(values)
-        coefficient_variation = (np.std(values) / mean_value * 100) if mean_value > 0 else 0
-
-        # Consistency score (lower variance = higher consistency)
-        max_possible_variance = (np.max(values) - np.min(values)) ** 2 / 4
-        consistency_score = max(0, 100 - (variance / max_possible_variance * 100)) if max_possible_variance > 0 else 100
-
-        return {
-            'trend_direction': trend_direction,
-            'trend_strength': abs(r_value),
-            'consistency_score': round(consistency_score, 2),
-            'variance': round(variance, 2),
-            'coefficient_variation': round(coefficient_variation, 2),
-            'slope': round(slope, 4),
-            'p_value': round(p_value, 4)
-        }
-
-    def calculate_statistical_significance(self, judge_id, competition_ids=None, discipline_type_ids=None, year_filter=None):
-        """Calculate statistical significance tests for judge bias detection"""
-        from scipy import stats
+    def calculate_statistical_significance(self, judge_ids, competition_ids=None, discipline_type_ids=None, year_filter=None):
+        """Statistical significance tests; judge_ids may be one id or merged identities."""
+        ids = self.normalize_judge_ids(judge_ids)
 
         # Get judge data
-        pcs_df = self.get_judge_pcs_stats(judge_id, year_filter, competition_ids, discipline_type_ids)
-        element_df = self.get_judge_element_stats(judge_id, year_filter, competition_ids, discipline_type_ids)
+        pcs_df = self.get_judge_pcs_stats(ids, year_filter, competition_ids, discipline_type_ids)
+        element_df = self.get_judge_element_stats(ids, year_filter, competition_ids, discipline_type_ids)
 
         if pcs_df.empty and element_df.empty:
             return {
@@ -1512,8 +2691,13 @@ class JudgeAnalytics:
         return pd.DataFrame(bias_summary)
 
     def compare_judge_distributions(self, judge_id_1, judge_id_2, score_type='both'):
-        """Compare two judges' scoring distributions using statistical tests"""
+        """Compare two judges' (or merged identity groups') scoring distributions."""
         from scipy import stats
+
+        ids_1 = self.normalize_judge_ids(judge_id_1)
+        ids_2 = self.normalize_judge_ids(judge_id_2)
+        if not ids_1 or not ids_2:
+            return {}
 
         # Initialize dataframes
         pcs_df_1 = pd.DataFrame()
@@ -1523,12 +2707,12 @@ class JudgeAnalytics:
 
         # Get data for both judges
         if score_type in ['pcs', 'both']:
-            pcs_df_1 = self.get_judge_pcs_stats(judge_id_1)
-            pcs_df_2 = self.get_judge_pcs_stats(judge_id_2)
+            pcs_df_1 = self.get_judge_pcs_stats(ids_1)
+            pcs_df_2 = self.get_judge_pcs_stats(ids_2)
 
         if score_type in ['element', 'both']:
-            element_df_1 = self.get_judge_element_stats(judge_id_1)
-            element_df_2 = self.get_judge_element_stats(judge_id_2)
+            element_df_1 = self.get_judge_element_stats(ids_1)
+            element_df_2 = self.get_judge_element_stats(ids_2)
 
         comparison_results = {}
 

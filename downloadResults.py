@@ -719,6 +719,10 @@ def scrape(
     use_html=True,
     isFSM=False,
     write_excel=True,
+    qualifying=None,
+    nqs=None,
+    officials_analysis_competition_type_id=None,
+    update_officials_competition_type=False,
 ):
     """
     When ``write_to_database`` is true, each ``public.segment`` row is named from the score
@@ -727,6 +731,15 @@ def scrape(
     successful score parse. If a segment is skipped (e.g. ``event_regex``) but the parsed
     name already matches an existing segment with no ``segment_official`` rows, panel data is
     loaded when available. Index-only labels from ``segment_officials_backfill`` are not used.
+
+    Optional ``qualifying`` / ``nqs`` (default ``None``): when loading into the DB, pass
+    explicit booleans to set competition flags; ``None`` leaves existing rows unchanged on
+    update (new competitions still default both flags to false).
+
+    Optional ``officials_analysis_competition_type_id`` links ``public.competition`` to
+    ``officials_analysis.competition_type``. When ``update_officials_competition_type`` is
+    true, that value is written on update (including ``None`` to clear the link); when false,
+    existing links are left unchanged (used by batch scrapers).
 
     When ``write_excel`` is false, per-event deviation sheets and the final workbook are not
     written (faster when loading the database only). HTTP uses a shared ``requests.Session``;
@@ -769,14 +782,26 @@ def scrape(
         proccessed_segments = []
         if write_to_database:
             competition_id = database_obj.insert_competition(
-                report_name.replace("_", " "), base_url, year
+                report_name.replace("_", " "),
+                base_url,
+                year,
+                qualifying=qualifying,
+                nqs=nqs,
+                officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
             proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
             (start_date, end_date, location) = loadCompetitionInfo(
                 url, session=http_session
             )
             database_obj.updateCompetition(
-                base_url, location=location, start_date=start_date, end_date=end_date
+                base_url,
+                location=location,
+                start_date=start_date,
+                end_date=end_date,
+                qualifying=qualifying,
+                nqs=nqs,
+                officials_analysis_competition_type_id=officials_analysis_competition_type_id,
+                update_officials_competition_type=update_officials_competition_type,
             )
 
         if page_contents:

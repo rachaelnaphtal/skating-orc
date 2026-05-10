@@ -372,21 +372,49 @@ class DatabaseLoader:
         competitions = (self.session.query(Competition).filter(Competition.location == None).all())
         return [competition.results_url for competition in competitions]
     
-    def updateCompetition(self, url, location, start_date, end_date):
+    def updateCompetition(
+        self,
+        url,
+        location,
+        start_date,
+        end_date,
+        *,
+        qualifying=None,
+        nqs=None,
+        officials_analysis_competition_type_id=None,
+        update_officials_competition_type=False,
+    ):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
         existing.location = location
         existing.start_date = start_date
         existing.end_date = end_date
+        if qualifying is not None:
+            existing.qualifying = qualifying
+        if nqs is not None:
+            existing.nqs = nqs
+        if update_officials_competition_type:
+            existing.officials_analysis_competition_type_id = (
+                officials_analysis_competition_type_id
+            )
         self.session.commit()
     
     def getSegmentNamesForCompetition(self, url):
         segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
         return [segment.name for segment in segments]
 
-    def insert_competition(self, name, url, year):
+    def insert_competition(self, name, url, year, qualifying=None, nqs=None, officials_analysis_competition_type_id=None):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
         if not existing:
-            new = Competition(name=name, results_url=url, year=year)
+            q_flag = False if qualifying is None else qualifying
+            n_flag = False if nqs is None else nqs
+            new = Competition(
+                name=name,
+                results_url=url,
+                year=year,
+                qualifying=q_flag,
+                nqs=n_flag,
+                officials_analysis_competition_type_id=officials_analysis_competition_type_id,
+            )
             self.session.add(new)
             self.session.commit()
             return new.id

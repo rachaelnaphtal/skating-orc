@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, ForeignKeyConstraint, Identity, Index, Integer, Numeric, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, ForeignKey, ForeignKeyConstraint, Identity, Index, Integer, Numeric, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import OID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
@@ -27,6 +27,14 @@ class Competition(Base):
     dance: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     synchronized: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     nqs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    officials_analysis_competition_type_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey(
+            "officials_analysis.competition_type.id",
+            name="competition_officials_analysis_competition_type_id_fkey",
+        ),
+        nullable=True,
+    )
     start_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     location: Mapped[Optional[str]] = mapped_column(String)
