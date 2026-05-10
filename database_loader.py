@@ -23,6 +23,23 @@ def _normalize_person_name(name: str | None) -> str:
         return ""
     return " ".join(name.lower().split()).strip()
 
+
+def _competition_flags_from_discipline_type_name(
+    name: str | None,
+) -> tuple[bool, bool, bool, bool]:
+    """
+    Map ``discipline_type.name`` (as stored for segments) to competition booleans
+    ``(singles, pairs, dance, synchronized)``.
+    """
+    if not name or not str(name).strip():
+        return False, False, False, False
+    key = str(name).strip().lower()
+    singles = key == "singles"
+    pairs = key == "pairs"
+    dance = key in ("ice dance", "solo dance")
+    synchronized = key == "synchronized"
+    return singles, pairs, dance, synchronized
+
 # Initialize connection.
 # conn = st.connection("postgresql", type="sql")
 
@@ -397,6 +414,43 @@ class DatabaseLoader:
                 officials_analysis_competition_type_id
             )
         self.session.commit()
+
+    def refresh_competition_discipline_flags(self, competition_id: int) -> None:
+        """
+        Set ``competition.singles`` / ``pairs`` / ``dance`` / ``synchronized`` from distinct
+        segment discipline types for this competition (no ``commit``).
+        """
+        rows = (
+            self.session.query(DisciplineType.name)
+            .join(Segment, Segment.discipline_type_id == DisciplineType.id)
+            .filter(
+                Segment.competition_id == competition_id,
+                Segment.discipline_type_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        singles = pairs = dance = synchronized = False
+        for (name,) in rows:
+            s, p, d, sy = _competition_flags_from_discipline_type_name(name)
+            singles |= s
+            pairs |= p
+            dance |= d
+            synchronized |= sy
+        comp = self.session.query(Competition).filter_by(id=competition_id).first()
+        if comp:
+            comp.singles = singles
+            comp.pairs = pairs
+            comp.dance = dance
+            comp.synchronized = synchronized
+
+    def refresh_all_competition_discipline_flags(self) -> int:
+        """Recompute discipline flags for every competition; ``commit`` once. Returns row count."""
+        ids = [int(r[0]) for r in self.session.query(Competition.id).all()]
+        for cid in ids:
+            self.refresh_competition_discipline_flags(cid)
+        self.session.commit()
+        return len(ids)
     
     def getSegmentNamesForCompetition(self, url):
         segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
@@ -436,6 +490,12 @@ class DatabaseLoader:
             type = "Showcase"
         elif "team" in segment_name.lower():
             type="Synchronized"
+        elif "synchronized" in segment_name.lower():
+            type="Synchronized"
+        elif "unified" in segment_name.lower():
+            type="Synchronized"
+        elif "elite" in segment_name.lower():
+            type="Synchronized"
         elif "choreographic excercise" in segment_name.lower():
             type="Theater On Ice"
 
@@ -455,11 +515,13 @@ class DatabaseLoader:
             new = Segment(name=segment_name, competition_id=competition_id, freeskate=is_freeskate, discipline_type_id=discipline_type_id)
             self.session.add(new)
             self._flush()
+            self.refresh_competition_discipline_flags(competition_id)
             self.session.commit()
             return new.id
         existing.discipline_type_id = discipline_type_id
         existing.freeskate = is_freeskate
         self._flush()
+        self.refresh_competition_discipline_flags(competition_id)
         self.session.commit()
         return existing.id
 
