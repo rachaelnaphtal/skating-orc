@@ -48,7 +48,6 @@ def _build_review_table(
     for j in judges:
         jid = int(j["id"])
         name = j.get("name") or ""
-        loc = j.get("location") or ""
         best = core.suggest_matches(name, labels, top=1, min_score=0.0)
         if best:
             oid, sc, lbl = best[0]
@@ -66,7 +65,6 @@ def _build_review_table(
             {
                 "judge_id": jid,
                 "protocol_name": name,
-                "location": loc,
                 "match_score": score,
                 "directory_name": directory_name,
                 "directory_official": directory_official,
@@ -93,6 +91,35 @@ def _filter_official_select_options(
         if p and p not in out:
             out.append(p)
     return [""] + sorted(set(out), key=str.casefold)
+
+
+def _build_outside_bulk_table(
+    judges: list[dict],
+    labels: dict[int, str],
+) -> pd.DataFrame:
+    """Checkboxes + minimal columns for bulk ``outside_directory`` marking."""
+    rows_out: list[dict] = []
+    for j in judges:
+        jid = int(j["id"])
+        name = j.get("name") or ""
+        best = core.suggest_matches(name, labels, top=1, min_score=0.0)
+        if best:
+            _oid, sc, lbl = best[0]
+            score = round(float(sc), 1)
+            suggested = lbl
+        else:
+            score = 0.0
+            suggested = ""
+        rows_out.append(
+            {
+                "mark_outside": False,
+                "judge_id": jid,
+                "protocol_name": name,
+                "suggested": suggested,
+                "match_score": score,
+            }
+        )
+    return pd.DataFrame(rows_out)
 
 
 def render_judge_official_matcher(*, embedded: bool = False) -> None:
@@ -150,10 +177,79 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         st.info("No unmapped judges — everyone has a row in `judge_official_link`.")
         st.stop()
 
+    workflow = st.radio(
+        "Workflow",
+        ("Review & link", "Bulk mark outside"),
+        horizontal=True,
+        help="Bulk mode: tick judges who are not in the US directory (e.g. international), then apply once.",
+    )
+
+    if workflow == "Bulk mark outside":
+        st.subheader("Mark non–US directory judges")
+        st.write(
+            "Tick **Outside** for everyone who should stop getting US roster fuzzy matches, "
+            "then **Apply outside marks**. (Uncheck mistakes before applying.)"
+        )
+        df_out = _build_outside_bulk_table(judges, labels)
+        edited_out = st.data_editor(
+            df_out,
+            column_config={
+                "mark_outside": st.column_config.CheckboxColumn(
+                    "Outside",
+                    help="Mark this protocol judge as outside the US directory.",
+                    default=False,
+                ),
+                "judge_id": st.column_config.NumberColumn("ID", disabled=True, width="small", format="%d"),
+                "protocol_name": st.column_config.TextColumn(
+                    "Protocol name",
+                    disabled=True,
+                    width="medium",
+                ),
+                "suggested": st.column_config.TextColumn(
+                    "Suggested",
+                    disabled=True,
+                    width="medium",
+                    help="Best fuzzy match to a US directory name (for context).",
+                ),
+                "match_score": st.column_config.NumberColumn(
+                    "Match",
+                    disabled=True,
+                    width="small",
+                    help="Fuzzy score for the suggested directory row.",
+                    format="%.0f",
+                ),
+            },
+            hide_index=True,
+            num_rows="fixed",
+            width="stretch",
+            key="outside_bulk_editor",
+        )
+        n_marked = int(edited_out["mark_outside"].fillna(False).astype(bool).sum())
+        if st.button(
+            f"Apply: mark {n_marked} selected as outside directory",
+            type="primary",
+            disabled=n_marked == 0,
+        ):
+            applied = 0
+            eng = _engine()
+            for _, row in edited_out.iterrows():
+                if not bool(row.get("mark_outside")):
+                    continue
+                core.upsert_outside(
+                    eng,
+                    int(row["judge_id"]),
+                    note="matcher: outside directory (bulk)",
+                )
+                applied += 1
+            st.session_state["_matcher_flash"] = f"Marked **{applied}** judge(s) as outside directory."
+            _official_labels.clear()
+            st.rerun()
+        st.stop()
+
     st.subheader("Review and apply")
     st.write(
         "Each row is a protocol name with the **best fuzzy match** to the directory. "
-        "Choose the **directory official** (search names in the sidebar filter), set **decision**, "
+        "Choose the **directory official** (sidebar filter narrows the list), set **decision**, "
         "then **Apply decisions in table**."
     )
 
@@ -199,21 +295,35 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
     edited = st.data_editor(
         df,
         column_config={
-            "judge_id": st.column_config.NumberColumn("Judge ID", disabled=True, format="%d"),
-            "protocol_name": st.column_config.TextColumn("Protocol name", disabled=True, width="large"),
-            "location": st.column_config.TextColumn("Protocol location", disabled=True),
-            "match_score": st.column_config.NumberColumn("Best match score", disabled=True, format="%.1f"),
-            "directory_name": st.column_config.TextColumn("Directory (suggested)", disabled=True, width="large"),
+            "judge_id": st.column_config.NumberColumn("ID", disabled=True, width="small", format="%d"),
+            "protocol_name": st.column_config.TextColumn(
+                "Protocol name",
+                disabled=True,
+                width="medium",
+            ),
+            "match_score": st.column_config.NumberColumn(
+                "Match",
+                disabled=True,
+                width="small",
+                format="%.0f",
+            ),
+            "directory_name": st.column_config.TextColumn(
+                "Suggested",
+                disabled=True,
+                width="medium",
+            ),
             "directory_official": st.column_config.SelectboxColumn(
-                "Directory official",
-                help="Directory entry to link (same strings as US roster names; duplicate names show · id …).",
+                "Directory pick",
+                help="Directory entry to link (duplicate names show · id …).",
                 options=select_options,
                 required=False,
+                width="medium",
             ),
             "decision": st.column_config.SelectboxColumn(
                 "Decision",
                 options=["Skip", "Link", "Outside"],
                 required=True,
+                width="small",
             ),
         },
         hide_index=True,
