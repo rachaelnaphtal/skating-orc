@@ -42,6 +42,20 @@ class Competition(Base):
     segment: Mapped[List['Segment']] = relationship('Segment', back_populates='competition')
 
 
+class CompetitionType(Base):
+    """``officials_analysis.competition_type`` — target of ``Competition.officials_analysis_competition_type_id``."""
+
+    __tablename__ = 'competition_type'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='competition_type_pkey'),
+        {'schema': 'officials_analysis'}
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+
+
 class DisciplineType(Base):
     __tablename__ = 'discipline_type'
     __table_args__ = (
