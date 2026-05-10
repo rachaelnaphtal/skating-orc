@@ -2140,28 +2140,22 @@ elif page == "Panel benchmarks":
     st.header("Panel benchmarks")
     st.caption(
         "Rates by **discipline** (segment ``discipline_type``) and **panel size** "
-        "(number of judges on that element or PCS line). **Anomalies**: PCS uses "
+        "(number of judges on that element or PCS line). Competitions are filtered by **linked "
+        "officials competition type** (same scopes as Cross-Judge benchmarks). **Anomalies**: PCS uses "
         "|deviation| ≥ 1.5 or rule error; elements use |deviation| ≥ 2.0 or rule error "
         "(same thresholds as judge reports)."
     )
     analytics_bm = get_analytics_safe()
-    use_scope = st.checkbox(
-        "Filter by **officials competition type** (linked to `public.competition`) "
-        "instead of **`competition.qualifying`** flag",
-        value=False,
-        help="When off, only competitions with qualifying=true. When on, use the same "
-        "type-based scope as Cross-Judge benchmarks (requires linked competition type).",
+    scope_label = st.selectbox(
+        "Competition scope",
+        options=list(_COMPETITION_SCOPE_LABELS),
+        index=1,
+        help=(
+            "Same as Cross-Judge benchmarks: filters "
+            "`public.competition` via linked `officials_analysis_competition_type_id`."
+        ),
     )
-    scope_label = "Qualifying only"
-    if use_scope:
-        scope_label = st.selectbox(
-            "Competition scope",
-            options=list(_COMPETITION_SCOPE_LABELS),
-            index=1,
-            help="Mapped via `officials_analysis_competition_type_id` on each competition row.",
-        )
-    scope_key = _competition_scope_key(scope_label) if use_scope else COMPETITION_SCOPE_ALL
-    filter_mode = "officials_scope" if use_scope else "db_qualifying"
+    scope_key = _competition_scope_key(scope_label)
 
     metric_labels = st.multiselect(
         "Metrics",
@@ -2194,7 +2188,7 @@ elif page == "Panel benchmarks":
         with st.spinner("Querying scores…"):
             df_bm = analytics_bm.get_panel_score_benchmarks(
                 metrics=metric_keys,
-                competition_filter_mode=filter_mode,
+                competition_filter_mode="officials_scope",
                 competition_scope=scope_key,
                 year_filters=year_pick if year_pick else None,
                 min_panel_size=int(min_panel),
@@ -2202,8 +2196,8 @@ elif page == "Panel benchmarks":
             )
         if df_bm.empty:
             st.info(
-                "No rows returned. Check competition filters, linked officials types (if used), "
-                "segment disciplines, and panel size range."
+                "No rows returned. Check competition scope (linked officials types), "
+                "segment disciplines, year filter, and panel size range."
             )
         else:
             st.subheader("Summary table")

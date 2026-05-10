@@ -8,11 +8,13 @@ REPORT_FEEDBACK_EMAIL = "xyx@email.com"
 # Tooltip copy for summary stat cards (embedded as HTML text, escaped).
 TOOLTIP_THROWOUT_RATE = html_module.escape(
     "This is the percentage of time that you are the high or low of the panel. "
-    "If at least three judges give the same score then it will not count as thrown out.",
+    "If at least three judges give the same score then it will not count as thrown out. "
+    "Most judges overall tend to average between about 25% and 35%..",
 )
 TOOLTIP_ANOMALY_RATE = html_module.escape(
     "Anomalies are scores that are >=2 away from the panel average for GOEs "
-    "and >=1.5 away from the panel average for PCS.",
+    "and >=1.5 away from the panel average for PCS. "
+    "Across judges, typical anomaly rates average under 1%.",
 )
 TOOLTIP_RULE_ERROR_RATE = html_module.escape(
     "Marks flagged as impossible under the published judging guidelines for the segment.",
@@ -43,8 +45,8 @@ def _report_instructions_html():
   <p><strong>We recommend prioritizing analysis as follows:</strong></p>
   <ul>
     <li><strong>Rule Error Rate:</strong> These represent marks that are not possible based on the judging guidelines (i.e., NHT -5 for a +COMBO in a Singles Short Program). Minimizing Rule Errors is critical to build trust and confidence in our judging panels.</li>
-    <li><strong>Anomaly Rate:</strong> These represent marks considered potential errors in marking guideline application.</li>
-    <li><strong>Throw Out Rate:</strong> These represent marks that are not considered potential errors but help assess where you may be too lenient or critical in marking guideline applications.</li>
+    <li><strong>Anomaly Rate:</strong> These represent marks considered potential errors in marking guideline application. Across judges, typical anomaly percentages average under 1%.</li>
+    <li><strong>Throw Out Rate:</strong> These represent marks that are not considered potential errors but help assess where you may be too lenient or critical in marking guideline applications. Most judges overall tend to average between about 25% and 35%; rates can be affected by panel sizes.</li>
   </ul>
   <p>Use the <strong>Element Breakdown</strong> and <strong>Segment Statistics</strong> tabs to identify patterns of Rule Errors, Anomalies and Throw Outs. This will help you narrow your focus for continuous learning.</p>
   <p>Use the <strong>Element Details</strong> and <strong>PCS Details</strong> tabs to pinpoint exact competitors, elements and components for targeted reflection.</p>
