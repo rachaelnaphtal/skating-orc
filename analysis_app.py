@@ -18,6 +18,7 @@ from officials_competition_types import (
     COMPETITION_SCOPE_NQS,
     COMPETITION_SCOPE_QUALIFYING,
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
+    OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING,
     competition_load_flags_from_officials_type_id,
     format_officials_competition_type_select_label,
 )
@@ -104,18 +105,25 @@ def _streamlit_safe_judge_pivot_display(grid: pd.DataFrame) -> pd.DataFrame:
 # Main title
 st.title("⛸️ Figure Skating Judge Performance Analytics")
 
-# Navigation
+# Navigation (paths relative to this file so cwd does not hide "Load Competition")
 import os as _os
+
+_REPO_ROOT = _os.path.dirname(_os.path.abspath(__file__))
+_DOWNLOAD_RESULTS_PY = _os.path.join(_REPO_ROOT, "downloadResults.py")
 _nav_pages = [
     "Individual Judge Analysis",
     "Cross-Judge Benchmarking",     "Temporal Trend Analysis",
     "Panel benchmarks",
     "Rule Errors Analysis", "Competition Analysis",
 ]
-if _os.path.exists("downloadResults.py"):
+if _os.path.isfile(_DOWNLOAD_RESULTS_PY):
     _nav_pages.append("Load Competition")
 
-page = st.sidebar.selectbox("Select Analysis Type", _nav_pages)
+page = st.sidebar.selectbox(
+    "Select Analysis Type",
+    _nav_pages,
+    key="primary_nav_page",
+)
 
 
 def _individual_judge_protocol_competition_pairs(
@@ -2259,165 +2267,169 @@ elif page == "Load Competition":
     _spec = _ilu.find_spec("downloadResults")
     if _spec is None:
         st.error(
-            "`downloadResults.py` was not found in the project folder. "
-            "Please upload or place it here before using this page."
+            "`downloadResults` module was not found on ``sys.path`` (expected next to this app: "
+            f"``{_DOWNLOAD_RESULTS_PY!s}``)."
         )
-        st.stop()
-
-    # ── Basic fields ────────────────────────────────────────────────────────
-    base_url = st.text_input(
-        "Competition URL",
-        placeholder="https://ijs.usfigureskating.org/leaderboard/results/2026/34238/index.asp",
-    )
-    report_name = st.text_input(
-        "Competition Name",
-        placeholder="2026 US Synchronized Skating Championships",
-    )
-    year = st.text_input(
-        "Season year code",
-        value="2526",
-        help="e.g. 2526 for the 2025-26 season, 2425 for 2024-25",
-    )
-    _load_analytics = get_analytics_safe()
-    _oa_types = _load_analytics.get_officials_analysis_competition_types()
-    if not _oa_types:
-        st.error(
-            "No **officials_analysis.competition_type** rows found. Import activity or directory "
-            "data first, then load competitions."
+    else:
+        # ── Basic fields ────────────────────────────────────────────────────────
+        base_url = st.text_input(
+            "Competition URL",
+            placeholder="https://ijs.usfigureskating.org/leaderboard/results/2026/34238/index.asp",
         )
-        st.stop()
-
-    _oa_ids_sorted = sorted(tid for tid, _ in _oa_types)
-
-    def _fmt_oa_competition_type(opt_id: int) -> str:
-        tname = next((n for tid, n in _oa_types if tid == opt_id), "")
-        return format_officials_competition_type_select_label(opt_id, tname or None)
-
-    load_oa_competition_type_id = st.selectbox(
-        "Officials competition type",
-        options=_oa_ids_sorted,
-        format_func=_fmt_oa_competition_type,
-        help=(
-            "Required. Links to ``officials_analysis.competition_type`` (SPD vs SYS sectionals "
-            "are grouped in the label). Qualifying/NQS flags are set from this id."
-        ),
-        key="load_competition_officials_analysis_ct",
-    )
-    load_oa_competition_type_id = int(load_oa_competition_type_id)
-    load_qualifying, load_nqs = competition_load_flags_from_officials_type_id(
-        load_oa_competition_type_id
-    )
-    st.caption(
-        f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs} "
-        "(nonqualifying id 11 → qualifying false; National Qualifying Series id 10 → nqs true)."
-    )
-    # pdf_folder = st.text_input(
-    #     "PDF output folder (leave blank if not saving PDFs)",
-    #     value="",
-    #     placeholder="/path/to/pdfs",
-    # )
-
-    # ── Advanced options ─────────────────────────────────────────────────────
-    with st.expander("Advanced options"):
-        load_ev_levels = st.multiselect(
-            "Quick filter: event level (in segment/event name)",
-            list(LEVEL_CHOICES),
-            default=[],
-            help=(
-                "Case-insensitive on the segment label. **Senior** also matches *Championship* "
-                "(e.g. ``CHAMPIONSHIP_ICE_DANCE_…``). Leave empty and leave custom regex blank for all events."
-            ),
+        report_name = st.text_input(
+            "Competition Name",
+            placeholder="2026 US Synchronized Skating Championships",
         )
-        load_ev_disciplines = st.multiselect(
-            "Quick filter: discipline (in segment/event name)",
-            list(DISCIPLINE_CHOICES),
-            default=[],
-            help=(
-                "Singles uses Women/Men/Ladies-style tokens; Pairs; Dance (Ice Dance, etc.). "
-                "Case-insensitive. Combined with level presets, an event must match both groups."
-            ),
+        year = st.text_input(
+            "Season year code",
+            value="2526",
+            help="e.g. 2526 for the 2025-26 season, 2425 for 2024-25",
         )
-        event_regex_custom = st.text_input(
-            "Custom event regex (optional)",
-            value="",
-            help=(
-                "If set, **replaces** the quick filters above. Only events matching this regex "
-                "are processed (``re.match`` on the parsed label). Prefix with ``(?i)`` for "
-                "case-insensitivity. Leave blank to use quick filters only."
-            ),
-        )
-        judge_filter = st.text_area(
-            "Judge filter (optional)",
-            value="",
-            height=80,
-            placeholder="Exact panel names — comma, semicolon, or newline separated.",
-            help=(
-                "Limits deviation / error reporting to these judges only (exact match to names "
-                "on the protocol). Separate multiple names with commas, semicolons, or new lines. "
-                "Leave blank for all judges."
-            ),
-        )
-        specific_exclude = st.text_input(
-            "Specific exclude",
-            value="",
-            help="Exclude specific events matching this string.",
-        )
-        only_rule_errors = st.checkbox("Only rule errors", value=False)
-        # add_additional_analysis = st.checkbox("Add additional analysis", value=False)
-        # use_html = st.checkbox("Use HTML mode", value=True)
-        # isFSM = st.checkbox("Is FSM competition", value=False)
-
-    st.markdown("---")
-
-    if st.button("Run", type="primary"):
-        if not base_url.strip():
-            st.error("Please enter a Competition URL.")
-        elif not report_name.strip():
-            st.error("Please enter a Report name.")
+        _load_analytics = get_analytics_safe()
+        _oa_types = _load_analytics.get_officials_analysis_competition_types()
+        if not _oa_types:
+            st.error(
+                "No **officials_analysis.competition_type** rows found. Import activity or directory "
+                "data first, then load competitions."
+            )
         else:
-            import importlib as _il
-            _mod = _il.import_module("downloadResults")
-            scrape_fn = getattr(_mod, "scrape")
-            isFSM = not base_url.strip().endswith("index.asp")
-            url=base_url.strip().replace("/index.asp", "").replace("/index.htm", "")
-            if url.endswith('/'):
-                url = url[:-1]
-
-            event_regex = effective_event_regex(
-                event_regex_custom, load_ev_levels, load_ev_disciplines
+            _oa_ids_sorted = sorted(tid for tid, _ in _oa_types)
+            _default_oa_index = (
+                _oa_ids_sorted.index(OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING)
+                if OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING in _oa_ids_sorted
+                else 0
             )
 
-            kwargs = dict(
-                base_url=url,
-                report_name=report_name.strip(),
-                event_regex=event_regex,
-                only_rule_errors=only_rule_errors,
-                use_gcp=False,
-                write_excel=False,
-                write_to_database=True,
-                year=year.strip(),
-                judge_filter=judge_filter.strip(),
-                specific_exclude=specific_exclude.strip(),
-                use_html=True,
-                isFSM=isFSM,
-                qualifying=load_qualifying,
-                nqs=load_nqs,
-                officials_analysis_competition_type_id=load_oa_competition_type_id,
-                update_officials_competition_type=True,
-            )
+            def _fmt_oa_competition_type(opt_id: int) -> str:
+                tname = next((n for tid, n in _oa_types if tid == opt_id), "")
+                return format_officials_competition_type_select_label(opt_id, tname or None)
 
-            status_area = st.empty()
-            status_area.info("Running scrape — this may take a minute or two…")
-            try:
-                scrape_fn(**kwargs)
-                status_area.success(
-                    f"Done! **{report_name.strip()}** has been imported into the database."
+            load_oa_competition_type_id = st.selectbox(
+                "Officials competition type",
+                options=_oa_ids_sorted,
+                index=_default_oa_index,
+                format_func=_fmt_oa_competition_type,
+                help=(
+                    "Required. Links to ``officials_analysis.competition_type`` (SPD vs SYS sectionals "
+                    "are grouped in the label). Qualifying/NQS flags are set from this id."
+                ),
+                key="load_competition_officials_analysis_ct",
+            )
+            load_oa_competition_type_id = int(load_oa_competition_type_id)
+            load_qualifying, load_nqs = competition_load_flags_from_officials_type_id(
+                load_oa_competition_type_id
+            )
+            st.caption(
+                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs} "
+                "(nonqualifying id 11 → qualifying false; National Qualifying Series id 10 → nqs true)."
+            )
+            # pdf_folder = st.text_input(
+            #     "PDF output folder (leave blank if not saving PDFs)",
+            #     value="",
+            #     placeholder="/path/to/pdfs",
+            # )
+
+            # ── Advanced options ─────────────────────────────────────────────────────
+            with st.expander("Advanced options"):
+                load_ev_levels = st.multiselect(
+                    "Quick filter: event level (in segment/event name)",
+                    list(LEVEL_CHOICES),
+                    default=[],
+                    help=(
+                        "Case-insensitive on the segment label. **Senior** also matches *Championship* "
+                        "(e.g. ``CHAMPIONSHIP_ICE_DANCE_…``). Leave empty and leave custom regex blank for all events."
+                    ),
                 )
-                st.cache_resource.clear()
-            except Exception as _exc:
-                status_area.error(f"Scrape failed: {_exc}")
-                with st.expander("Error details (traceback)", expanded=False):
-                    st.code(traceback.format_exc(), language="python")
+                load_ev_disciplines = st.multiselect(
+                    "Quick filter: discipline (in segment/event name)",
+                    list(DISCIPLINE_CHOICES),
+                    default=[],
+                    help=(
+                        "Singles uses Women/Men/Ladies-style tokens; Pairs; Dance (Ice Dance, etc.). "
+                        "Case-insensitive. Combined with level presets, an event must match both groups."
+                    ),
+                )
+                event_regex_custom = st.text_input(
+                    "Custom event regex (optional)",
+                    value="",
+                    help=(
+                        "If set, **replaces** the quick filters above. Only events matching this regex "
+                        "are processed (``re.match`` on the parsed label). Prefix with ``(?i)`` for "
+                        "case-insensitivity. Leave blank to use quick filters only."
+                    ),
+                )
+                judge_filter = st.text_area(
+                    "Judge filter (optional)",
+                    value="",
+                    height=80,
+                    placeholder="Exact panel names — comma, semicolon, or newline separated.",
+                    help=(
+                        "Limits deviation / error reporting to these judges only (exact match to names "
+                        "on the protocol). Separate multiple names with commas, semicolons, or new lines. "
+                        "Leave blank for all judges."
+                    ),
+                )
+                specific_exclude = st.text_input(
+                    "Specific exclude",
+                    value="",
+                    help="Exclude specific events matching this string.",
+                )
+                only_rule_errors = st.checkbox("Only rule errors", value=False)
+                # add_additional_analysis = st.checkbox("Add additional analysis", value=False)
+                # use_html = st.checkbox("Use HTML mode", value=True)
+                # isFSM = st.checkbox("Is FSM competition", value=False)
+
+            st.markdown("---")
+
+            if st.button("Run", type="primary"):
+                if not base_url.strip():
+                    st.error("Please enter a Competition URL.")
+                elif not report_name.strip():
+                    st.error("Please enter a Report name.")
+                else:
+                    import importlib as _il
+                    _mod = _il.import_module("downloadResults")
+                    scrape_fn = getattr(_mod, "scrape")
+                    isFSM = not base_url.strip().endswith("index.asp")
+                    url=base_url.strip().replace("/index.asp", "").replace("/index.htm", "")
+                    if url.endswith('/'):
+                        url = url[:-1]
+
+                    event_regex = effective_event_regex(
+                        event_regex_custom, load_ev_levels, load_ev_disciplines
+                    )
+
+                    kwargs = dict(
+                        base_url=url,
+                        report_name=report_name.strip(),
+                        event_regex=event_regex,
+                        only_rule_errors=only_rule_errors,
+                        use_gcp=False,
+                        write_excel=False,
+                        write_to_database=True,
+                        year=year.strip(),
+                        judge_filter=judge_filter.strip(),
+                        specific_exclude=specific_exclude.strip(),
+                        use_html=True,
+                        isFSM=isFSM,
+                        qualifying=load_qualifying,
+                        nqs=load_nqs,
+                        officials_analysis_competition_type_id=load_oa_competition_type_id,
+                        update_officials_competition_type=True,
+                    )
+
+                    status_area = st.empty()
+                    status_area.info("Running scrape — this may take a minute or two…")
+                    try:
+                        scrape_fn(**kwargs)
+                        status_area.success(
+                            f"Done! **{report_name.strip()}** has been imported into the database."
+                        )
+                        st.cache_resource.clear()
+                    except Exception as _exc:
+                        status_area.error(f"Scrape failed: {_exc}")
+                        with st.expander("Error details (traceback)", expanded=False):
+                            st.code(traceback.format_exc(), language="python")
 
 else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")
@@ -2435,7 +2447,7 @@ This dashboard analyzes figure skating judge performance by examining:
 Use the filters to focus your analysis on specific years, competitions, or discipline types.
 """)
 
-_admin_py = _os.path.join(_os.path.dirname(__file__), "pages", "admin.py")
+_admin_py = _os.path.join(_REPO_ROOT, "pages", "admin.py")
 if _os.path.isfile(_admin_py):
     st.sidebar.markdown("---")
     if st.sidebar.button(

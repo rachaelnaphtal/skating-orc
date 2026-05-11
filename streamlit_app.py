@@ -44,6 +44,11 @@ def add_download_link_gcp(
 
 
 def make_gui():
+    st.set_page_config(
+        page_title="Judging Analysis Report Generation",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     st.title("Judging Analysis Report Generation")
     report_type = st.selectbox(
         "Which type of report do you want?",

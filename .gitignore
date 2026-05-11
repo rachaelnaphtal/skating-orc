@@ -1,8 +1,8 @@
 # macOS
 .DS_Store
 
-# Streamlit local config / secrets
-.streamlit/
+# Streamlit: track ``.streamlit/config.toml`` in git; keep secrets local
+.streamlit/secrets.toml
 
 # Local TLS certs / keys (e.g. dev HTTPS)
 ssl/

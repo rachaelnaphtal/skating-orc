@@ -651,6 +651,8 @@ def create_all_element_dict(judges, elements_per_skater, event_name):
             all_scores = element["Scores"]
             filtered_scores = [
                 score for score in all_scores if score is not None]
+            if not filtered_scores:
+                continue
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
             if len(all_scores) < len(judges):
@@ -700,6 +702,8 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
 
             filtered_scores = [
                 score for score in all_scores if score is not None]
+            if not filtered_scores:
+                continue
             avg = sum(filtered_scores) / len(filtered_scores)
             judgeNumber = 1
             for judge in judges:
@@ -730,6 +734,8 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
 
 def is_score_thrown_out(score, all_scores):
     filtered_scores = [score for score in all_scores if score is not None]
+    if not filtered_scores:
+        return False
     max_panel = max(filtered_scores)
     min_panel = min(filtered_scores)
 
@@ -987,8 +993,9 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
             allScores = element["Scores"]
             filtered_scores = [
                 score for score in allScores if score is not None]
+            if not filtered_scores:
+                continue
             avg = sum(filtered_scores) / len(filtered_scores)
-            judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
                     if judgeNumber < len(judges)+1:
@@ -1025,6 +1032,8 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
             allScores = component["Scores"]
             filtered_scores = [
                 score for score in allScores if score is not None]
+            if not filtered_scores:
+                continue
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
