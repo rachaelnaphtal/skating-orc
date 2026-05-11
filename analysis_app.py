@@ -119,7 +119,18 @@ _nav_pages = [
 if _os.path.isfile(_DOWNLOAD_RESULTS_PY):
     _nav_pages.append("Load Competition")
 
-page = st.sidebar.selectbox(
+# Persisted selectbox state can reference a removed/renamed label after deploy; coerce so the
+# sidebar always stays usable (otherwise Streamlit may error or show an empty/wrong selection).
+if (
+    "primary_nav_page" not in st.session_state
+    or st.session_state.primary_nav_page not in _nav_pages
+):
+    st.session_state.primary_nav_page = _nav_pages[0]
+
+# Use radio, not selectbox: when the last item ("Load Competition") is selected, the native
+# dropdown often scrolls the menu so the first option sits above the visible area — it looks
+# like "Individual Judge Analysis" disappeared even though it is still in the list.
+page = st.sidebar.radio(
     "Select Analysis Type",
     _nav_pages,
     key="primary_nav_page",
@@ -2426,6 +2437,8 @@ elif page == "Load Competition":
                             f"Done! **{report_name.strip()}** has been imported into the database."
                         )
                         st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.session_state.pop("analytics", None)
                     except Exception as _exc:
                         status_area.error(f"Scrape failed: {_exc}")
                         with st.expander("Error details (traceback)", expanded=False):
