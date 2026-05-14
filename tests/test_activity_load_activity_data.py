@@ -58,3 +58,17 @@ def test_build_engine_uses_postgres_search_path(monkeypatch):
     assert captured["kwargs"]["connect_args"] == {
         "options": "-csearch_path=officials_analysis"
     }
+
+
+def test_get_appointments_by_achieved_date_range_empty_when_end_before_start():
+    from datetime import date
+
+    df = load_activity_data.get_appointments_by_achieved_date_range(
+        date(2026, 1, 10), date(2026, 1, 1), active_only=True
+    )
+    assert df.empty
+
+
+def test_get_appointments_by_achieved_date_range_none_dates():
+    df = load_activity_data.get_appointments_by_achieved_date_range(None, None)
+    assert df.empty

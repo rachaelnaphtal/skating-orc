@@ -1846,6 +1846,84 @@ def get_official_appointment_rows(official_id: int):
     )
 
 
+def get_appointments_by_achieved_date_range(
+    start_date,
+    end_date,
+    *,
+    active_only: bool = True,
+) -> pd.DataFrame:
+    """Directory rows where ``achieved_date`` is on or between ``start_date`` and ``end_date`` (inclusive).
+
+    Rows with NULL ``achieved_date`` are excluded. Returns one row per appointment with
+    official and appointment attributes for reporting.
+    """
+    from datetime import date as date_type
+
+    cols = [
+        "official_id",
+        "full_name",
+        "mbr_number",
+        "appointment_type",
+        "discipline",
+        "level",
+        "appointed_date",
+        "achieved_date",
+        "active",
+        "mentor",
+    ]
+    if start_date is None or end_date is None:
+        return pd.DataFrame(columns=cols)
+    if isinstance(start_date, datetime):
+        start_date = start_date.date()
+    if isinstance(end_date, datetime):
+        end_date = end_date.date()
+    if not isinstance(start_date, date_type) or not isinstance(end_date, date_type):
+        return pd.DataFrame(columns=cols)
+    if end_date < start_date:
+        return pd.DataFrame(columns=cols)
+
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Officials.id.label("official_id"),
+                Officials.full_name,
+                Officials.mbr_number,
+                AppointmentTypes.name.label("appointment_type"),
+                Disciplines.name.label("discipline"),
+                Levels.name.label("level"),
+                Appointments.appointed_date,
+                Appointments.achieved_date,
+                Appointments.active,
+                Appointments.mentor,
+            )
+            .select_from(Appointments)
+            .join(Officials, Appointments.official_id == Officials.id)
+            .join(
+                AppointmentTypes,
+                Appointments.appointment_type_id == AppointmentTypes.id,
+            )
+            .outerjoin(Disciplines, Appointments.discipline_id == Disciplines.id)
+            .outerjoin(Levels, Appointments.level_id == Levels.id)
+            .where(
+                Appointments.achieved_date.isnot(None),
+                Appointments.achieved_date >= start_date,
+                Appointments.achieved_date <= end_date,
+            )
+        )
+        if active_only:
+            stmt = stmt.where(Appointments.active.is_(True))
+        stmt = stmt.order_by(
+            Appointments.achieved_date.asc(),
+            Officials.full_name.asc().nulls_last(),
+            AppointmentTypes.name.asc(),
+        )
+        rows = session.execute(stmt).all()
+    return pd.DataFrame(
+        rows,
+        columns=cols,
+    )
+
+
 def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFrame:
     """
     One row per ``segment_official`` entry for this directory ``official_id``,

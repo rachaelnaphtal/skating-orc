@@ -33,6 +33,7 @@ from load_activity_data import (
     activity_database_is_postgresql,
     NQS_REPORT_LEVEL_FILTER_BY_LABEL,
     SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL,
+    get_appointments_by_achieved_date_range,
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, or_, select
@@ -43,7 +44,7 @@ from officials_analysis_models import (
     Assignment,
 )
 import pandas as pd
-from datetime import datetime
+from datetime import date, datetime
 
 engine = get_engine()
 
@@ -527,6 +528,7 @@ REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
 REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
 REPORT_NQS_DETAILED = "NQS detailed activity"
 REPORT_SYNCHRO_ACTIVITY = "Synchro Activity"
+REPORT_APPOINTMENTS_BY_ACHIEVED_DATE = "Appointments by achieved date"
 
 # Shown as column header help when the NQS pivot includes season column 2122.
 NQS_COLUMN_2122_HELP = (
@@ -544,6 +546,7 @@ report_mode = st.radio(
         REPORT_COMPETITION_ASSIGNMENTS,
         REPORT_NQS_DETAILED,
         REPORT_SYNCHRO_ACTIVITY,
+        REPORT_APPOINTMENTS_BY_ACHIEVED_DATE
     ],
     horizontal=True,
 )
@@ -579,6 +582,13 @@ def load_appt_data_date():
             select(sqlfunc.max(Appointments.achieved_date))
         ).scalar()
     return result
+
+
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
+def load_appointments_achieved_date_report(start_d, end_d, active_only: bool):
+    return get_appointments_by_achieved_date_range(
+        start_d, end_d, active_only=active_only
+    )
 
 
 @st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
@@ -840,6 +850,315 @@ else:
     include_lower_levels = None
 
 st.divider()
+
+
+if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
+    st.subheader("Appointments by achieved date")
+    st.caption(
+        "Uses **achieved date** on each directory appointment row. "
+        "Appointments with no achieved date are excluded. "
+        "Each row is one appointment (same official may appear multiple times)."
+    )
+    _today = date.today()
+    _default_start = date(_today.year, 1, 1)
+    c_a, c_b, c_c = st.columns(3)
+    with c_a:
+        appt_start = st.date_input(
+            "Achieved date from",
+            value=_default_start,
+            key="appt_achieved_start",
+        )
+    with c_b:
+        appt_end = st.date_input(
+            "Achieved date through",
+            value=_today,
+            key="appt_achieved_end",
+        )
+    with c_c:
+        appt_active_only = st.checkbox(
+            "Active appointments only",
+            value=True,
+            key="appt_achieved_active_only",
+            help="When checked, only rows with active = true in the directory.",
+        )
+
+    if appt_end < appt_start:
+        st.error("The end date must be on or after the start date.")
+        st.stop()
+
+    raw_appt = load_appointments_achieved_date_report(
+        appt_start, appt_end, appt_active_only
+    )
+
+    st.markdown(
+        f"**{len(raw_appt)} appointment(s)** in range "
+        f"**{appt_start.isoformat()}** → **{appt_end.isoformat()}** "
+        f"({'active only' if appt_active_only else 'including inactive'})."
+    )
+
+    if raw_appt.empty:
+        st.info("No appointments in this date range for the selected filters.")
+    else:
+        _types_opts = sorted(
+            raw_appt["appointment_type"].dropna().astype(str).unique(),
+            key=str.lower,
+        )
+        _disc_opts = sorted(
+            raw_appt["discipline"].fillna("(none)").astype(str).unique(),
+            key=str.lower,
+        )
+        _lvl_opts = sorted(
+            raw_appt["level"].fillna("(none)").astype(str).unique(),
+            key=str.lower,
+        )
+
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            sel_types = st.multiselect(
+                "Appointment type",
+                options=_types_opts,
+                default=[],
+                key="appt_rpt_filter_type",
+                help="Leave empty to include **all** appointment types. Select one or more to narrow.",
+                placeholder="All types",
+            )
+        with f2:
+            sel_disc = st.multiselect(
+                "Discipline",
+                options=_disc_opts,
+                default=[],
+                key="appt_rpt_filter_disc",
+                help="Leave empty for **all** disciplines. “(none)” = no discipline on the row.",
+                placeholder="All disciplines",
+            )
+        with f3:
+            sel_level = st.multiselect(
+                "Level",
+                options=_lvl_opts,
+                default=[],
+                key="appt_rpt_filter_level",
+                help="Leave empty to include **all** levels.",
+                placeholder="All levels",
+            )
+
+        filt = raw_appt.copy()
+        if sel_types:
+            filt = filt[filt["appointment_type"].isin(sel_types)]
+        if sel_disc:
+            _d = filt["discipline"].fillna("(none)").astype(str)
+            filt = filt[_d.isin(sel_disc)]
+        if sel_level:
+            _l = filt["level"].fillna("(none)").astype(str)
+            filt = filt[_l.isin(sel_level)]
+
+        filtered = filt.reset_index(drop=True)
+
+        _any_dim_filter = bool(sel_types) or bool(sel_disc) or bool(sel_level)
+        if _any_dim_filter:
+            st.caption(
+                f"**Showing {len(filtered)}** of **{len(raw_appt)}** appointment(s) "
+                "(type / discipline / level filters applied)."
+            )
+        else:
+            st.caption(
+                f"**Showing all {len(filtered)}** appointment(s) "
+                "(no type, discipline, or level filter — leave multiselects empty for “all”)."
+            )
+
+        if filtered.empty:
+            st.info("No rows match the current type, discipline, and level filters.")
+        else:
+
+            def _col_summary(frame: pd.DataFrame, col: str, title: str) -> pd.DataFrame:
+                g = frame[col].fillna("(none)").astype(str)
+                out = (
+                    g.value_counts(dropna=False)
+                    .rename_axis(title)
+                    .reset_index(name="Count")
+                )
+                out = out.sort_values("Count", ascending=False, kind="mergesort")
+                total = pd.DataFrame([{title: "— TOTAL —", "Count": len(frame)}])
+                return pd.concat([out, total], ignore_index=True)
+
+            _summary_typ = st.column_config.TextColumn(
+                width="medium",
+                help="Category label.",
+            )
+            _summary_cnt = st.column_config.NumberColumn(
+                width="small",
+                format="%d",
+                help="Appointment row count.",
+            )
+
+            s_type = _col_summary(filtered, "appointment_type", "Appointment type")
+            s_disc = _col_summary(filtered, "discipline", "Discipline")
+            s_lvl = _col_summary(filtered, "level", "Level")
+
+            st.subheader("Summary")
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                st.markdown("**By appointment type**")
+                st.dataframe(
+                    s_type,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Appointment type": _summary_typ,
+                        "Count": _summary_cnt,
+                    },
+                )
+            with t2:
+                st.markdown("**By discipline**")
+                st.dataframe(
+                    s_disc,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Discipline": _summary_typ,
+                        "Count": _summary_cnt,
+                    },
+                )
+            with t3:
+                st.markdown("**By level**")
+                st.dataframe(
+                    s_lvl,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Level": _summary_typ,
+                        "Count": _summary_cnt,
+                    },
+                )
+
+            combo = filtered.assign(
+                _discipline=filtered["discipline"].fillna("(none)").astype(str),
+                _level=filtered["level"].fillna("(none)").astype(str),
+            )
+            triple = (
+                combo.groupby(
+                    ["appointment_type", "_discipline", "_level"],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Count")
+                .rename(
+                    columns={
+                        "_discipline": "Discipline",
+                        "_level": "Level",
+                        "appointment_type": "Appointment type",
+                    }
+                )
+                .sort_values("Count", ascending=False, kind="mergesort")
+            )
+            total_triple = pd.DataFrame(
+                [
+                    {
+                        "Appointment type": "— TOTAL —",
+                        "Discipline": "",
+                        "Level": "",
+                        "Count": len(filtered),
+                    }
+                ]
+            )
+            triple_disp = pd.concat([triple, total_triple], ignore_index=True)
+
+            st.subheader("By appointment type, discipline, and level")
+            st.dataframe(
+                triple_disp,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Appointment type": st.column_config.TextColumn(
+                        "Appointment type",
+                        width="small",
+                    ),
+                    "Discipline": st.column_config.TextColumn(
+                        width="small",
+                    ),
+                    "Level": st.column_config.TextColumn(
+                        width="small",
+                    ),
+                    "Count": st.column_config.NumberColumn(
+                        format="%d",
+                        width="small",
+                    ),
+                },
+            )
+
+            show_raw = st.checkbox(
+                "Show raw appointment rows",
+                value=True,
+                key="appt_achieved_show_raw",
+            )
+            if show_raw:
+                st.subheader("Raw appointments")
+                disp = filtered.copy()
+                for _dc in ("appointed_date", "achieved_date"):
+                    if _dc in disp.columns:
+                        disp[_dc] = pd.to_datetime(
+                            disp[_dc], errors="coerce"
+                        ).dt.strftime("%Y-%m-%d")
+                st.dataframe(
+                    disp,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "official_id": st.column_config.NumberColumn(
+                            "Official ID",
+                            width="small",
+                            format="%d",
+                        ),
+                        "full_name": st.column_config.TextColumn(
+                            "Official",
+                            width="medium",
+                        ),
+                        "mbr_number": st.column_config.TextColumn(
+                            "Member #",
+                            width="small",
+                        ),
+                        "appointment_type": st.column_config.TextColumn(
+                            "Type",
+                            width="small",
+                        ),
+                        "discipline": st.column_config.TextColumn(
+                            width="small",
+                        ),
+                        "level": st.column_config.TextColumn(
+                            width="small",
+                        ),
+                        "appointed_date": st.column_config.TextColumn(
+                            "Appointed",
+                            width="small",
+                        ),
+                        "achieved_date": st.column_config.TextColumn(
+                            "Achieved",
+                            width="small",
+                        ),
+                        "active": st.column_config.TextColumn(
+                            width="small",
+                        ),
+                        "mentor": st.column_config.TextColumn(
+                            width="medium",
+                        ),
+                    },
+                )
+                csv_bytes = disp.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download CSV",
+                    data=csv_bytes,
+                    file_name=(
+                        f"appointments_achieved_{appt_start.isoformat()}_"
+                        f"{appt_end.isoformat()}.csv"
+                    ),
+                    mime="text/csv",
+                    key="appt_achieved_download_csv",
+                )
+
+    appt_currency = load_appt_data_date()
+    if appt_currency is not None:
+        date_str = pd.Timestamp(appt_currency).strftime("%-m/%-d/%Y")
+        st.caption(f"Appointment snapshot max achieved date in DB: {date_str}")
+    st.stop()
 
 
 def normalize_df(df):
