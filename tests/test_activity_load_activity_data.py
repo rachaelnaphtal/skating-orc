@@ -42,6 +42,7 @@ def test_build_engine_uses_sqlite_schema_translate(monkeypatch):
 
 
 def test_build_engine_uses_postgres_search_path(monkeypatch):
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
     captured = {}
 
     def fake_create_engine(url, **kwargs):
@@ -55,9 +56,10 @@ def test_build_engine_uses_postgres_search_path(monkeypatch):
     )
 
     assert captured["url"] == "postgresql://user:pass@localhost/db"
-    assert captured["kwargs"]["connect_args"] == {
-        "options": "-csearch_path=officials_analysis"
-    }
+    ca = captured["kwargs"]["connect_args"]
+    assert ca["options"] == "-csearch_path=officials_analysis"
+    assert ca["connect_timeout"] == 15
+    assert captured["kwargs"]["pool_pre_ping"] is True
 
 
 def test_get_appointments_by_achieved_date_range_empty_when_end_before_start():

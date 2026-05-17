@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKeyConstraint, Identity, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKeyConstraint, Identity, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
 
@@ -92,6 +92,12 @@ class Officials(Base):
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='official')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='official')
+    qualifying_supplemental: Mapped[Optional['OfficialQualifyingSupplemental']] = relationship(
+        'OfficialQualifyingSupplemental', back_populates='official', uselist=False
+    )
+    qualifying_availability: Mapped[List['OfficialQualifyingAvailability']] = relationship(
+        'OfficialQualifyingAvailability', back_populates='official'
+    )
 
 
 class Appointments(Base):
@@ -174,3 +180,69 @@ class Assignment(Base):
     competition: Mapped['Competition'] = relationship('Competition', back_populates='assignment')
     discipline: Mapped['Disciplines'] = relationship('Disciplines', back_populates='assignment')
     official: Mapped['Officials'] = relationship('Officials', back_populates='assignment')
+
+
+class OfficialQualifyingSupplemental(Base):
+    """
+    Latest qualifying-season form context per official (conflicts, disclosures,
+    self-reported roles, etc.) as JSON keyed by original column headers.
+    """
+
+    __tablename__ = 'official_qualifying_supplemental'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['official_id'],
+            ['officials_analysis.officials.id'],
+            name='official_qualifying_supplemental_official_id_fkey',
+        ),
+        PrimaryKeyConstraint('official_id', name='official_qualifying_supplemental_pkey'),
+        {'schema': 'officials_analysis'},
+    )
+
+    official_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    supplemental_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    ethics_hints_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+    official: Mapped['Officials'] = relationship('Officials', back_populates='qualifying_supplemental')
+
+
+class OfficialQualifyingAvailability(Base):
+    """
+    Per-competition **yes** from the qualifying form: a row exists only when the
+    official explicitly indicated availability. No row ⇒ not available / no response.
+    ``availability`` is ``available`` when stored; ``raw_availability`` keeps the sheet cell.
+    """
+
+    __tablename__ = 'official_qualifying_availability'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['official_id'],
+            ['officials_analysis.officials.id'],
+            name='official_qualifying_availability_official_id_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='official_qualifying_availability_pkey'),
+        UniqueConstraint(
+            'official_id',
+            'competition_key',
+            name='official_qualifying_availability_official_competition_key',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    official_id: Mapped[int] = mapped_column(Integer)
+    competition_key: Mapped[str] = mapped_column(Text)
+    availability: Mapped[str] = mapped_column(Text)
+    raw_availability: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+    official: Mapped['Officials'] = relationship('Officials', back_populates='qualifying_availability')

@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+from typing import Any
 try:
     from activityAnalysis.officials_analysis_models import (
         Base,
@@ -11,6 +12,8 @@ try:
         CompetitionType,
         AppointmentTypes,
         Levels,
+        OfficialQualifyingAvailability,
+        OfficialQualifyingSupplemental,
     )
 except ModuleNotFoundError:
     from officials_analysis_models import (
@@ -23,12 +26,32 @@ except ModuleNotFoundError:
         CompetitionType,
         AppointmentTypes,
         Levels,
+        OfficialQualifyingAvailability,
+        OfficialQualifyingSupplemental,
+    )
+try:
+    from activityAnalysis.qualifying_availability_ingest import (
+        load_original_sheet,
+        melt_competition_availability,
+        build_respondent_supplemental_snapshot,
+        normalize_member_number_value,
+        normalize_qualifying_availability_cell,
+        conflicts_ethics_related_columns,
+    )
+except ModuleNotFoundError:
+    from qualifying_availability_ingest import (
+        load_original_sheet,
+        melt_competition_availability,
+        build_respondent_supplemental_snapshot,
+        normalize_member_number_value,
+        normalize_qualifying_availability_cell,
+        conflicts_ethics_related_columns,
     )
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, select, func, and_, or_, case, text, bindparam
+from sqlalchemy import create_engine, select, func, and_, or_, case, text, bindparam, tuple_
 import math
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
 DEFAULT_ACTIVITY_DB_URL = "sqlite:////tmp/activity_tracker.db"
@@ -55,7 +78,15 @@ def _build_engine(database_url):
             "schema_translate_map": {"officials_analysis": None}
         }
     else:
-        engine_kwargs["connect_args"] = {"options": "-csearch_path=officials_analysis"}
+        # Avoid indefinite hangs on bad host/firewall/VPN: psycopg2 connect_timeout is seconds.
+        # Override with PGCONNECT_TIMEOUT (e.g. 5 for faster fail). Remote DBs often need
+        # ?sslmode=require (or verify-full) on DATABASE_URL — without it some providers stall.
+        connect_timeout = int(os.environ.get("PGCONNECT_TIMEOUT", "15"))
+        engine_kwargs["connect_args"] = {
+            "options": "-csearch_path=officials_analysis",
+            "connect_timeout": connect_timeout,
+        }
+        engine_kwargs["pool_pre_ping"] = True
     return create_engine(database_url, **engine_kwargs)
 
 
@@ -478,9 +509,17 @@ def get_or_create_competition(
 def insert_assignments(
     session, assignments_df, officials, *, sectionals_dedupe_by_type_year: bool = False
 ):
+    """
+    Insert or lightly update assignment rows from a loaded event dataframe.
+
+    Uses batched SELECTs for existing rows and a single bulk insert for new rows
+    to reduce round-trips on remote PostgreSQL (the previous per-row existence
+    query was one SELECT per spreadsheet row).
+    """
     retired_df = pd.read_excel("activityAnalysis/Retired_officials.xlsx")
     retired_names = set(retired_df["Name"])
 
+    pending: list[dict[str, Any]] = []
     for _, row in assignments_df.iterrows():
         competiton_name = row["CompetitionName"]
         competition_type_id = row["CompetitionType"]
@@ -499,46 +538,119 @@ def insert_assignments(
             print(f"Missing mapping: {row}")
             continue
 
-        comp = get_or_create_competition(
-            session,
-            row["Year"],
-            competiton_name,
-            competition_type_id,
-            sectionals_match_by_type_and_year=sectionals_dedupe_by_type_year,
-        )
-
-        # 🚫 Check if already exists
-        exists = (
-            session.query(Assignment)
-            .filter_by(
-                competition_id=comp.id,
-                official_id=official_id,
-                discipline_id=int(discipline_id),
-                appointment_type_id=int(appointment_type_id),
-            )
-            .first()
-        )
-
-        row_chief = bool(row.get("Chief", False))
-        row_lower = bool(row.get("Lower_Levels_Only", False))
-        if exists:
-            if bool(exists.chief) != row_chief or bool(
-                exists.lower_levels_only
-            ) != row_lower:
-                exists.chief = row_chief
-                exists.lower_levels_only = row_lower
+        try:
+            ctid = int(competition_type_id)
+            did = int(discipline_id)
+            atid = int(appointment_type_id)
+        except (TypeError, ValueError):
+            print(f"Missing mapping: {row}")
             continue
 
-        assignment = Assignment(
-            competition_id=comp.id,
-            official_id=official_id,
-            discipline_id=int(discipline_id),
-            appointment_type_id=int(appointment_type_id),
-            chief=row_chief,
-            lower_levels_only=row_lower,
+        pending.append(
+            {
+                "competition_name": competiton_name,
+                "year": row["Year"],
+                "competition_type_id": ctid,
+                "official_id": official_id,
+                "discipline_id": did,
+                "appointment_type_id": atid,
+                "chief": bool(row.get("Chief", False)),
+                "lower_levels_only": bool(row.get("Lower_Levels_Only", False)),
+            }
         )
 
-        session.add(assignment)
+    comp_cache: dict[tuple[Any, ...], Competition] = {}
+
+    def _cache_key(p: dict[str, Any]) -> tuple[Any, ...]:
+        if sectionals_dedupe_by_type_year:
+            return (p["year"], p["competition_type_id"])
+        return (p["year"], p["competition_name"], p["competition_type_id"])
+
+    def _get_comp(p: dict[str, Any]) -> Competition:
+        key = _cache_key(p)
+        if key not in comp_cache:
+            comp_cache[key] = get_or_create_competition(
+                session,
+                p["year"],
+                p["competition_name"],
+                p["competition_type_id"],
+                sectionals_match_by_type_and_year=sectionals_dedupe_by_type_year,
+            )
+        return comp_cache[key]
+
+    for p in pending:
+        p["competition_id"] = _get_comp(p).id
+
+    if not pending:
+        session.commit()
+        return
+
+    key_batch = 2000 if activity_database_is_postgresql() else 120
+
+    unique_keys: list[tuple[int, int, int, int]] = list(
+        dict.fromkeys(
+            (
+                p["competition_id"],
+                p["official_id"],
+                p["discipline_id"],
+                p["appointment_type_id"],
+            )
+            for p in pending
+        )
+    )
+
+    existing_map: dict[tuple[int, int, int, int], Assignment] = {}
+    for i in range(0, len(unique_keys), key_batch):
+        chunk = unique_keys[i : i + key_batch]
+        if not chunk:
+            continue
+        rows = session.execute(
+            select(Assignment).where(
+                tuple_(
+                    Assignment.competition_id,
+                    Assignment.official_id,
+                    Assignment.discipline_id,
+                    Assignment.appointment_type_id,
+                ).in_(chunk)
+            )
+        ).scalars().all()
+        for a in rows:
+            k = (a.competition_id, a.official_id, a.discipline_id, a.appointment_type_id)
+            existing_map[k] = a
+
+    staged_new: set[tuple[int, int, int, int]] = set()
+    to_insert: list[dict[str, Any]] = []
+    for p in pending:
+        k = (
+            p["competition_id"],
+            p["official_id"],
+            p["discipline_id"],
+            p["appointment_type_id"],
+        )
+        ex = existing_map.get(k)
+        if ex is not None:
+            if bool(ex.chief) != p["chief"] or bool(ex.lower_levels_only) != p[
+                "lower_levels_only"
+            ]:
+                ex.chief = p["chief"]
+                ex.lower_levels_only = p["lower_levels_only"]
+            continue
+        if k in staged_new:
+            continue
+        staged_new.add(k)
+        to_insert.append(
+            {
+                "competition_id": p["competition_id"],
+                "official_id": p["official_id"],
+                "discipline_id": p["discipline_id"],
+                "appointment_type_id": p["appointment_type_id"],
+                "chief": p["chief"],
+                "lower_levels_only": p["lower_levels_only"],
+            }
+        )
+
+    if to_insert:
+        session.bulk_insert_mappings(Assignment, to_insert)
 
     session.commit()
 
@@ -1776,13 +1888,55 @@ def get_all_directory_officials():
     return pd.DataFrame(rows, columns=["official_id", "full_name"])
 
 
-def get_official_assignment_detail_rows(official_id: int):
+def _directory_official_ids_sharing_mbr_number(session, official_id: int) -> list[int]:
     """
-    One row per assignment for ``official_id`` with fields needed for display/sort.
+    Return every ``officials.id`` whose ``mbr_number`` normalizes to the same key as
+    ``official_id``'s member number.
+
+    Duplicate or superseded directory rows for one real member split assignment history
+    across ids when Excel loads used different ``Person`` / name rows; the per-person
+    report can include rows for every matching id (assignments / appointments as-is;
+    segment activity dedupes after merge — see :func:`get_official_segment_official_activity_detail`).
+    """
+    seed_mbr = session.scalar(
+        select(Officials.mbr_number).where(Officials.id == int(official_id))
+    )
+    key = normalize_member_number_value(seed_mbr)
+    if not key:
+        return [int(official_id)]
+    rows = session.execute(select(Officials.id, Officials.mbr_number)).all()
+    out = sorted(
+        {
+            int(oid)
+            for oid, mbr in rows
+            if mbr is not None and normalize_member_number_value(mbr) == key
+        }
+    )
+    return out if out else [int(official_id)]
+
+
+def get_official_assignment_detail_rows(
+    official_id: int,
+    *,
+    merge_assignments_for_same_mbr: bool = True,
+) -> pd.DataFrame:
+    """
+    One row per assignment for directory official(s) tied to ``official_id``,
+    with fields needed for display/sort.
+
+    When ``merge_assignments_for_same_mbr`` is True (default), includes assignments
+    for every ``officials`` row that shares the same normalized ``mbr_number`` as
+    the selected official.
+
     Columns: competition_id, year, competition_name, competition_type_id,
     appt_type_name, discipline_id, discipline_name, chief, lower_levels_only
     """
     with Session(engine) as session:
+        oid_list = (
+            _directory_official_ids_sharing_mbr_number(session, official_id)
+            if merge_assignments_for_same_mbr
+            else [int(official_id)]
+        )
         stmt = (
             select(
                 Competition.id.label("competition_id"),
@@ -1798,7 +1952,7 @@ def get_official_assignment_detail_rows(official_id: int):
             .join(Competition, Assignment.competition_id == Competition.id)
             .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
             .join(Disciplines, Assignment.discipline_id == Disciplines.id)
-            .where(Assignment.official_id == int(official_id))
+            .where(Assignment.official_id.in_(oid_list))
         )
         rows = session.execute(stmt).all()
     return pd.DataFrame(
@@ -1817,13 +1971,25 @@ def get_official_assignment_detail_rows(official_id: int):
     )
 
 
-def get_official_appointment_rows(official_id: int, *, active_only: bool = True):
+def get_official_appointment_rows(
+    official_id: int,
+    *,
+    active_only: bool = True,
+    merge_rows_for_same_mbr: bool = True,
+):
     """Directory appointments for display (type, discipline, level, appointed, achieved, active flag).
 
     Sorted by appointment type name (A–Z), then achieved date (newest first, blanks last).
     When ``active_only`` is True, only rows with ``appointments.active = true``.
+    When ``merge_rows_for_same_mbr`` is True, includes appointments for all directory
+    ids sharing the selected official's normalized member number.
     """
     with Session(engine) as session:
+        oid_list = (
+            _directory_official_ids_sharing_mbr_number(session, official_id)
+            if merge_rows_for_same_mbr
+            else [int(official_id)]
+        )
         stmt = (
             select(
                 AppointmentTypes.name.label("appointment_type"),
@@ -1836,7 +2002,7 @@ def get_official_appointment_rows(official_id: int, *, active_only: bool = True)
             .join(AppointmentTypes, Appointments.appointment_type_id == AppointmentTypes.id)
             .outerjoin(Disciplines, Appointments.discipline_id == Disciplines.id)
             .outerjoin(Levels, Appointments.level_id == Levels.id)
-            .where(Appointments.official_id == int(official_id))
+            .where(Appointments.official_id.in_(oid_list))
         )
         if active_only:
             stmt = stmt.where(Appointments.active.is_(True))
@@ -1942,6 +2108,10 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
     with competition and segment fields. Rows are ordered by competition (newest first)
     then segment name and role.
 
+    Includes rows for every ``officials`` id sharing the same normalized ``mbr_number``
+    as ``official_id``. When multiple ids judged the same segment, duplicate rows are
+    dropped (see **Additional Qualifying Activity** / segment tables).
+
     Returns empty when ``DATABASE_URL`` is not PostgreSQL or the judging tables are
     unavailable.
     """
@@ -1961,44 +2131,53 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
     database_url = _resolve_database_url()
     if not database_url.startswith("postgresql"):
         return pd.DataFrame(columns=cols)
-    stmt = text(
-        """
-        SELECT
-            c.id AS competition_id,
-            c.year,
-            c.name AS competition_name,
-            c.results_url,
-            c.start_date,
-            c.end_date,
-            COALESCE(c.qualifying, false) AS qualifying,
-            s.id AS segment_id,
-            s.name AS segment_name,
-            dt.name AS discipline,
-            so.role
-        FROM public.segment_official so
-        INNER JOIN public.segment s ON s.id = so.segment_id
-        INNER JOIN public.competition c ON c.id = s.competition_id
-        LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
-        WHERE so.official_id = :oid
-        ORDER BY
-            COALESCE(c.end_date, c.start_date) DESC NULLS LAST,
-            CASE
-                WHEN c.year ~ '^[0-9]+$' THEN c.year::integer
-                ELSE 0
-            END DESC,
-            c.name ASC,
-            s.name ASC,
-            so.role ASC
-        """
-    )
     try:
         with Session(engine) as session:
-            rows = session.execute(stmt, {"oid": int(official_id)}).mappings().all()
+            oid_list = _directory_official_ids_sharing_mbr_number(session, official_id)
+            stmt = (
+                text(
+                    """
+                    SELECT
+                        c.id AS competition_id,
+                        c.year,
+                        c.name AS competition_name,
+                        c.results_url,
+                        c.start_date,
+                        c.end_date,
+                        COALESCE(c.qualifying, false) AS qualifying,
+                        s.id AS segment_id,
+                        s.name AS segment_name,
+                        dt.name AS discipline,
+                        so.role
+                    FROM public.segment_official so
+                    INNER JOIN public.segment s ON s.id = so.segment_id
+                    INNER JOIN public.competition c ON c.id = s.competition_id
+                    LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
+                    WHERE so.official_id IN :oids
+                    ORDER BY
+                        COALESCE(c.end_date, c.start_date) DESC NULLS LAST,
+                        CASE
+                            WHEN c.year ~ '^[0-9]+$' THEN c.year::integer
+                            ELSE 0
+                        END DESC,
+                        c.name ASC,
+                        s.name ASC,
+                        so.role ASC
+                    """
+                )
+                .bindparams(bindparam("oids", expanding=True))
+            )
+            rows = session.execute(stmt, {"oids": oid_list}).mappings().all()
     except Exception:
         return pd.DataFrame(columns=cols)
     if not rows:
         return pd.DataFrame(columns=cols)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df = df.drop_duplicates(
+        subset=["competition_id", "segment_id", "role"],
+        keep="first",
+    )
+    return df.reset_index(drop=True)
 
 
 def get_official_segment_official_competitions(official_id: int) -> pd.DataFrame:
@@ -3042,8 +3221,216 @@ def get_nqs_detailed_activity_report_df(
     return out.sort_values("Name", kind="mergesort").reset_index(drop=True)
 
 
+def _json_safe_qualifying_value(value: object) -> object:
+    """Serialize a spreadsheet cell for ``supplemental_json`` / ``ethics_hints_json``."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return _json_safe_qualifying_value(value.item())
+        except (AttributeError, ValueError, TypeError):
+            pass
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    return str(value)
+
+
+def load_qualifying_availability_workbook(
+    path: str,
+    *,
+    sheet_name: str | None = None,
+    only_complete_responses: bool = True,
+    allow_missing_completion_status: bool = False,
+    completion_status_column: str | None = None,
+    commit: bool = True,
+    engine=None,
+) -> dict[str, Any]:
+    """
+    Read a qualifying availability workbook and update
+    ``official_qualifying_availability`` and ``official_qualifying_supplemental``.
+
+    **Availability:** Only **explicitly available** answers are stored. A row in
+    ``official_qualifying_availability`` means that official said yes for that
+    ``competition_key``. Empty cells, “no”, **“does not apply”**, and anything else
+    not classified as available **remove** any existing row for that (official,
+    competition), so **absence of a row** means not available / not responded / N/A
+    (same as never uploaded).
+
+    Rows are matched to ``officials`` via normalized ``mbr_number``. Unmatched
+    numbers are skipped and listed under ``unmatched_member_numbers``.
+    """
+    db_engine = engine or get_engine()
+    load_kw: dict[str, Any] = dict(
+        only_complete_responses=only_complete_responses,
+        allow_missing_completion_status=allow_missing_completion_status,
+        completion_status_column=completion_status_column,
+    )
+    if sheet_name is not None:
+        load_kw["sheet_name"] = sheet_name
+    df = load_original_sheet(path, **load_kw)
+
+    long = melt_competition_availability(df)
+    sup_df = build_respondent_supplemental_snapshot(df)
+    ethics_col_set = set(conflicts_ethics_related_columns(df))
+
+    result: dict[str, Any] = {
+        "availability_stored": 0,
+        "availability_cleared": 0,
+        "supplemental_officials_updated": 0,
+        "availability_rows_skipped_empty_member": 0,
+        "supplemental_rows_skipped_empty_member": 0,
+        "unmatched_member_numbers": [],
+    }
+    unmatched: set[str] = set()
+
+    with Session(db_engine) as session:
+        mbr_to_id: dict[str, int] = {}
+        for oid, mbr in session.execute(select(Officials.id, Officials.mbr_number)).all():
+            key = normalize_member_number_value(mbr)
+            if key:
+                mbr_to_id[key] = oid
+
+        for _, row in long.iterrows():
+            mbr = normalize_member_number_value(row["member_number"])
+            if not mbr:
+                result["availability_rows_skipped_empty_member"] += 1
+                continue
+            oid = mbr_to_id.get(mbr)
+            if oid is None:
+                unmatched.add(mbr)
+                continue
+            comp_key = str(row["competition_prompt"])
+            raw = row["raw_availability"]
+            code = normalize_qualifying_availability_cell(raw)
+            raw_text = None
+            if not pd.isna(raw):
+                raw_text = str(raw).strip() or None
+            existing = session.scalar(
+                select(OfficialQualifyingAvailability).where(
+                    and_(
+                        OfficialQualifyingAvailability.official_id == oid,
+                        OfficialQualifyingAvailability.competition_key == comp_key,
+                    )
+                )
+            )
+            if code == "available":
+                if existing:
+                    existing.availability = "available"
+                    existing.raw_availability = raw_text
+                else:
+                    session.add(
+                        OfficialQualifyingAvailability(
+                            official_id=oid,
+                            competition_key=comp_key,
+                            availability="available",
+                            raw_availability=raw_text,
+                        )
+                    )
+                result["availability_stored"] += 1
+            else:
+                if existing:
+                    session.delete(existing)
+                    result["availability_cleared"] += 1
+
+        supplemental_ids: set[int] = set()
+        for _, srow in sup_df.iterrows():
+            mbr = normalize_member_number_value(srow["member_number"])
+            if not mbr:
+                result["supplemental_rows_skipped_empty_member"] += 1
+                continue
+            oid = mbr_to_id.get(mbr)
+            if oid is None:
+                unmatched.add(mbr)
+                continue
+            payload: dict[str, Any] = {}
+            hints: dict[str, Any] = {}
+            for col in srow.index:
+                if col == "member_number":
+                    continue
+                col_s = str(col)
+                val = _json_safe_qualifying_value(srow[col])
+                payload[col_s] = val
+                if col_s in ethics_col_set:
+                    hints[col_s] = val
+
+            existing_sup = session.get(OfficialQualifyingSupplemental, oid)
+            if existing_sup:
+                existing_sup.supplemental_json = payload
+                existing_sup.ethics_hints_json = hints if hints else None
+            else:
+                session.add(
+                    OfficialQualifyingSupplemental(
+                        official_id=oid,
+                        supplemental_json=payload,
+                        ethics_hints_json=hints if hints else None,
+                    )
+                )
+            if oid not in supplemental_ids:
+                supplemental_ids.add(oid)
+                result["supplemental_officials_updated"] += 1
+
+        result["unmatched_member_numbers"] = sorted(unmatched)
+        if commit:
+            session.commit()
+
+    return result
+
+
+def _cli_main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "CLI for activityAnalysis database helpers. "
+            "Import this module from apps/scripts; do not run without a subcommand unless "
+            "you intend the long Excel→assignment import."
+        )
+    )
+    parser.add_argument(
+        "--load-history-to-database",
+        action="store_true",
+        help=(
+            "Read US Champs/Sectionals workbooks under activityAnalysis/ and INSERT assignments "
+            "(long-running; use only when rebuilding assignment history)."
+        ),
+    )
+    parser.add_argument(
+        "--ping-database",
+        action="store_true",
+        help="Run SELECT 1 against the current DATABASE_URL and exit.",
+    )
+    args = parser.parse_args()
+    if args.ping_database:
+        with Session(engine) as session:
+            session.execute(text("SELECT 1"))
+        print("database_ok", flush=True)
+        return
+    if args.load_history_to_database:
+        print(
+            "Starting load_history(write_to_database=True): "
+            "reading Excel files, then writing to the DB (this may take many minutes).",
+            flush=True,
+        )
+        load_history(write_to_database=True)
+        print("load_history finished.", flush=True)
+        return
+    parser.print_help()
+
+
 if __name__ == "__main__":
-    load_history(write_to_database=True)
+    _cli_main()
 # get_assignments_for_person("Rachael Naphtal Einstein")
 
 # get_number_assignments_per_competition_type([5,6,7,9])
