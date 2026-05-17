@@ -19,3 +19,6 @@ __pycache__/
 pyvenv.cfg
 
 activityAnalysis/__pycache__
+
+# Microsoft Office lock/temp files while a document is open (e.g. ~$US_SYS_Sectionals.xlsx)
+**/~$*.xls*
