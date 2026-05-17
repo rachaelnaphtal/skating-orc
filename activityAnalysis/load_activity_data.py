@@ -1817,10 +1817,11 @@ def get_official_assignment_detail_rows(official_id: int):
     )
 
 
-def get_official_appointment_rows(official_id: int):
-    """All appointments for directory display (type, discipline, level, achieved).
+def get_official_appointment_rows(official_id: int, *, active_only: bool = True):
+    """Directory appointments for display (type, discipline, level, appointed, achieved, active flag).
 
     Sorted by appointment type name (A–Z), then achieved date (newest first, blanks last).
+    When ``active_only`` is True, only rows with ``appointments.active = true``.
     """
     with Session(engine) as session:
         stmt = (
@@ -1828,21 +1829,32 @@ def get_official_appointment_rows(official_id: int):
                 AppointmentTypes.name.label("appointment_type"),
                 Disciplines.name.label("discipline"),
                 Levels.name.label("level"),
+                Appointments.appointed_date,
                 Appointments.achieved_date,
+                Appointments.active,
             )
             .join(AppointmentTypes, Appointments.appointment_type_id == AppointmentTypes.id)
             .outerjoin(Disciplines, Appointments.discipline_id == Disciplines.id)
             .outerjoin(Levels, Appointments.level_id == Levels.id)
             .where(Appointments.official_id == int(official_id))
-            .order_by(
-                AppointmentTypes.name.asc(),
-                Appointments.achieved_date.desc().nulls_last(),
-            )
+        )
+        if active_only:
+            stmt = stmt.where(Appointments.active.is_(True))
+        stmt = stmt.order_by(
+            AppointmentTypes.name.asc(),
+            Appointments.achieved_date.desc().nulls_last(),
         )
         rows = session.execute(stmt).all()
     return pd.DataFrame(
         rows,
-        columns=["appointment_type", "discipline", "level", "achieved_date"],
+        columns=[
+            "appointment_type",
+            "discipline",
+            "level",
+            "appointed_date",
+            "achieved_date",
+            "active",
+        ],
     )
 
 

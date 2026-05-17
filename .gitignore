@@ -17,3 +17,5 @@ backups/
 __pycache__/
 # Local venv metadata (repo-level or copied venv)
 pyvenv.cfg
+
+activityAnalysis/__pycache__

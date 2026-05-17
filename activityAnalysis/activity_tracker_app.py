@@ -1325,8 +1325,8 @@ def load_person_segment_official_activity_detail(official_id: int):
 
 
 @st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
-def load_person_appointment_rows(official_id: int):
-    return get_official_appointment_rows(int(official_id))
+def load_person_appointment_rows(official_id: int, *, active_only: bool = True):
+    return get_official_appointment_rows(int(official_id), active_only=active_only)
 
 
 @st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
@@ -1588,17 +1588,69 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
                 ),
             },
         )
-    appts = load_person_appointment_rows(pick_oid)
     st.subheader("Appointments")
+    appt_include_inactive = st.checkbox(
+        "Include inactive appointments",
+        value=False,
+        key="per_person_appts_include_inactive",
+        help=(
+            "Unchecked: only directory appointments with **active** = true. "
+            "Checked: also show ended or removed roles still stored (includes an **Active** column)."
+        ),
+    )
+    appts = load_person_appointment_rows(
+        pick_oid, active_only=not appt_include_inactive
+    )
     if appts.empty:
         st.info("No appointment records for this official.")
     else:
         appts_show = appts.copy()
-        if "achieved_date" in appts_show.columns:
-            appts_show["achieved_date"] = pd.to_datetime(
-                appts_show["achieved_date"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d")
-        st.dataframe(appts_show, width="stretch", hide_index=True)
+        for _dc in ("appointed_date", "achieved_date"):
+            if _dc in appts_show.columns:
+                appts_show[_dc] = pd.to_datetime(
+                    appts_show[_dc], errors="coerce"
+                ).dt.strftime("%Y-%m-%d")
+        if "active" in appts_show.columns:
+            if appt_include_inactive:
+
+                def _active_cell(v):
+                    if v is None or (isinstance(v, float) and pd.isna(v)):
+                        return ""
+                    return "Yes" if bool(v) else "No"
+
+                appts_show["active"] = appts_show["active"].map(_active_cell)
+            else:
+                appts_show = appts_show.drop(columns=["active"])
+
+        _appt_col_cfg = {
+            "appointment_type": st.column_config.TextColumn(
+                "Appointment type", width="medium"
+            ),
+            "discipline": st.column_config.TextColumn(width="small"),
+            "level": st.column_config.TextColumn(width="small"),
+            "appointed_date": st.column_config.TextColumn(
+                "Appointed",
+                width="small",
+                help="Directory appointed date when present.",
+            ),
+            "achieved_date": st.column_config.TextColumn(
+                "Achieved",
+                width="small",
+                help="Directory achieved date when present.",
+            ),
+        }
+        if "active" in appts_show.columns:
+            _appt_col_cfg["active"] = st.column_config.TextColumn(
+                "Active",
+                width="small",
+                help="Whether this appointment row is marked active in the directory.",
+            )
+        st.dataframe(
+            appts_show,
+            width="stretch",
+            hide_index=True,
+            column_config=_appt_col_cfg,
+        )
     st.caption(
         "Competitions where this official appears on an IJS protocol. Sorted by event dates when present, then season year. "
         "Compiled independently of assignments above. This should not be considered a "
