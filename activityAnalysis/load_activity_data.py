@@ -1888,55 +1888,13 @@ def get_all_directory_officials():
     return pd.DataFrame(rows, columns=["official_id", "full_name"])
 
 
-def _directory_official_ids_sharing_mbr_number(session, official_id: int) -> list[int]:
+def get_official_assignment_detail_rows(official_id: int) -> pd.DataFrame:
     """
-    Return every ``officials.id`` whose ``mbr_number`` normalizes to the same key as
-    ``official_id``'s member number.
-
-    Duplicate or superseded directory rows for one real member split assignment history
-    across ids when Excel loads used different ``Person`` / name rows; the per-person
-    report can include rows for every matching id (assignments / appointments as-is;
-    segment activity dedupes after merge — see :func:`get_official_segment_official_activity_detail`).
-    """
-    seed_mbr = session.scalar(
-        select(Officials.mbr_number).where(Officials.id == int(official_id))
-    )
-    key = normalize_member_number_value(seed_mbr)
-    if not key:
-        return [int(official_id)]
-    rows = session.execute(select(Officials.id, Officials.mbr_number)).all()
-    out = sorted(
-        {
-            int(oid)
-            for oid, mbr in rows
-            if mbr is not None and normalize_member_number_value(mbr) == key
-        }
-    )
-    return out if out else [int(official_id)]
-
-
-def get_official_assignment_detail_rows(
-    official_id: int,
-    *,
-    merge_assignments_for_same_mbr: bool = True,
-) -> pd.DataFrame:
-    """
-    One row per assignment for directory official(s) tied to ``official_id``,
-    with fields needed for display/sort.
-
-    When ``merge_assignments_for_same_mbr`` is True (default), includes assignments
-    for every ``officials`` row that shares the same normalized ``mbr_number`` as
-    the selected official.
-
+    One row per assignment for ``official_id`` with fields needed for display/sort.
     Columns: competition_id, year, competition_name, competition_type_id,
     appt_type_name, discipline_id, discipline_name, chief, lower_levels_only
     """
     with Session(engine) as session:
-        oid_list = (
-            _directory_official_ids_sharing_mbr_number(session, official_id)
-            if merge_assignments_for_same_mbr
-            else [int(official_id)]
-        )
         stmt = (
             select(
                 Competition.id.label("competition_id"),
@@ -1952,7 +1910,7 @@ def get_official_assignment_detail_rows(
             .join(Competition, Assignment.competition_id == Competition.id)
             .join(AppointmentTypes, Assignment.appointment_type_id == AppointmentTypes.id)
             .join(Disciplines, Assignment.discipline_id == Disciplines.id)
-            .where(Assignment.official_id.in_(oid_list))
+            .where(Assignment.official_id == int(official_id))
         )
         rows = session.execute(stmt).all()
     return pd.DataFrame(
@@ -1971,25 +1929,13 @@ def get_official_assignment_detail_rows(
     )
 
 
-def get_official_appointment_rows(
-    official_id: int,
-    *,
-    active_only: bool = True,
-    merge_rows_for_same_mbr: bool = True,
-):
+def get_official_appointment_rows(official_id: int, *, active_only: bool = True):
     """Directory appointments for display (type, discipline, level, appointed, achieved, active flag).
 
     Sorted by appointment type name (A–Z), then achieved date (newest first, blanks last).
     When ``active_only`` is True, only rows with ``appointments.active = true``.
-    When ``merge_rows_for_same_mbr`` is True, includes appointments for all directory
-    ids sharing the selected official's normalized member number.
     """
     with Session(engine) as session:
-        oid_list = (
-            _directory_official_ids_sharing_mbr_number(session, official_id)
-            if merge_rows_for_same_mbr
-            else [int(official_id)]
-        )
         stmt = (
             select(
                 AppointmentTypes.name.label("appointment_type"),
@@ -2002,7 +1948,7 @@ def get_official_appointment_rows(
             .join(AppointmentTypes, Appointments.appointment_type_id == AppointmentTypes.id)
             .outerjoin(Disciplines, Appointments.discipline_id == Disciplines.id)
             .outerjoin(Levels, Appointments.level_id == Levels.id)
-            .where(Appointments.official_id.in_(oid_list))
+            .where(Appointments.official_id == int(official_id))
         )
         if active_only:
             stmt = stmt.where(Appointments.active.is_(True))
@@ -2104,13 +2050,15 @@ def get_appointments_by_achieved_date_range(
 
 def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFrame:
     """
-    One row per ``segment_official`` entry for this directory ``official_id``,
+    One row per ``segment_official`` entry relevant to this directory ``official_id``,
     with competition and segment fields. Rows are ordered by competition (newest first)
     then segment name and role.
 
-    Includes rows for every ``officials`` id sharing the same normalized ``mbr_number``
-    as ``official_id``. When multiple ids judged the same segment, duplicate rows are
-    dropped (see **Additional Qualifying Activity** / segment tables).
+    Rows are included when ``segment_official.official_id`` matches **or** when the
+    panel name on the row matches (case-insensitive, trimmed) the ``judge.name`` of
+    any **linked** ``public.judge_official_link`` row for this official. That picks up
+    NQ/qualifying segment panels for name variants that share one directory official
+    (multiple judge records linked to the same ``official_id``).
 
     Returns empty when ``DATABASE_URL`` is not PostgreSQL or the judging tables are
     unavailable.
@@ -2131,53 +2079,56 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
     database_url = _resolve_database_url()
     if not database_url.startswith("postgresql"):
         return pd.DataFrame(columns=cols)
+    stmt = text(
+        """
+        SELECT
+            c.id AS competition_id,
+            c.year,
+            c.name AS competition_name,
+            c.results_url,
+            c.start_date,
+            c.end_date,
+            COALESCE(c.qualifying, false) AS qualifying,
+            s.id AS segment_id,
+            s.name AS segment_name,
+            dt.name AS discipline,
+            so.role
+        FROM public.segment_official so
+        INNER JOIN public.segment s ON s.id = so.segment_id
+        INNER JOIN public.competition c ON c.id = s.competition_id
+        LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
+        WHERE (
+              so.official_id = :oid
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.judge_official_link jol
+                  INNER JOIN public.judge j ON j.id = jol.judge_id
+                  WHERE jol.official_id = :oid
+                    AND jol.status = 'linked'
+                    AND jol.official_id IS NOT NULL
+                    AND so.official_name IS NOT NULL
+                    AND lower(btrim(j.name)) = lower(btrim(so.official_name))
+              )
+        )
+        ORDER BY
+            COALESCE(c.end_date, c.start_date) DESC NULLS LAST,
+            CASE
+                WHEN c.year ~ '^[0-9]+$' THEN c.year::integer
+                ELSE 0
+            END DESC,
+            c.name ASC,
+            s.name ASC,
+            so.role ASC
+        """
+    )
     try:
         with Session(engine) as session:
-            oid_list = _directory_official_ids_sharing_mbr_number(session, official_id)
-            stmt = (
-                text(
-                    """
-                    SELECT
-                        c.id AS competition_id,
-                        c.year,
-                        c.name AS competition_name,
-                        c.results_url,
-                        c.start_date,
-                        c.end_date,
-                        COALESCE(c.qualifying, false) AS qualifying,
-                        s.id AS segment_id,
-                        s.name AS segment_name,
-                        dt.name AS discipline,
-                        so.role
-                    FROM public.segment_official so
-                    INNER JOIN public.segment s ON s.id = so.segment_id
-                    INNER JOIN public.competition c ON c.id = s.competition_id
-                    LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
-                    WHERE so.official_id IN :oids
-                    ORDER BY
-                        COALESCE(c.end_date, c.start_date) DESC NULLS LAST,
-                        CASE
-                            WHEN c.year ~ '^[0-9]+$' THEN c.year::integer
-                            ELSE 0
-                        END DESC,
-                        c.name ASC,
-                        s.name ASC,
-                        so.role ASC
-                    """
-                )
-                .bindparams(bindparam("oids", expanding=True))
-            )
-            rows = session.execute(stmt, {"oids": oid_list}).mappings().all()
+            rows = session.execute(stmt, {"oid": int(official_id)}).mappings().all()
     except Exception:
         return pd.DataFrame(columns=cols)
     if not rows:
         return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows)
-    df = df.drop_duplicates(
-        subset=["competition_id", "segment_id", "role"],
-        keep="first",
-    )
-    return df.reset_index(drop=True)
+    return pd.DataFrame(rows)
 
 
 def get_official_segment_official_competitions(official_id: int) -> pd.DataFrame:
@@ -3014,6 +2965,11 @@ def _query_nqs_competition_counts_by_year(
 ) -> pd.DataFrame:
     """
     Rows: official_id, season_year, nqs_competitions (distinct ``public.competition`` per year).
+
+    Each ``segment_official`` row is attributed to a directory official using
+    ``so.official_id`` when it appears in ``official_ids``, otherwise via
+    ``public.judge_official_link`` + ``judge.name`` matching ``so.official_name`` (same
+    rule as :func:`get_official_segment_official_activity_detail`).
     """
     if not official_ids:
         return pd.DataFrame(
@@ -3036,18 +2992,32 @@ def _query_nqs_competition_counts_by_year(
     stmt = (
         text(
             f"""
-            SELECT so.official_id AS official_id,
+            SELECT attrib.directory_official_id AS official_id,
                    c.year::integer AS season_year,
                    COUNT(DISTINCT c.id) AS nqs_competitions
             FROM public.segment_official so
             INNER JOIN public.segment s ON s.id = so.segment_id
             INNER JOIN public.competition c ON c.id = s.competition_id
-            WHERE so.official_id IS NOT NULL
-              AND so.official_id IN :official_ids
+            CROSS JOIN LATERAL (
+              SELECT COALESCE(
+                CASE WHEN so.official_id IN :official_ids THEN so.official_id END,
+                (
+                  SELECT MIN(jol.official_id)
+                  FROM public.judge_official_link jol
+                  INNER JOIN public.judge j ON j.id = jol.judge_id
+                  WHERE jol.status = 'linked'
+                    AND jol.official_id IN :official_ids
+                    AND jol.official_id IS NOT NULL
+                    AND so.official_name IS NOT NULL
+                    AND lower(btrim(j.name)) = lower(btrim(so.official_name))
+                )
+              ) AS directory_official_id
+            ) AS attrib
+            WHERE attrib.directory_official_id IS NOT NULL
 {nqs_clause}{sync_clause}{qual_clause}              AND s.discipline_type_id IN :discipline_type_ids
               AND c.year ~ '^[0-9]+$'
               AND ({role_pred})
-            GROUP BY so.official_id, c.year::integer
+            GROUP BY attrib.directory_official_id, c.year::integer
             """
         )
         .bindparams(
