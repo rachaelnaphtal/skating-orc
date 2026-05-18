@@ -108,16 +108,18 @@ DISC_ABBREV = {
 
 
 def _competition_type_sort_key(competition_type_id) -> int:
-    """Within a calendar year: US Synchro Champs, US Champs, SYS sectionals, SPD sectionals."""
+    """Within a calendar year: US Synchro Champs, US Champs, adult/collegiate champs, SYS sectionals, SPD (+ adult) sectionals."""
     tid = int(competition_type_id)
     if tid == 8:
         return 0
     if tid == 4:
         return 1
-    if tid in (5, 6, 7, 9):
+    if tid in (12, 14):
         return 2
-    if tid in (1, 2, 3):
+    if tid in (5, 6, 7, 9):
         return 3
+    if tid in (1, 2, 3, 13):
+        return 4
     return 99
 
 
@@ -1704,11 +1706,11 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
             width="stretch",
             hide_index=True,
             column_config={
-                "Competition": st.column_config.TextColumn(
+                "Competition":                 st.column_config.TextColumn(
                     "Competition",
                     help="Year and competition name (newest year first; within a year: "
-                    "US Synchronized Championships, US Championships, synchronized sectionals, "
-                    "then singles/pairs & dance sectionals).",
+                    "US Synchronized Championships, US Championships, adult/collegiate championships, "
+                    "synchronized sectionals, then singles/pairs & dance and adult sectionals).",
                     width="large",
                 ),
                 "Assignments": st.column_config.TextColumn(

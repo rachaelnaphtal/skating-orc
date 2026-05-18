@@ -377,6 +377,12 @@ def find_competition_type(competition_name, is_synchro):
         if "Pacific" in competition_name:
             return 7
     else:
+        if "Collegiate" in competition_name:
+            return 14
+        if "Adult" in competition_name and "Sectional" in competition_name:
+            return 13
+        if "Adult" in competition_name and "Championship" in competition_name:
+            return 12
         if competition_name == "US Championships":
             return 4
         if "Eastern" in competition_name:
@@ -2176,12 +2182,13 @@ def get_official_segment_official_competitions(official_id: int) -> pd.DataFrame
 
 
 def _competition_type_group_order_expr():
-    """Sort key: US Synchro Champs, US Champs, SYS sectionals, SPD sectionals, then other."""
+    """Sort key: US Synchro Champs, US Champs, adult/collegiate champs, SYS sectionals, SPD + adult sectionals, then other."""
     return case(
         (Competition.competition_type_id == 8, 0),
         (Competition.competition_type_id == 4, 1),
-        (Competition.competition_type_id.in_((5, 6, 7, 9)), 2),
-        (Competition.competition_type_id.in_((1, 2, 3)), 3),
+        (Competition.competition_type_id.in_((12, 14)), 2),
+        (Competition.competition_type_id.in_((5, 6, 7, 9)), 3),
+        (Competition.competition_type_id.in_((1, 2, 3, 13)), 4),
         else_=99,
     )
 

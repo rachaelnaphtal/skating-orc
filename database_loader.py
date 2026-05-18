@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import decimal
-import streamlit as st
+import re
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.sql import text
@@ -22,6 +22,18 @@ def _normalize_person_name(name: str | None) -> str:
     if not name:
         return ""
     return " ".join(name.lower().split()).strip()
+
+
+_SCRAPED_JUDGE_HONORIFIC_RE = re.compile(r"^(?:Mr\.?|Ms\.?)\s*", re.IGNORECASE)
+
+
+def normalize_scraped_judge_name(name: str | None) -> str:
+    """Strip leading ``Mr.`` / ``Ms.`` (optional period, any case) from IJS panel names."""
+    if name is None:
+        return ""
+    s = " ".join(str(name).split())
+    s = _SCRAPED_JUDGE_HONORIFIC_RE.sub("", s, count=1)
+    return s.strip()
 
 
 def _competition_flags_from_discipline_type_name(
@@ -87,7 +99,7 @@ class DatabaseLoader:
         ).delete(synchronize_session=False)
         choices_cache: dict[int, str] | None = None
         for r in rows:
-            official_name = r["name"]
+            official_name = normalize_scraped_judge_name(r["name"])
             role = r["role"]
             judge_id = self.insert_judge(official_name)
             appt_type_id = appointment_type_id_for_ijs_role(role)
@@ -150,7 +162,8 @@ class DatabaseLoader:
         return pd.DataFrame(all_pcs_dict)
 
     def _ensure_judges_by_name(self, names: list[str]) -> dict[str, int]:
-        unique = list(dict.fromkeys(names))
+        normalized = [normalize_scraped_judge_name(str(n)) for n in names]
+        unique = list(dict.fromkeys(n for n in normalized if n))
         if not unique:
             return {}
         rows = self.session.execute(
@@ -396,12 +409,19 @@ class DatabaseLoader:
         start_date,
         end_date,
         *,
+        name=None,
         qualifying=None,
         nqs=None,
         officials_analysis_competition_type_id=None,
         update_officials_competition_type=False,
     ):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
+        if not existing:
+            raise ValueError(
+                f"updateCompetition: no competition with results_url={url!r}"
+            )
+        if name is not None:
+            existing.name = name
         existing.location = location
         existing.start_date = start_date
         existing.end_date = end_date
@@ -480,6 +500,8 @@ class DatabaseLoader:
             type="Singles"
         elif "men" in segment_name.lower() or "boy" in segment_name.lower() or "excel" in segment_name.lower():
             type = "Singles"
+        elif "singles" in segment_name.lower():
+            type = "Singles"
         elif "solo" in segment_name.lower() or "shadow" in segment_name.lower():
             type = "Solo Dance"
         elif "pair" in segment_name.lower():
@@ -496,8 +518,16 @@ class DatabaseLoader:
             type="Synchronized"
         elif "elite" in segment_name.lower():
             type="Synchronized"
-        elif "choreographic excercise" in segment_name.lower():
+        elif "choreographic" in segment_name.lower():
             type="Theater On Ice"
+        elif "theatre" in segment_name.lower():
+            type="Theater On Ice"
+        elif "spin" in segment_name.lower():
+            type="Athlete Development"
+        elif "jump" in segment_name.lower():
+            type="Athlete Development"
+        elif "compulsory" in segment_name.lower():
+            type="Athlete Development"
 
         existing = self.session.query(DisciplineType).filter_by(name=type).first()
         if not existing:
@@ -535,6 +565,9 @@ class DatabaseLoader:
 
 
     def insert_judge(self, judge_name):
+        judge_name = normalize_scraped_judge_name(judge_name)
+        if not judge_name:
+            raise ValueError("insert_judge: empty name after normalization")
         existing_judge = self.session.query(Judge).filter_by(name=judge_name).first()
         if not existing_judge:
             new_judge = Judge(name=judge_name)
@@ -696,7 +729,7 @@ class DatabaseLoader:
             sid = skater_dict[str(r["Skater"])]
             ssid = ss_map[sid]
             eid = elem_id_by_pair[(ssid, str(r["Element"]))]
-            jid = judge_dict[str(r["Judge Name"])]
+            jid = judge_dict[normalize_scraped_judge_name(str(r["Judge Name"]))]
             key = (eid, jid)
             score_by_key[key] = {
                 "element_id": eid,
@@ -738,7 +771,7 @@ class DatabaseLoader:
             ssid = ss_map[skater_id]
             converted_name = str(rule_error["Element"]).split(" ")[0]
             eid = elem_id_by_pair[(ssid, converted_name)]
-            jid = judge_dict[str(rule_error["Judge Name"])]
+            jid = judge_dict[normalize_scraped_judge_name(str(rule_error["Judge Name"]))]
             pairs.append((eid, jid))
         uniq = list(dict.fromkeys(pairs))
         step = 500
@@ -783,7 +816,7 @@ class DatabaseLoader:
             )
             judge_id = (
                 self.session.query(Judge)
-                .filter_by(name=rule_error["Judge Name"])
+                .filter_by(name=normalize_scraped_judge_name(rule_error["Judge Name"]))
                 .first()
                 .id
             )
@@ -816,7 +849,7 @@ class DatabaseLoader:
             sid = skater_dict[str(r["Skater"])]
             skater_segment_id = ss_map[sid]
             pcs_type_id = pcs_type_map[str(r["Component"])]
-            judge_id = judge_dict[str(r["Judge Name"])]
+            judge_id = judge_dict[normalize_scraped_judge_name(str(r["Judge Name"]))]
             key = (skater_segment_id, pcs_type_id, judge_id)
             score_dec = self._to_decimal(r["Score"])
             expected[key] = score_dec

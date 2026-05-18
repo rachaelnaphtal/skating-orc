@@ -12,7 +12,7 @@ def categorizeElement(element):
     if "+" in element:
         if element[-1].isdigit():
             element = element[:-1]
-        if element[-1] == "B":
+        if element[-1].lower() == "b":
             element = element[:-1]
         element = element.replace("+SyTwM", "")
         element = element.replace("+DiStM", "")
@@ -29,7 +29,7 @@ def categorizeElement(element):
         # element = element.replace("+SeEe", "")
     if not element:
         return ""
-    if element[-1] == "V":
+    if element[-1] == "V" or element[-1] == "v":
         element = element[:-1]
     if element and element[-1].isdigit():
         element = element[:-1]
@@ -117,11 +117,11 @@ def categorizeElement(element):
         return element
     elif element.endswith("Li"):
         return "Lift"
-    elif element.endswith("Sp"):
+    elif element.lower().endswith("sp"):
         return "Spin"
     elif element.endswith("Th"):
         return "Throw Jump"
-    elif len(element) >= 2 and element[0] in ["1", "2", "3", "4"] and element[1] in ["A", "S", "T", "L", "F", "H"]:
+    elif len(element) >= 2 and element[0] in ["1", "2", "3", "4"] and element[1].lower() in ["a", "s", "t", "l", "f", "h"]:
         return "Jump"
     elif element.endswith("+pi") or element == "I":
         return "Intersection"
@@ -139,10 +139,12 @@ def categorizeElement(element):
         return "Edge Element"
     elif element.strip().startswith("A+"):
         return "Jump"
-    elif "Wz" in element:
+    elif "wz" in element.lower():
         return "Jump"
     elif element.strip().startswith("SlLi4+RoLi4*"):
         return "Lift"
+    elif element.startswith("StSq"):
+            return "StSq"
     print(f"Unable to categorize {element}")
     return element
 

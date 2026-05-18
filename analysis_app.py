@@ -2331,8 +2331,9 @@ elif page == "Load Competition":
                 load_oa_competition_type_id
             )
             st.caption(
-                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs} "
-                "(nonqualifying id 11 → qualifying false; National Qualifying Series id 10 → nqs true)."
+                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs}. "
+                "Nonqualifying (id **11**) → qualifying false. NQS (id **10**) → nqs true. "
+                "Adult / Collegiate types (**12–14**) → qualifying true, nqs false."
             )
             # pdf_folder = st.text_input(
             #     "PDF output folder (leave blank if not saving PDFs)",

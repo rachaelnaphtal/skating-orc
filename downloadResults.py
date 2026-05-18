@@ -1,7 +1,6 @@
 import asyncio
 from io import BytesIO
 from pyppeteer import launch
-import gcp_interactions_helper
 import judgingParsing
 from judgingParsing import autofit_worksheet
 from sharedJudgingAnalysis import format_out_of_range_sheets
@@ -1245,8 +1244,7 @@ def create_additional_analysis_sheet(
                 judgingParsing.autofit_worksheet(writer.sheets[sheet])
 
     if use_gcp:
-        gcp_interactions_helper.write_file_to_gcp(
-            excel_buffer.getvalue(), excel_path)
+        write_file_to_gcp(excel_buffer.getvalue(), excel_path)
 
 
 def create_season_summary(pdf_folder="", excel_folder="", full_report_name="2425Summary", only_rule_errors=False):

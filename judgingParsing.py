@@ -4,6 +4,7 @@ from pypdf import PdfReader
 import pandas as pd
 import re
 import requests
+import sys
 from bs4 import BeautifulSoup
 from collections import defaultdict
 
@@ -26,9 +27,23 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from gcp_interactions_helper import read_file_from_gcp
-import streamlit as st
 
 USING_ISU_COMPONENT_METHOD = False
+
+
+def _parsing_user_message(msg: str) -> None:
+    """Parse/score warnings: always log to stderr; ``st.error`` only when Streamlit imports and runs."""
+    print(msg, file=sys.stderr)
+    try:
+        import streamlit as st  # type: ignore
+    except ImportError:
+        return
+    except Exception:
+        return
+    try:
+        st.error(msg)
+    except Exception:
+        pass
 
 
 def split_judge_filter_names(judge_filter: str) -> frozenset[str]:
@@ -383,9 +398,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     pcs_per_skater[current_skater] = []
                     skater_details[current_skater] = technical_score
                 if int(skater_match.group(1)) != len(elements_per_skater.keys()):
-                    print(
-                        f"Missing skater in {event_name}. Next is {current_skater}")
-                    st.error(
+                    _parsing_user_message(
                         f"Missing skater in {event_name}. Next is {current_skater}"
                     )
                 continue
@@ -484,10 +497,7 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                     "Possible Missing Position": possible_missing_position
                 })
             if current_skater == None and (pcs_match or element_match):
-                print(
-                    f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
-                )
-                st.error(
+                _parsing_user_message(
                     f"Element or pcs found without skater. Currently {len(skater_details.keys())} skaters found. Event: {event_name}"
                 )
 
@@ -496,16 +506,16 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                               for x in elements_per_skater[skater]]), 2)
         expected = float(skater_details[skater])
         if foundElements != expected:
-            print(
-                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
-            )
-            st.error(
+            _parsing_user_message(
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
-            print(f"Components missing for skater {skater} {event_name}")
-            st.error(f"Components missing for skater {skater} {event_name}")
+            athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
+            if not athlete_dev_event:
+                _parsing_user_message(
+                    f"Components missing for skater {skater} {event_name}"
+                )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
@@ -630,16 +640,16 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
                               for x in elements_per_skater[skater]]), 2)
         expected = float(skater_details[skater]["element_score"])
         if foundElements != expected:
-            print(
-                f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
-            )
-            st.error(
+            _parsing_user_message(
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
         pcs = pcs_per_skater[skater]
         if len(pcs) < 3:
-            print(f"Components missing for skater {skater} {event_name}")
-            st.error(f"Components missing for skater {skater} {event_name}")
+            athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
+            if not athlete_dev_event:
+                _parsing_user_message(
+                    f"Components missing for skater {skater} {event_name}"
+                )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 

@@ -1,5 +1,4 @@
 import os
-import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from models import Base
