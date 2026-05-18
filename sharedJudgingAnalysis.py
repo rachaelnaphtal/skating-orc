@@ -89,6 +89,7 @@ def categorizeElement(element):
         "ChTw": "Twizzle",
         "PiF": "Pivot Figure",
         "DiSt": "Step Sequence",
+        "NtCiSt": "Step Sequence",
         "OFT": "Step Sequence",
         "OFSt": "Step Sequence",
         "OFStW": "Step Sequence",
@@ -129,7 +130,7 @@ def categorizeElement(element):
         return "No Hold Element"
     elif "+kp" in element:
         if element.startswith("StSq"):
-            return "StSq"
+            return "Step Sequence"
         return "Pattern dance"
     elif re.search(r'\dSq$', element):
         return "Pattern dance"
@@ -144,7 +145,7 @@ def categorizeElement(element):
     elif element.strip().startswith("SlLi4+RoLi4*"):
         return "Lift"
     elif element.startswith("StSq"):
-            return "StSq"
+            return "Step Sequence"
     print(f"Unable to categorize {element}")
     return element
 

@@ -31,6 +31,7 @@ from openpyxl.styles import (
 from google.cloud import storage
 from gcp_interactions_helper import write_file_to_gcp
 from gcp_interactions_helper import save_gcp_workbook
+from ijs_index_parse import ijs_index_start_end_and_location
 
 
 def convert_url_to_pdf(url, pdf_path):
@@ -668,18 +669,6 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link, session=None
     return (details_link, judgesNames, event_name)
 
 
-def _parse_ijs_competition_index_date_line(first_h3_text: str) -> tuple[str, str]:
-    """First ``<h3>`` under ijsLive index: ``MM/DD/YYYY (TZ)`` or ``start - end`` (dates only)."""
-    raw = " ".join(str(first_h3_text).split())
-    before_tz = raw.split("(", 1)[0].strip()
-    if " - " in before_tz:
-        left, right = before_tz.split(" - ", 1)
-        return left.strip(), right.strip()
-    if before_tz:
-        return before_tz, before_tz
-    return "", ""
-
-
 def loadCompetitionInfo(base_url, session=None):
     if base_url.endswith(".htm"):
         return loadCompetitionInfoFSM(base_url, session=session)
@@ -689,19 +678,7 @@ def loadCompetitionInfo(base_url, session=None):
         print(f"WARNING: Empty page fetching competition info {base_url!r}")
         return ("", "", "")
     soup = BeautifulSoup(page_contents, "html.parser")
-    all_h3_tags = soup.find_all("h3")
-    if not all_h3_tags:
-        print(f"WARNING: No <h3> blocks for dates on {base_url!r}")
-        return ("", "", "")
-    start_date, end_date = _parse_ijs_competition_index_date_line(
-        all_h3_tags[0].get_text()
-    )
-    if len(all_h3_tags) >= 3:
-        location = all_h3_tags[2].get_text()
-    elif len(all_h3_tags) >= 2:
-        location = all_h3_tags[1].get_text()
-    else:
-        location = ""
+    start_date, end_date, location = ijs_index_start_end_and_location(soup, base_url)
     return (start_date, end_date, location)
 
 def loadCompetitionInfoFSM(base_url, session=None):
