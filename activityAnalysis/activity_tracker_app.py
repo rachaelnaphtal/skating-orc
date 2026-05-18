@@ -44,6 +44,8 @@ from officials_analysis_models import (
     Assignment,
 )
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import date, datetime
 
 engine = get_engine()
@@ -1963,22 +1965,29 @@ if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
             column_config=nqs_col_cfg,
         )
         if nqs_numeric_cols:
-            stats_vals: dict[str, object] = {"Name": "Average"}
+            stats_mean_values: dict[str, object] = {"Name": "Average"}
+            stats_median_values: dict[str, object] = {"Name": "Median"}
             stats_cfg = {
                 "Name": st.column_config.TextColumn("Name", width="large"),
             }
             if _has_level:
-                stats_vals["Level"] = ""
+                stats_mean_values["Level"] = ""
+                stats_median_values["Level"] = ""
                 stats_cfg["Level"] = st.column_config.TextColumn("Level", width="medium")
             for col in nqs_numeric_cols:
                 s = pd.to_numeric(nqs_table[col], errors="coerce")
                 m = s.mean(skipna=True)
-                stats_vals[col] = float(m) if pd.notna(m) else 0.0
+                stats_mean_values[col] = float(m) if pd.notna(m) else 0.0
+                med = s.median(skipna=True)
+                stats_median_values[col] = float(med) if pd.notna(med) else 0.0
                 _stat_kw: dict = {"format": "%.2f"}
                 if str(col).strip() == "2122":
                     _stat_kw["help"] = NQS_COLUMN_2122_HELP
                 stats_cfg[col] = st.column_config.NumberColumn(str(col), **_stat_kw)
-            stats_df = pd.DataFrame([stats_vals])[nqs_table.columns.tolist()]
+            _col_order = nqs_table.columns.tolist()
+            stats_df = pd.DataFrame([stats_mean_values, stats_median_values])[
+                _col_order
+            ]
             st.dataframe(
                 stats_df,
                 width="stretch",
@@ -2024,11 +2033,74 @@ if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
                 )
                 _nqs_dist_df.columns = [_x_label, "Officials"]
                 st.subheader("Officials by competition count")
-                st.bar_chart(
-                    _nqs_dist_df,
-                    x=_x_label,
-                    y="Officials",
+                _chart_df = _nqs_dist_df.copy()
+                _chart_df["_x_sort_key"] = pd.to_numeric(
+                    _chart_df[_x_label], errors="coerce"
                 )
+                _chart_df = (
+                    _chart_df.sort_values("_x_sort_key", kind="mergesort")
+                    .drop(columns=["_x_sort_key"])
+                    .reset_index(drop=True)
+                )
+                _officials_sum = int(_chart_df["Officials"].sum())
+                if _officials_sum > 0:
+                    _chart_df = _chart_df.copy()
+                    _chart_df["Cumulative %"] = (
+                        _chart_df["Officials"].cumsum() / _officials_sum * 100.0
+                    )
+                    _x_str = _chart_df[_x_label].astype(str)
+                    _count_fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    _count_fig.add_trace(
+                        go.Bar(
+                            x=_x_str,
+                            y=_chart_df["Officials"],
+                            name="Officials",
+                            marker_color="#4c78a8",
+                        ),
+                        secondary_y=False,
+                    )
+                    _count_fig.add_trace(
+                        go.Scatter(
+                            x=_x_str,
+                            y=_chart_df["Cumulative %"],
+                            name="Cumulative %",
+                            mode="lines+markers",
+                            line=dict(color="#f58518", width=2),
+                        ),
+                        secondary_y=True,
+                    )
+                    _count_fig.update_xaxes(title_text=_x_label, type="category")
+                    _count_fig.update_yaxes(
+                        title_text="Officials",
+                        secondary_y=False,
+                        rangemode="tozero",
+                    )
+                    _count_fig.update_yaxes(
+                        title_text="Cumulative %",
+                        secondary_y=True,
+                        range=[0, 100],
+                        tickformat=".0f",
+                        ticksuffix="%",
+                    )
+                    _count_fig.update_layout(
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1,
+                        ),
+                        hovermode="x unified",
+                        margin=dict(l=40, r=40, t=40, b=80),
+                    )
+                    st.caption(
+                        "Bars are in **numerical order** by competition count (low → high on the x-axis). "
+                        "The line is **cumulative share of officials** (right axis): "
+                        "at each bucket, the share of all officials with **that count or fewer**."
+                    )
+                    st.plotly_chart(_count_fig, width="stretch")
+                else:
+                    st.info("No officials to chart for this selection.")
     st.stop()
 
 
