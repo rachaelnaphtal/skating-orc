@@ -941,6 +941,43 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
                 placeholder="All levels",
             )
 
+        _reg_opts: list[str] = []
+        _sec_opts: list[str] = []
+        if "region" in raw_appt.columns:
+            _reg_opts = sorted(
+                raw_appt["region"].fillna("(none)").astype(str).unique(),
+                key=str.lower,
+            )
+            _sec_opts = sorted(
+                {
+                    section_display_from_region(r)
+                    for r in raw_appt["region"]
+                },
+                key=str.lower,
+            )
+
+        f4, f5 = st.columns(2)
+        with f4:
+            sel_region = st.multiselect(
+                "Region",
+                options=_reg_opts,
+                default=[],
+                key="appt_rpt_filter_region",
+                help="Directory **region** string (leave empty for all). “(none)” = no region on the official record.",
+                placeholder="All regions",
+                disabled=not _reg_opts,
+            )
+        with f5:
+            sel_section = st.multiselect(
+                "Section",
+                options=_sec_opts,
+                default=[],
+                key="appt_rpt_filter_section",
+                help="Roll-up from region (Eastern / Midwestern / Pacific Coast, etc.; same as the Section column). Leave empty for all.",
+                placeholder="All sections",
+                disabled=not _sec_opts,
+            )
+
         filt = raw_appt.copy()
         if sel_types:
             filt = filt[filt["appointment_type"].isin(sel_types)]
@@ -950,23 +987,36 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
         if sel_level:
             _l = filt["level"].fillna("(none)").astype(str)
             filt = filt[_l.isin(sel_level)]
+        if sel_region and "region" in filt.columns:
+            _r = filt["region"].fillna("(none)").astype(str)
+            filt = filt[_r.isin(sel_region)]
+        if sel_section and "region" in filt.columns:
+            filt = filt[
+                filt["region"].map(section_display_from_region).isin(sel_section)
+            ]
 
         filtered = filt.reset_index(drop=True)
 
-        _any_dim_filter = bool(sel_types) or bool(sel_disc) or bool(sel_level)
+        _any_dim_filter = (
+            bool(sel_types)
+            or bool(sel_disc)
+            or bool(sel_level)
+            or bool(sel_region)
+            or bool(sel_section)
+        )
         if _any_dim_filter:
             st.caption(
                 f"**Showing {len(filtered)}** of **{len(raw_appt)}** appointment(s) "
-                "(type / discipline / level filters applied)."
+                "(filters applied)."
             )
         else:
             st.caption(
                 f"**Showing all {len(filtered)}** appointment(s) "
-                "(no type, discipline, or level filter — leave multiselects empty for “all”)."
+                "(no filters — leave multiselects empty for “all”)."
             )
 
         if filtered.empty:
-            st.info("No rows match the current type, discipline, and level filters.")
+            st.info("No rows match the current filters.")
         else:
 
             def _col_summary(frame: pd.DataFrame, col: str, title: str) -> pd.DataFrame:
@@ -1085,6 +1135,52 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
                 },
             )
 
+            if "region" in filtered.columns:
+                st.subheader("Geographic breakdown")
+                appt_geo_mode = st.radio(
+                    "Count appointments by",
+                    options=["Section", "Region"],
+                    horizontal=True,
+                    index=0,
+                    key="appt_achieved_geo_breakdown_mode",
+                    help="**Section** uses the same roll-up as the Section column (Eastern / Midwestern / Pacific Coast, etc.). "
+                    "**Region** counts each raw directory region string.",
+                )
+                if appt_geo_mode == "Section":
+                    _geo_series = filtered["region"].map(
+                        section_display_from_region
+                    ).astype(str)
+                    _geo_title = "Section"
+                else:
+                    _geo_series = filtered["region"].fillna("(none)").astype(str)
+                    _geo_title = "Region"
+                s_geo = (
+                    _geo_series.value_counts(dropna=False)
+                    .rename_axis(_geo_title)
+                    .reset_index(name="Count")
+                )
+                s_geo = s_geo.sort_values(
+                    "Count", ascending=False, kind="mergesort"
+                )
+                s_geo = pd.concat(
+                    [
+                        s_geo,
+                        pd.DataFrame(
+                            [{_geo_title: "— TOTAL —", "Count": len(filtered)}]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                st.dataframe(
+                    s_geo,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        _geo_title: _summary_typ,
+                        "Count": _summary_cnt,
+                    },
+                )
+
             show_raw = st.checkbox(
                 "Show raw appointment rows",
                 value=True,
@@ -1093,6 +1189,29 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
             if show_raw:
                 st.subheader("Raw appointments")
                 disp = filtered.copy()
+                if "region" in disp.columns:
+                    disp["section"] = disp["region"].map(section_display_from_region)
+                else:
+                    disp["section"] = ""
+                _raw_order = [
+                    c
+                    for c in (
+                        "official_id",
+                        "full_name",
+                        "mbr_number",
+                        "region",
+                        "section",
+                        "appointment_type",
+                        "discipline",
+                        "level",
+                        "appointed_date",
+                        "achieved_date",
+                        "active",
+                        "mentor",
+                    )
+                    if c in disp.columns
+                ]
+                disp = disp[_raw_order]
                 for _dc in ("appointed_date", "achieved_date"):
                     if _dc in disp.columns:
                         disp[_dc] = pd.to_datetime(
@@ -1115,6 +1234,16 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
                         "mbr_number": st.column_config.TextColumn(
                             "Member #",
                             width="small",
+                        ),
+                        "region": st.column_config.TextColumn(
+                            "Region",
+                            width="small",
+                            help="Raw directory region string.",
+                        ),
+                        "section": st.column_config.TextColumn(
+                            "Section",
+                            width="small",
+                            help="Mapped from region (Eastern / Midwestern / Pacific Coast, etc.).",
                         ),
                         "appointment_type": st.column_config.TextColumn(
                             "Type",

@@ -1979,7 +1979,7 @@ def get_appointments_by_achieved_date_range(
     """Directory rows where ``achieved_date`` is on or between ``start_date`` and ``end_date`` (inclusive).
 
     Rows with NULL ``achieved_date`` are excluded. Returns one row per appointment with
-    official and appointment attributes for reporting.
+    official (including ``region``) and appointment attributes for reporting.
     """
     from datetime import date as date_type
 
@@ -1987,6 +1987,7 @@ def get_appointments_by_achieved_date_range(
         "official_id",
         "full_name",
         "mbr_number",
+        "region",
         "appointment_type",
         "discipline",
         "level",
@@ -2012,6 +2013,7 @@ def get_appointments_by_achieved_date_range(
                 Officials.id.label("official_id"),
                 Officials.full_name,
                 Officials.mbr_number,
+                Officials.region,
                 AppointmentTypes.name.label("appointment_type"),
                 Disciplines.name.label("discipline"),
                 Levels.name.label("level"),
