@@ -310,6 +310,105 @@ class JudgeAnalytics:
         all_groups.sort(key=lambda g: g["label"].lower())
         return all_groups
 
+    def get_judge_id_to_identity_label(self) -> dict[int, str]:
+        """Map each scoring ``judge.id`` to a display label (merges directory-linked aliases)."""
+        out: dict[int, str] = {}
+        for group in self.get_judge_analysis_identity_groups():
+            label = group["label"]
+            for jid in group["judge_ids"]:
+                out[int(jid)] = label
+        return out
+
+    @staticmethod
+    def _merge_per_judge_stat_dicts_by_identity(
+        per_judge: dict[int, dict],
+        judge_id_to_label: dict[int, str],
+    ) -> dict[str, dict]:
+        """Sum count fields and weight-average ``avg_dev`` per identity label."""
+        merged: dict[str, dict] = {}
+        for judge_id, stats in per_judge.items():
+            label = judge_id_to_label.get(judge_id)
+            if not label:
+                continue
+            bucket = merged.setdefault(
+                label,
+                {
+                    "total": 0,
+                    "throwouts": 0,
+                    "anomalies": 0,
+                    "rule_errors": 0,
+                    "_avg_dev_sum": 0.0,
+                    "_avg_dev_n": 0,
+                },
+            )
+            for key in ("total", "throwouts", "anomalies", "rule_errors"):
+                bucket[key] += int(stats.get(key) or 0)
+            n = int(stats.get("total") or 0)
+            if n and stats.get("avg_dev") is not None:
+                bucket["_avg_dev_sum"] += float(stats["avg_dev"]) * n
+                bucket["_avg_dev_n"] += n
+        for bucket in merged.values():
+            n = bucket.pop("_avg_dev_n", 0)
+            dev_sum = bucket.pop("_avg_dev_sum", 0.0)
+            bucket["avg_dev"] = (dev_sum / n) if n else 0.0
+        return merged
+
+    @staticmethod
+    def _merge_competition_judge_stat_dicts_by_identity(
+        per_comp_judge: dict[tuple[int, int], dict],
+        judge_id_to_label: dict[int, str],
+    ) -> dict[tuple[int, str], dict]:
+        """Like ``_merge_per_judge_stat_dicts_by_identity`` but keyed by (competition_id, label)."""
+        merged: dict[tuple[int, str], dict] = {}
+        for (comp_id, judge_id), stats in per_comp_judge.items():
+            label = judge_id_to_label.get(judge_id)
+            if not label:
+                continue
+            key = (int(comp_id), label)
+            bucket = merged.setdefault(
+                key,
+                {
+                    "total": 0,
+                    "throwouts": 0,
+                    "anomalies": 0,
+                    "rule_errors": 0,
+                    "_avg_dev_sum": 0.0,
+                    "_avg_dev_n": 0,
+                },
+            )
+            for field in ("total", "throwouts", "anomalies", "rule_errors"):
+                bucket[field] += int(stats.get(field) or 0)
+            n = int(stats.get("total") or 0)
+            if n and stats.get("avg_dev") is not None:
+                bucket["_avg_dev_sum"] += float(stats["avg_dev"]) * n
+                bucket["_avg_dev_n"] += n
+        for bucket in merged.values():
+            n = bucket.pop("_avg_dev_n", 0)
+            dev_sum = bucket.pop("_avg_dev_sum", 0.0)
+            bucket["avg_dev"] = (dev_sum / n) if n else 0.0
+        return merged
+
+    @staticmethod
+    def _merge_excess_map_by_identity(
+        excess_map: dict,
+        judge_id_to_label: dict[int, str],
+        *,
+        by_competition: bool = False,
+    ) -> dict:
+        if by_competition:
+            merged: dict[tuple[str, int], int] = defaultdict(int)
+            for (judge_id, comp_id), val in excess_map.items():
+                label = judge_id_to_label.get(int(judge_id))
+                if label:
+                    merged[(label, int(comp_id))] += int(val or 0)
+            return merged
+        merged_judge: dict[str, int] = defaultdict(int)
+        for judge_id, val in excess_map.items():
+            label = judge_id_to_label.get(int(judge_id))
+            if label:
+                merged_judge[label] += int(val or 0)
+        return merged_judge
+
     def _event_dates_for_competition_ids(self, competition_ids):
         """Map competition id → event date for sorting (start_date, else end_date)."""
         if not competition_ids:
@@ -1538,7 +1637,7 @@ class JudgeAnalytics:
     ):
         """Get data for judge performance heatmap"""
 
-        judges = self.session.query(Judge.id, Judge.name).all()
+        judge_id_to_label = self.get_judge_id_to_identity_label()
         core_disc = self._qualifying_core_disciplines_active(competition_scope)
         seg_discipline_ids = self._merged_segment_discipline_ids(
             core_disc, discipline_type_ids
@@ -1610,7 +1709,7 @@ class JudgeAnalytics:
         )
 
         elem_stats = self.session.execute(elem_query.group_by(ElementScorePerJudge.judge_id)).all()
-        elem_dict = {
+        elem_dict_raw = {
             judge_id: dict(
                 total=elem_total,
                 throwouts=elem_thr,
@@ -1620,10 +1719,17 @@ class JudgeAnalytics:
             )
             for judge_id, elem_total, elem_thr, elem_anom, elem_rules, elem_avg_dev in elem_stats
         }
+        pcs_dict = self._merge_per_judge_stat_dicts_by_identity(
+            pcs_dict, judge_id_to_label
+        )
+        elem_dict = self._merge_per_judge_stat_dicts_by_identity(
+            elem_dict_raw, judge_id_to_label
+        )
+
         # --- Precompute excess anomalies once for all judges ---
         excess_anomalies = None
         if metric == 'excess_anomalies':
-            excess_anomalies = self._calculate_all_judge_excess_anomalies(
+            excess_raw = self._calculate_all_judge_excess_anomalies(
                 year_filter=year_filter,
                 competition_ids=competition_ids,
                 discipline_ids=seg_discipline_ids,
@@ -1631,12 +1737,15 @@ class JudgeAnalytics:
                 by_competition=False,
                 competition_scope=competition_scope,
             )
+            excess_anomalies = self._merge_excess_map_by_identity(
+                excess_raw, judge_id_to_label, by_competition=False
+            )
 
         # --- Assemble heatmap data ---
         heatmap_data = []
-        for judge_id, judge_name in judges:
-            pcs = pcs_dict.get(judge_id, {})
-            elem = elem_dict.get(judge_id, {})
+        for judge_name in sorted(pcs_dict.keys() | elem_dict.keys(), key=str.lower):
+            pcs = pcs_dict.get(judge_name, {})
+            elem = elem_dict.get(judge_name, {})
 
             if not pcs and not elem:
                 continue
@@ -1679,7 +1788,7 @@ class JudgeAnalytics:
                 if value == 0:
                     continue
             elif metric == 'excess_anomalies':
-                value = excess_anomalies.get(judge_id, 0)
+                value = excess_anomalies.get(judge_name, 0)
                 if value == 0:
                     continue
             elif metric == 'avg_deviation':
@@ -1832,13 +1941,17 @@ class JudgeAnalytics:
                 avg_abs_pool = (pavg_abs * pn + eavg_abs * en) / total_scores
 
         if include_excess:
-            excess_map = self._calculate_all_judge_excess_anomalies(
+            excess_raw = self._calculate_all_judge_excess_anomalies(
                 year_filter=year_filter,
                 competition_ids=competition_ids,
                 discipline_ids=seg_discipline_ids,
                 score_type=score_type,
                 by_competition=False,
                 competition_scope=competition_scope,
+            )
+            id_to_label = self.get_judge_id_to_identity_label()
+            excess_map = self._merge_excess_map_by_identity(
+                excess_raw, id_to_label, by_competition=False
             )
             total_excess = int(sum(excess_map.values()))
         else:
@@ -2037,7 +2150,8 @@ class JudgeAnalytics:
         comp_q = self.session.query(Competition.id, Competition.name, Competition.year)
         comp_q = self._filter_orm_competition_scope(comp_q, competition_scope)
         competitions = comp_q.all()
-        judges = self.session.query(Judge.id, Judge.name).all()
+        judge_id_to_label = self.get_judge_id_to_identity_label()
+        identity_labels = sorted(set(judge_id_to_label.values()), key=str.lower)
 
         # --- Precompute PCS stats grouped by (competition, judge) ---
         pcs_q = (
@@ -2045,7 +2159,7 @@ class JudgeAnalytics:
                 Competition.id.label("competition_id"),
                 PcsScorePerJudge.judge_id,
                 func.count().label("pcs_total_scores"),
-                func.sum(case((PcsScorePerJudge.is_throwout, 1), else_=0)).label("pcs_throwouts"),
+                func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
                 func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
                                 PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
                 func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors"),
@@ -2062,7 +2176,7 @@ class JudgeAnalytics:
             pcs_q.group_by(Competition.id, PcsScorePerJudge.judge_id)
         ).all()
 
-        pcs_dict = {
+        pcs_dict_raw = {
             (comp_id, judge_id): dict(
                 total=pcs_total,
                 throwouts=pcs_thr,
@@ -2097,7 +2211,7 @@ class JudgeAnalytics:
             elem_q.group_by(Competition.id, ElementScorePerJudge.judge_id)
         ).all()
 
-        elem_dict = {
+        elem_dict_raw = {
             (comp_id, judge_id): dict(
                 total=elem_total,
                 throwouts=elem_thr,
@@ -2107,11 +2221,17 @@ class JudgeAnalytics:
             )
             for comp_id, judge_id, elem_total, elem_thr, elem_anom, elem_rules, elem_avg_dev in elem_stats
         }
+        pcs_dict = self._merge_competition_judge_stat_dicts_by_identity(
+            pcs_dict_raw, judge_id_to_label
+        )
+        elem_dict = self._merge_competition_judge_stat_dicts_by_identity(
+            elem_dict_raw, judge_id_to_label
+        )
 
         # --- Precompute excess anomalies for all competitions ---
         excess_anomalies = None
         if metric == 'excess_anomalies':
-            excess_anomalies = self._calculate_all_judge_excess_anomalies(
+            excess_raw = self._calculate_all_judge_excess_anomalies(
                 year_filter=None,
                 competition_ids=None,
                 discipline_ids=seg_discipline_ids,
@@ -2119,14 +2239,16 @@ class JudgeAnalytics:
                 by_competition=True,
                 competition_scope=competition_scope,
             )
-            # structure: {(judge_id, competition_id): excess}
+            excess_anomalies = self._merge_excess_map_by_identity(
+                excess_raw, judge_id_to_label, by_competition=True
+            )
 
         # --- Build heatmap data ---
         heatmap_data = []
         for comp_id, comp_name, comp_year in competitions:
-            for judge_id, judge_name in judges:
-                pcs = pcs_dict.get((comp_id, judge_id), {})
-                elem = elem_dict.get((comp_id, judge_id), {})
+            for judge_name in identity_labels:
+                pcs = pcs_dict.get((comp_id, judge_name), {})
+                elem = elem_dict.get((comp_id, judge_name), {})
 
                 if not pcs and not elem:
                     continue
@@ -2163,7 +2285,7 @@ class JudgeAnalytics:
                     if value == 0:
                         continue
                 elif metric == 'excess_anomalies':
-                    value = excess_anomalies.get((judge_id, comp_id), 0)
+                    value = excess_anomalies.get((judge_name, comp_id), 0)
                     if value == 0:
                         continue
                 elif metric == 'avg_deviation':

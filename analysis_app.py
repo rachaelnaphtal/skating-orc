@@ -376,6 +376,8 @@ def cross_judge_benchmarking_page():
     st.header("Cross-judge benchmarking")
     st.caption(
         "Compare judges using the same metric definitions as elsewhere in this app. "
+        "Judges linked to the same directory official in **Admin → Judge ↔ directory matcher** "
+        "are combined into one row (same as Individual Judge Analysis). "
         "Average deviation uses absolute panel mean deviation per judge "
         "(PCS and elements combined with score-weighted averaging when both are selected). "
         "Optional competition scope filters linked officials types on each competition. "
