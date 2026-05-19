@@ -212,6 +212,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             "Skips do not count toward --delay sleep."
         ),
     )
+    p.add_argument(
+        "--log-requests",
+        action="store_true",
+        help="Print every probed URL and HTTP status on stderr.",
+    )
     return p.parse_args(argv)
 
 
