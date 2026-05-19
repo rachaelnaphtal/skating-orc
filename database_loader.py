@@ -81,8 +81,20 @@ def appointment_type_id_for_ijs_role(role_label: str) -> int | None:
 
 
 class DatabaseLoader:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, defer_commits: bool = False):
         self.session = session
+        self.defer_commits = defer_commits
+
+    def commit(self) -> None:
+        """Flush pending ORM work and commit (used at end of batch scrapes)."""
+        self.session.commit()
+
+    def _persist(self) -> None:
+        """Commit, or only flush when ``defer_commits`` is set (batch load)."""
+        if self.defer_commits:
+            self.session.flush()
+        else:
+            self.session.commit()
 
     def replace_segment_officials(self, segment_id: int, rows: list) -> None:
         """
@@ -123,7 +135,7 @@ class DatabaseLoader:
                     appointment_type_id=appt_type_id,
                 )
             )
-        self.session.commit()
+        self._persist()
 
     def _flush(self) -> None:
         """Persist pending work to the DB without ending the transaction (fast for bulk loads)."""
@@ -433,7 +445,7 @@ class DatabaseLoader:
             existing.officials_analysis_competition_type_id = (
                 officials_analysis_competition_type_id
             )
-        self.session.commit()
+        self._persist()
 
     def refresh_competition_discipline_flags(self, competition_id: int) -> None:
         """
@@ -490,7 +502,7 @@ class DatabaseLoader:
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
             self.session.add(new)
-            self.session.commit()
+            self._persist()
             return new.id
         return existing.id
         
@@ -519,9 +531,9 @@ class DatabaseLoader:
         elif "elite" in segment_name.lower():
             type="Synchronized"
         elif "choreographic" in segment_name.lower():
-            type="Theater On Ice"
+            type="Theatre on Ice"
         elif "theatre" in segment_name.lower():
-            type="Theater On Ice"
+            type="Theatre on Ice"
         elif "spin" in segment_name.lower():
             type="Athlete Development"
         elif "jump" in segment_name.lower():
@@ -546,13 +558,13 @@ class DatabaseLoader:
             self.session.add(new)
             self._flush()
             self.refresh_competition_discipline_flags(competition_id)
-            self.session.commit()
+            self._persist()
             return new.id
         existing.discipline_type_id = discipline_type_id
         existing.freeskate = is_freeskate
         self._flush()
         self.refresh_competition_discipline_flags(competition_id)
-        self.session.commit()
+        self._persist()
         return existing.id
 
     def get_segment_id(self, segment_name: str, competition_id: int) -> int | None:
@@ -832,7 +844,7 @@ class DatabaseLoader:
         judge_dict = self._ensure_judges_by_name(list(judgesNames))
         all_pcs_df = self._dataframe_pcs(all_pcs_dict)
         if all_pcs_df.empty:
-            self.session.commit()
+            self._persist()
             return
 
         skater_names = all_pcs_df["Skater"].astype(str).unique().tolist()
@@ -898,7 +910,7 @@ class DatabaseLoader:
             if not self._numeric_eq(db_scores[k], exp):
                 raise NameError("Scores do not align")
 
-        self.session.commit()
+        self._persist()
 
 # session = get_db_session()
 # database_obj = DatabaseLoader(session)

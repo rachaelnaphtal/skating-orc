@@ -70,6 +70,7 @@ def categorizeElement(element):
         "pChSq": "ChSq",
         "ChSl": "Choreo Element",
         "ChSt": "Choreo Element",
+        "chst": "Choreo Element",
         "pChSt": "Choreo Element",
         "ChAJ": "Choreo Element",
         "ChRS": "Choreo Element",
@@ -94,6 +95,8 @@ def categorizeElement(element):
         "OFSt": "Step Sequence",
         "OFStW": "Step Sequence",
         "MiSt": "Step Sequence",
+        "NtMiSt1": "Step Sequence",
+        "NtDiSt1": "Step Sequence",
         "SpEe": "Edge Element",
         "SeEe": "Edge Element",
         "CiSt": "Step Sequence",
@@ -114,7 +117,9 @@ def categorizeElement(element):
         return "Twist"
     elif element in ["PSp", "PCoSp"]:
         return "Pairs Spin"
-    elif element in ["StSq" or "ChSq"]:
+    elif element == "StSq":
+        return "Step Sequence"
+    elif element in ["ChSq"]:
         return element
     elif element.endswith("Li"):
         return "Lift"
@@ -142,6 +147,8 @@ def categorizeElement(element):
         return "Jump"
     elif "wz" in element.lower():
         return "Jump"
+    elif "pchsq" in element.lower():
+        return "ChSq"
     elif element.strip().startswith("SlLi4+RoLi4*"):
         return "Lift"
     elif element.startswith("StSq"):

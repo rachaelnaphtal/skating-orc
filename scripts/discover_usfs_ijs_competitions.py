@@ -24,6 +24,8 @@ Skip IDs already present in ``public.competition`` (requires ``DATABASE_URL``; n
 
     python scripts/discover_usfs_ijs_competitions.py --years 2025 --start-id 34000 --end-id 35000 \\
         --skip-if-in-database -o new_hits.csv
+
+Full usage, flags, and workflow: scripts/README.md
 """
 
 from __future__ import annotations

@@ -16,9 +16,18 @@ import time
 import pdfkit
 from database import test_connection, get_db_session
 from database_loader import DatabaseLoader
+from ijs_scrape_log import (
+    configure as configure_scrape_logging,
+    log_competition_summary,
+    note_warning,
+    pop_warnings,
+    reset_warnings,
+)
 from sqlalchemy.orm import Session
+import logging
 from openpyxl import Workbook
 from datetime import datetime
+from typing import Any, Mapping
 from openpyxl.styles import (
     PatternFill,
     Border,
@@ -33,13 +42,15 @@ from gcp_interactions_helper import write_file_to_gcp
 from gcp_interactions_helper import save_gcp_workbook
 from ijs_index_parse import ijs_index_start_end_and_location
 
+_LOG = logging.getLogger("ijs.scrape")
+
 
 def convert_url_to_pdf(url, pdf_path):
     try:
         pdfkit.from_url(url, pdf_path)
         # print(f"PDF generated and saved at {pdf_path}")
     except Exception as e:
-        print(f"PDF generation failed: {e}")
+        _LOG.error("PDF generation failed: %s", e)
 
 def download_pdf(url, pdf_path, use_gcp=False, session=None):
     if session is not None:
@@ -657,7 +668,7 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link, session=None
     url = f"{base_url}/{results_page_link}"
     page_contents = get_page_contents(url, session=session)
     if not page_contents:
-        print(f"WARNING: Empty or failed HTML fetch for Final page {url!r}")
+        note_warning(f"Empty or failed HTML fetch for Final page {url!r}")
         return ("", [], "")
     soup = BeautifulSoup(page_contents, "html.parser")
     link = soup.find("a", href=True, string="Judge detail scores")
@@ -669,13 +680,45 @@ def findResultsDetailUrlAndJudgesNames(base_url, results_page_link, session=None
     return (details_link, judgesNames, event_name)
 
 
+def _competition_metadata_dates_and_location(
+    competition_metadata: Mapping[str, Any] | None,
+    index_url: str,
+    *,
+    session=None,
+) -> tuple[Any, Any, str]:
+    """
+    Dates/location for ``updateCompetition``: use batch metadata when complete,
+    else fill gaps from ``loadCompetitionInfo``.
+    """
+    start_date = end_date = None
+    location: str | None = None
+    if competition_metadata:
+        start_date = competition_metadata.get("start_date")
+        end_date = competition_metadata.get("end_date")
+        loc = competition_metadata.get("location")
+        if loc is not None:
+            location = str(loc).strip()
+    if start_date and end_date:
+        return start_date, end_date, location or ""
+    fetched_start, fetched_end, fetched_loc = loadCompetitionInfo(
+        index_url, session=session
+    )
+    if not start_date:
+        start_date = fetched_start
+    if not end_date:
+        end_date = fetched_end
+    if location is None:
+        location = fetched_loc
+    return start_date, end_date, location or ""
+
+
 def loadCompetitionInfo(base_url, session=None):
     if base_url.endswith(".htm"):
         return loadCompetitionInfoFSM(base_url, session=session)
 
     page_contents = get_page_contents(base_url, session=session)
     if not page_contents:
-        print(f"WARNING: Empty page fetching competition info {base_url!r}")
+        _LOG.warning("Empty page fetching competition info %r", base_url)
         return ("", "", "")
     soup = BeautifulSoup(page_contents, "html.parser")
     start_date, end_date, location = ijs_index_start_end_and_location(soup, base_url)
@@ -684,7 +727,7 @@ def loadCompetitionInfo(base_url, session=None):
 def loadCompetitionInfoFSM(base_url, session=None):
     page_contents = get_page_contents(base_url, session=session)
     if not page_contents:
-        print(f"WARNING: Empty page fetching FSM competition info {base_url!r}")
+        _LOG.warning("Empty page fetching FSM competition info %r", base_url)
         return ("", "", "")
     soup = BeautifulSoup(page_contents, "html.parser")
 
@@ -700,7 +743,7 @@ def loadCompetitionInfoFSM(base_url, session=None):
         else:
             start_date, end_date = "", ""
     else:
-        print(f"WARNING: No tr.caption3 date row on FSM page {base_url!r}")
+        _LOG.warning("No tr.caption3 date row on FSM page %r", base_url)
         start_date, end_date = "", ""
     loc_cells = soup.find_all("td", class_="caption3")
     location = loc_cells[0].text if loc_cells else ""
@@ -739,6 +782,15 @@ def scrape(
     nqs=None,
     officials_analysis_competition_type_id=None,
     update_officials_competition_type=False,
+    http_session=None,
+    db_session=None,
+    database_loader=None,
+    competition_metadata: Mapping[str, Any] | None = None,
+    commit_per_segment: bool = True,
+    quiet: bool = False,
+    verbose: bool = False,
+    log_file: str | None = None,
+    configure_logging: bool = True,
 ):
     """
     When ``write_to_database`` is true, each ``public.segment`` row is named from the score
@@ -760,12 +812,43 @@ def scrape(
     When ``write_excel`` is false, per-event deviation sheets and the final workbook are not
     written (faster when loading the database only). HTTP uses a shared ``requests.Session``;
     non-HTML PDF mode reuses one headless browser for the whole competition.
+
+    Batch loaders may pass ``http_session``, ``db_session``, and ``database_loader`` to reuse
+    connections across many competitions. ``competition_metadata`` (``start_date``, ``end_date``,
+    ``location``) avoids an extra index fetch when already known (e.g. from discover CSV).
+    When ``commit_per_segment`` is false, the DB commits once at the end of this scrape
+  (``DatabaseLoader(defer_commits=True)``); apps leave the default true.
+
+    Logging: default console INFO; ``quiet=True`` (WARNING+ only); ``verbose=True`` (DEBUG).
+    Set ``configure_logging=False`` when the caller already configured logging (batch CSV).
     """
+    if configure_logging:
+        configure_scrape_logging(quiet=quiet, verbose=verbose, log_file=log_file)
+    reset_warnings()
+    segment_stats: dict[str, int] = {"written": 0, "skipped": 0}
+
     df_dict: dict = {}
     errors_dict_to_return = pd.DataFrame()
 
-    try:
+    own_http_session = http_session is None
+    if own_http_session:
         http_session = _scrape_http_session()
+
+    own_db_session = db_session is None and database_loader is None
+    if database_loader is not None:
+        database_obj = database_loader
+        db_session = database_loader.session
+    elif db_session is not None:
+        database_obj = DatabaseLoader(
+            db_session, defer_commits=not commit_per_segment
+        )
+    else:
+        db_session = get_db_session()
+        database_obj = DatabaseLoader(
+            db_session, defer_commits=not commit_per_segment
+        )
+
+    try:
         pdf_loop = None
         pdf_browser = None
 
@@ -773,7 +856,7 @@ def scrape(
         if isFSM:
             url = f"{base_url}/index.htm"
         page_contents = get_page_contents(url, session=http_session)
-        print(url)
+        _LOG.debug("GET %s", url)
         # Launch Chromium only after index succeeds and only for classic PDF mode (not FSM).
         # Starting the browser before the first HTTP made runs feel slower than the old flow.
         if page_contents and (not use_html) and (not isFSM):
@@ -791,8 +874,6 @@ def scrape(
         workbook = openpyxl.Workbook()
         agg_all_element_df = None
         agg_all_pcs_df = None
-        db_session = get_db_session()
-        database_obj = DatabaseLoader(db_session)
 
         competition_id = 0
         proccessed_segments = []
@@ -806,8 +887,10 @@ def scrape(
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
             proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
-            (start_date, end_date, location) = loadCompetitionInfo(
-                url, session=http_session
+            start_date, end_date, location = _competition_metadata_dates_and_location(
+                competition_metadata,
+                url,
+                session=http_session,
             )
             database_obj.updateCompetition(
                 base_url,
@@ -888,6 +971,7 @@ def scrape(
                         all_element_dict,
                         all_pcs_dict,
                         segment_official_rows=segment_official_rows,
+                        segment_stats=segment_stats,
                     )
                     i = i + 1
             else:
@@ -902,8 +986,8 @@ def scrape(
                         base_url, segment_href, session=http_session
                     )
                     if not resultsLink:
-                        print(
-                            f"WARNING: No judge detail scores link on Final page {segment_href!r}; skipping"
+                        note_warning(
+                            f"No judge detail scores link on Final page {segment_href!r}; skipping"
                         )
                         continue
                     if specific_exclude and (
@@ -947,8 +1031,8 @@ def scrape(
                             base_url, segment_href, session=http_session
                         )
                         if not segment_official_rows:
-                            print(
-                                f"WARNING: No panel officials parsed for Final {segment_href!r}"
+                            note_warning(
+                                f"No panel officials parsed for Final {segment_href!r}"
                             )
                         segment_db_key = (
                             (event_name or "").strip()
@@ -979,6 +1063,7 @@ def scrape(
                         all_pcs_dict,
                         segment_official_rows=segment_official_rows,
                         segment_db_key=segment_db_key,
+                        segment_stats=segment_stats,
                     )
 
             df_dict = {
@@ -994,7 +1079,7 @@ def scrape(
                     workbook, report_name, event_details, judge_errors
                 )
         else:
-            print("Failed to get page contents.")
+            note_warning(f"Failed to get page contents for {url!r}")
 
         excel_path = f"{excel_folder}{report_name}.xlsx"
         if write_excel and page_contents:
@@ -1011,8 +1096,28 @@ def scrape(
                 report_name,
                 use_gcp=use_gcp,
             )
-        print("Finished " + report_name + datetime.now().strftime("%H:%M:%S"))
+        if write_to_database and database_obj.defer_commits:
+            database_obj.commit()
+        if write_to_database and competition_id:
+            from judge_excess_cache import invalidate_judge_excess_cache_for_competition
+
+            invalidate_judge_excess_cache_for_competition(
+                database_obj.session, competition_id
+            )
+            database_obj.commit()
+        warnings = pop_warnings()
+        log_competition_summary(
+            base_url,
+            segments_written=segment_stats["written"],
+            segments_skipped=segment_stats["skipped"],
+            warnings=warnings,
+        )
         return df_dict, errors_dict_to_return
+    except BaseException:
+        if write_to_database and database_obj.defer_commits:
+            database_obj.session.rollback()
+        pop_warnings()
+        raise
     finally:
         if pdf_loop is not None:
             try:
@@ -1022,8 +1127,10 @@ def scrape(
                 pass
             finally:
                 pdf_loop.close()
+        if own_db_session and db_session is not None:
+            db_session.close()
 
-def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None, segment_db_key=None):
+def handleEventResults(report_name, write_to_database, judge_filter, agg_all_element_df, agg_all_pcs_df, database_obj, competition_id, proccessed_segments, judge_errors, event_details, detailed_rule_errors, event_number, judgesNames, event_name, total_errors, num_starts, allowed_errors, rule_errors, all_element_dict, all_pcs_dict, segment_official_rows=None, segment_db_key=None, segment_stats=None):
     row_segment_key = ((segment_db_key or event_name) or "").strip()
     if total_errors == None:
         if (
@@ -1039,13 +1146,12 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
                 database_obj.replace_segment_officials(
                     segment_id, segment_official_rows
                 )
-                print(
-                    f" Officials only (skipped segment) {row_segment_key} "
-                    f"{datetime.now().strftime('%H:%M:%S')}"
+                _LOG.debug(
+                    "Officials only (skipped segment) %s", row_segment_key
                 )
             else:
-                print(
-                    f"WARNING: Skipped scores for {row_segment_key!r}; no segment row in DB "
+                note_warning(
+                    f"Skipped scores for {row_segment_key!r}; no segment row in DB "
                     f"— officials not written"
                 )
         return agg_all_element_df, agg_all_pcs_df
@@ -1093,8 +1199,9 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
     if write_to_database:
         segment_id = None
         if event_name not in proccessed_segments:
-            print(
-                        f"Writing segment {event_name} {datetime.now().strftime("%H:%M:%S")}")
+            if segment_stats is not None:
+                segment_stats["written"] = segment_stats.get("written", 0) + 1
+            _LOG.debug("Writing segment %s", event_name)
             segment_id = database_obj.insert_segment(
                         event_name, competition_id)
             database_obj.insert_element_scores(
@@ -1102,9 +1209,10 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
             database_obj.insert_pcs_scores(
                         judgesNames, all_pcs_dict, segment_id)
         else:
-            print(
-                f"Skipping scores for segment {event_name} "
-                f"(already present) {datetime.now().strftime("%H:%M:%S")}"
+            if segment_stats is not None:
+                segment_stats["skipped"] = segment_stats.get("skipped", 0) + 1
+            _LOG.debug(
+                "Skipping scores for segment %s (already present)", event_name
             )
             # ``insert_segment`` returns existing id when the row is already there (same as
             # insert path); avoids ``get_segment_id`` None if the session/DB view differs.

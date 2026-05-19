@@ -27,6 +27,12 @@ from models import (
     Officials,
 )
 
+from judge_excess_cache import (
+    aggregate_excess_from_cache,
+    allowed_errors_for_skater_count,
+    ensure_judge_excess_cache,
+)
+
 from officials_competition_types import (
     COMPETITION_SCOPE_ALL,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
@@ -1710,6 +1716,7 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        include_excess: bool = True,
     ):
         """
         Aggregate all judge scores matching the same filters as cross-judge benchmarking.
@@ -1824,15 +1831,18 @@ class JudgeAnalytics:
             else:
                 avg_abs_pool = (pavg_abs * pn + eavg_abs * en) / total_scores
 
-        excess_map = self._calculate_all_judge_excess_anomalies(
-            year_filter=year_filter,
-            competition_ids=competition_ids,
-            discipline_ids=seg_discipline_ids,
-            score_type=score_type,
-            by_competition=False,
-            competition_scope=competition_scope,
-        )
-        total_excess = int(sum(excess_map.values()))
+        if include_excess:
+            excess_map = self._calculate_all_judge_excess_anomalies(
+                year_filter=year_filter,
+                competition_ids=competition_ids,
+                discipline_ids=seg_discipline_ids,
+                score_type=score_type,
+                by_competition=False,
+                competition_scope=competition_scope,
+            )
+            total_excess = int(sum(excess_map.values()))
+        else:
+            total_excess = 0
 
         if total_scores <= 0:
             return {
@@ -2069,7 +2079,7 @@ class JudgeAnalytics:
                 Competition.id.label("competition_id"),
                 ElementScorePerJudge.judge_id,
                 func.count().label("elem_total_scores"),
-                func.sum(case((ElementScorePerJudge.is_throwout, 1), else_=0)).label("elem_throwouts"),
+                func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
                 func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
                                 ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
                 func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors"),
@@ -2187,12 +2197,31 @@ class JudgeAnalytics:
 
 
     def calculate_allowed_errors(self, skater_count):
-                if skater_count <= 10:
-                    return 1
-                elif skater_count <= 20:
-                    return 2
-                else:
-                    return 3
+        return allowed_errors_for_skater_count(skater_count)
+
+    def _segment_ids_for_excess_scope(
+        self,
+        year_filter=None,
+        competition_ids=None,
+        discipline_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+    ) -> list[int]:
+        """Segment ids matching cross-judge excess filters (ids only, no ORM load)."""
+        q = (
+            select(Segment.id)
+            .join(Competition, Segment.competition_id == Competition.id)
+            .join(DisciplineType, Segment.discipline_type_id == DisciplineType.id)
+        )
+        if year_filter:
+            q = q.filter(Competition.year == year_filter)
+        if competition_ids:
+            q = q.filter(Competition.id.in_(competition_ids))
+        if discipline_ids is not None:
+            q = q.filter(Segment.discipline_type_id.in_(discipline_ids))
+        clause = self._competition_scope_clause(competition_scope)
+        if clause is not None:
+            q = q.filter(clause)
+        return [int(r) for r in self.session.execute(q).scalars().all()]
 
     def _calculate_all_judge_excess_anomalies(
         self,
@@ -2204,68 +2233,26 @@ class JudgeAnalytics:
         competition_scope: str = COMPETITION_SCOPE_ALL,
     ):
         """
-        Calculate excess anomalies for judges.
+        Calculate excess anomalies for judges via ``judge_excess_anomalies_cache``.
         If by_competition=True, returns {(judge_id, competition_id): excess}.
         Otherwise returns {judge_id: excess}.
         """
-        # Build base segment query
-        base_query = select(Segment).join(
-            Competition, Segment.competition_id == Competition.id
-        ).join(
-            DisciplineType, Segment.discipline_type_id == DisciplineType.id
+        segment_ids = self._segment_ids_for_excess_scope(
+            year_filter=year_filter,
+            competition_ids=competition_ids,
+            discipline_ids=discipline_ids,
+            competition_scope=competition_scope,
         )
-        if year_filter:
-            base_query = base_query.filter(Competition.year == year_filter)
-        if competition_ids:
-            base_query = base_query.filter(Competition.id.in_(competition_ids))
-        if discipline_ids is not None:
-            base_query = base_query.filter(Segment.discipline_type_id.in_(discipline_ids))
-        clause = self._competition_scope_clause(competition_scope)
-        if clause is not None:
-            base_query = base_query.filter(clause)
+        if not segment_ids:
+            return {}
 
-        segments_raw = self.session.execute(base_query).all()
-        segments = [seg[0] for seg in segments_raw]
-
-        # Get full statistics for these segments (all judges)
-        statistics = self.get_segment_statistics(segments)
-
-        # Choose dictionary type
-        if by_competition:
-            excess_per_judge = defaultdict(int)  # keys (judge_id, competition_id)
-        else:
-            excess_per_judge = defaultdict(int)  # keys judge_id
-
-        judges = set(stat["judge_id"] for stat in statistics)
-
-        for judge_id in judges:
-            # filter stats just for this judge
-            relevant_statistics = [stat for stat in statistics if stat["judge_id"] == judge_id]
-            segment_ids = {stat["segment_id"] for stat in relevant_statistics}
-
-            for segment_id in segment_ids:
-                segment_stats = [stat for stat in relevant_statistics if stat["segment_id"] == segment_id]
-
-                # observed anomalies for this judge & segment
-                if score_type == 'pcs':
-                    observed = sum(stat["pcs_anomalies"] for stat in segment_stats)
-                elif score_type == 'element':
-                    observed = sum(stat["element_anomalies"] for stat in segment_stats)
-                else:
-                    observed = sum(stat["total_anomalies"] for stat in segment_stats)
-
-                allowed = self.calculate_allowed_errors(segment_stats[0]["skater_count"])
-                excess_val = max(0, observed - allowed)
-
-                if by_competition:
-                    comp_id = segment_stats[0]["competition_name"], segment_stats[0]["competition_year"]
-                    # safer to use competition_id instead of name/year if you prefer
-                    comp_obj = [seg for seg in segments if seg.id == segment_id][0].competition
-                    excess_per_judge[(judge_id, comp_obj.id)] += excess_val
-                else:
-                    excess_per_judge[judge_id] += excess_val
-
-        return excess_per_judge
+        ensure_judge_excess_cache(self.session, segment_ids, score_type)
+        return aggregate_excess_from_cache(
+            self.session,
+            segment_ids,
+            score_type,
+            by_competition=by_competition,
+        )
 
     def _calculate_all_judge_rule_errors(self, year_filter=None, competition_ids=None, discipline_ids=None, score_type='both', by_competition=False):
         """Calculate total rule errors for all judges using optimized batch queries"""

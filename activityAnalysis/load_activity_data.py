@@ -377,12 +377,6 @@ def find_competition_type(competition_name, is_synchro):
         if "Pacific" in competition_name:
             return 7
     else:
-        if "Collegiate" in competition_name:
-            return 14
-        if "Adult" in competition_name and "Sectional" in competition_name:
-            return 13
-        if "Adult" in competition_name and "Championship" in competition_name:
-            return 12
         if competition_name == "US Championships":
             return 4
         if "Eastern" in competition_name:

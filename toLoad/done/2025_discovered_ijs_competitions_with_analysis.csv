@@ -1,0 +1,238 @@
+﻿year,competition_id,url,http_status,competition_name,start_date,end_date,location,fetched_at_utc,probe_error,officials_analysis_competition_type_id,season_year
+2025,36208,https://ijs.usfigureskating.org/leaderboard/results/2025/36208/index.asp,200,Vail Invitational Figure Skating Championships,7/18/25,7/19/25,"Steamboat Springs, CO",2026-05-11T16:39:04+00:00,,11,2425
+2025,36377,https://ijs.usfigureskating.org/leaderboard/results/2025/36377/index.asp,200,2025 Madison Open,9/26/25,9/27/25,"Madison, WI",2026-05-11T16:39:43+00:00,,11,2425
+2025,36371,https://ijs.usfigureskating.org/leaderboard/results/2025/36371/index.asp,200,2025 Arizona State Championships,10/11/25,10/12/25,"Peoria, AZ",2026-05-11T16:39:41+00:00,,11,2425
+2025,35781,https://ijs.usfigureskating.org/leaderboard/results/2025/35781/index.asp,200,2025 New Year's Invitational,1/4/25,1/5/25,"Haymarket, VA",2026-05-11T16:37:23+00:00,,11,2425
+2025,35799,https://ijs.usfigureskating.org/leaderboard/results/2025/35799/index.asp,200,"2025 Northern Star Individual, LTS, and Synchro Co",1/9/25,1/12/25,"East Grand Forks, MN",2026-05-11T16:37:28+00:00,,11,2425
+2025,35715,https://ijs.usfigureskating.org/leaderboard/results/2025/35715/index.asp,200,2025 San Diego Sweetheart Classic Synchro,1/11/25,1/11/25,"Poway, CA",2026-05-11T16:37:03+00:00,,11,2425
+2025,35768,https://ijs.usfigureskating.org/leaderboard/results/2025/35768/index.asp,200,45th Annual Nortland Figure Skating Competition,1/16/25,1/19/25,"Duluth, MN",2026-05-11T16:37:19+00:00,,11,2425
+2025,35827,https://ijs.usfigureskating.org/leaderboard/results/2025/35827/index.asp,200,2025 Badger State Games,1/23/25,1/26/25,"Mosinee, WI",2026-05-11T16:37:36+00:00,,11,2425
+2025,35929,https://ijs.usfigureskating.org/leaderboard/results/2025/35929/index.asp,200,Celebrate Skating 2025,1/25/25,1/25/25,"Euclid, Ohio",2026-05-11T16:38:02+00:00,,11,2425
+2025,35907,https://ijs.usfigureskating.org/leaderboard/results/2025/35907/index.asp,200,2025 Empire State Winter Games,1/30/25,2/2/25,"Olympic Center, Lake Placid, NY",2026-05-11T16:37:57+00:00,,11,2425
+2025,35751,https://ijs.usfigureskating.org/leaderboard/results/2025/35751/index.asp,200,2025 Magic City International Figure Skating Compe,1/31/25,2/1/25,"Minot, ND",2026-05-11T16:37:14+00:00,,11,2425
+2025,35558,https://ijs.usfigureskating.org/leaderboard/results/2025/35558/index.asp,200,2025 Ohio High School Team Championships,2/7/25,2/9/25,"Shaker Heights, Ohio",2026-05-11T16:36:28+00:00,,11,2425
+2025,35856,https://ijs.usfigureskating.org/leaderboard/results/2025/35856/index.asp,200,2025 Winter Festival,2/7/25,2/9/25,"Fort Myers, FL",2026-05-11T16:37:43+00:00,,11,2425
+2025,35922,https://ijs.usfigureskating.org/leaderboard/results/2025/35922/index.asp,200,2025 44th Annual Ron Carlson Marquette Internation,2/8/25,2/9/25,"Marquette, MI",2026-05-11T16:38:00+00:00,,11,2425
+2025,35990,https://ijs.usfigureskating.org/leaderboard/results/2025/35990/index.asp,200,2025 Love Bug Open,2/9/25,2/9/25,"Credit Union of Texas Event Center, Allen, TX",2026-05-11T16:38:16+00:00,,11,2425
+2025,35676,https://ijs.usfigureskating.org/leaderboard/results/2025/35676/index.asp,200,2025 Red River Valley International Classic,2/13/25,2/15/25,"Moorhead, MN",2026-05-11T16:36:55+00:00,,11,2425
+2025,35623,https://ijs.usfigureskating.org/leaderboard/results/2025/35623/index.asp,200,2025 Black Hills Gold Rush,2/14/25,2/15/25,"Rapid City, SD",2026-05-11T16:36:42+00:00,,11,2425
+2025,35791,https://ijs.usfigureskating.org/leaderboard/results/2025/35791/index.asp,200,13th Annual Snow Town Invitational,2/14/25,2/16/25,"Watertown, NY",2026-05-11T16:37:26+00:00,,11,2425
+2025,35866,https://ijs.usfigureskating.org/leaderboard/results/2025/35866/index.asp,200,Alamo Skate 2025,2/14/25,2/16/25,"San Antonio, TX",2026-05-11T16:37:46+00:00,,11,2425
+2025,35904,https://ijs.usfigureskating.org/leaderboard/results/2025/35904/index.asp,200,2025 Albert Viviani Memorial-Deborah Burgoyne Nort,2/14/25,2/16/25,"Wyandotte, MI",2026-05-11T16:37:56+00:00,,11,2425
+2025,35917,https://ijs.usfigureskating.org/leaderboard/results/2025/35917/index.asp,200,2025 Chi Edge Invitational,2/16/25,2/16/25,"Darian, IL",2026-05-11T16:37:59+00:00,,11,2425
+2025,35926,https://ijs.usfigureskating.org/leaderboard/results/2025/35926/index.asp,200,2025 Stillwell Adult Mid-Winter Warmup,2/16/25,2/16/25,"Artesia, CA",2026-05-11T16:38:01+00:00,,11,2425
+2025,35970,https://ijs.usfigureskating.org/leaderboard/results/2025/35970/index.asp,200,2025 Rising Stars Competition,2/16/25,2/16/25,"Dublin, CA",2026-05-11T16:38:11+00:00,,11,2425
+2025,35609,https://ijs.usfigureskating.org/leaderboard/results/2025/35609/index.asp,200,2025 Omaha Winter Festival,2/20/25,2/23/25,"Omaha, NE",2026-05-11T16:36:39+00:00,,11,2425
+2025,35757,https://ijs.usfigureskating.org/leaderboard/results/2025/35757/index.asp,200,2025 High Altitude Skating Challenge,2/20/25,2/23/25,"Kearns, UT",2026-05-11T16:37:16+00:00,,11,2425
+2025,35876,https://ijs.usfigureskating.org/leaderboard/results/2025/35876/index.asp,200,2025 South Eastern Great Lakes Competition (SEGL),2/21/25,2/23/25,"Nashville, TN",2026-05-11T16:37:49+00:00,,11,2425
+2025,35816,https://ijs.usfigureskating.org/leaderboard/results/2025/35816/index.asp,200,38th Annual Pennsylvania State Championships,2/22/25,2/23/25,"York, PA",2026-05-11T16:37:33+00:00,,11,2425
+2025,35807,https://ijs.usfigureskating.org/leaderboard/results/2025/35807/index.asp,200,2025 North Atlantic Open,2/28/25,3/2/25,"Falmouth, ME",2026-05-11T16:37:30+00:00,,11,2425
+2025,36048,https://ijs.usfigureskating.org/leaderboard/results/2025/36048/index.asp,200,The 25th Annual Wollman Open,3/1/25,3/1/25,"New York, NY",2026-05-11T16:38:28+00:00,,11,2526
+2025,35788,https://ijs.usfigureskating.org/leaderboard/results/2025/35788/index.asp,200,Magnolia Open 2025,3/6/25,3/9/25,"Alpharetta, GA",2026-05-11T16:37:25+00:00,,11,2526
+2025,35863,https://ijs.usfigureskating.org/leaderboard/results/2025/35863/index.asp,200,2025 Denver Invitational,3/6/25,3/9/25,"Highlands Ranch, CO",2026-05-11T16:37:45+00:00,,11,2526
+2025,35943,https://ijs.usfigureskating.org/leaderboard/results/2025/35943/index.asp,200,U.S. International Solo Ice Dance - Atlanta 2025,3/6/25,3/9/25,"Alpharetta, GA",2026-05-11T16:38:06+00:00,,11,2526
+2025,35728,https://ijs.usfigureskating.org/leaderboard/results/2025/35728/index.asp,200,2025 Houston Invitational,3/7/25,3/9/25,"Houston, TX",2026-05-11T16:37:07+00:00,,11,2526
+2025,35754,https://ijs.usfigureskating.org/leaderboard/results/2025/35754/index.asp,200,36th Annual Eau Claire Figure Skating Competition,3/7/25,3/8/25,"Eau Claire, WI",2026-05-11T16:37:15+00:00,,11,2526
+2025,35801,https://ijs.usfigureskating.org/leaderboard/results/2025/35801/index.asp,200,2025 Columbus Invitational,3/7/25,3/9/25,"Columbus, IN",2026-05-11T16:37:29+00:00,,11,2526
+2025,35604,https://ijs.usfigureskating.org/leaderboard/results/2025/35604/index.asp,200,Massena Figure Skating Inviational Competition 202,3/8/25,3/8/25,"Massena, NY",2026-05-11T16:36:38+00:00,,11,2526
+2025,35845,https://ijs.usfigureskating.org/leaderboard/results/2025/35845/index.asp,200,2025 Philadelphia Areas Figure Skating Competition,3/8/25,3/9/25,"Ardmore, PA",2026-05-11T16:37:40+00:00,,11,2526
+2025,35877,https://ijs.usfigureskating.org/leaderboard/results/2025/35877/index.asp,200,2025 Skate Pittsburgh,3/8/25,3/9/25,"RMU Island Sports Center, Pittsburgh, PA",2026-05-11T16:37:49+00:00,,11,2526
+2025,35942,https://ijs.usfigureskating.org/leaderboard/results/2025/35942/index.asp,200,2025 Michigan Showcase,3/13/25,3/16/25,"Hartland, MI",2026-05-11T16:38:05+00:00,,11,2526
+2025,35984,https://ijs.usfigureskating.org/leaderboard/results/2025/35984/index.asp,200,2025 Glacier Challenge,3/13/25,3/15/25,"Missoula, MT",2026-05-11T16:38:14+00:00,,11,2526
+2025,35750,https://ijs.usfigureskating.org/leaderboard/results/2025/35750/index.asp,200,2025 Boston Open Spring,3/14/25,3/16/25,"Norwood, MA",2026-05-11T16:37:14+00:00,,11,2526
+2025,35759,https://ijs.usfigureskating.org/leaderboard/results/2025/35759/index.asp,200,50th Annual Howard E. Van Camp Invitational,3/14/25,3/16/25,"East Lansing, MI",2026-05-11T16:37:16+00:00,,11,2526
+2025,35746,https://ijs.usfigureskating.org/leaderboard/results/2025/35746/index.asp,200,2025 Sunflower Classic,3/15/25,3/16/25,"Minnetonka, MN",2026-05-11T16:37:12+00:00,,11,2526
+2025,35813,https://ijs.usfigureskating.org/leaderboard/results/2025/35813/index.asp,200,2025 First State Spring Classic,3/15/25,3/15/25,"Newark, DE",2026-05-11T16:37:32+00:00,,11,2526
+2025,35838,https://ijs.usfigureskating.org/leaderboard/results/2025/35838/index.asp,200,2025 Wichita Mid-Continent Classic,3/15/25,3/16/25,"Wichita, KS",2026-05-11T16:37:38+00:00,,11,2526
+2025,35892,https://ijs.usfigureskating.org/leaderboard/results/2025/35892/index.asp,200,2025 Intermountain Classic Figure Skating Champion,3/20/25,3/23/25,"Park City, UT",2026-05-11T16:37:53+00:00,,11,2526
+2025,35624,https://ijs.usfigureskating.org/leaderboard/results/2025/35624/index.asp,200,2025 Splash of the Sound,3/21/25,3/23/25,"Bremerton, WA",2026-05-11T16:36:43+00:00,,11,2526
+2025,35758,https://ijs.usfigureskating.org/leaderboard/results/2025/35758/index.asp,200,2025 Morris Open,3/21/25,3/23/25,"Morristown, NJ",2026-05-11T16:37:16+00:00,,11,2526
+2025,35815,https://ijs.usfigureskating.org/leaderboard/results/2025/35815/index.asp,200,2025 Cleveland Invitational Championships,3/21/25,3/23/25,"Parma, OH",2026-05-11T16:37:33+00:00,,11,2526
+2025,35939,https://ijs.usfigureskating.org/leaderboard/results/2025/35939/index.asp,200,2025 BODYARMOR NC State Games,3/21/25,3/23/25,"Greensboro, NC",2026-05-11T16:38:04+00:00,,11,2526
+2025,35958,https://ijs.usfigureskating.org/leaderboard/results/2025/35958/index.asp,200,2025 Louisville Skating Academy Spring Invitationa,3/21/25,3/23/25,"Louisville, KY",2026-05-11T16:38:09+00:00,,11,2526
+2025,36103,https://ijs.usfigureskating.org/leaderboard/results/2025/36103/index.asp,200,2025 Sunset Skate,3/22/25,3/23/25,"Poway, CA",2026-05-11T16:38:40+00:00,,11,2526
+2025,35855,https://ijs.usfigureskating.org/leaderboard/results/2025/35855/index.asp,200,2025 Sugar Skate,3/27/25,3/30/25,"Sugar Land, TX",2026-05-11T16:37:43+00:00,,11,2526
+2025,35875,https://ijs.usfigureskating.org/leaderboard/results/2025/35875/index.asp,200,2025 W.I.M. Competition,3/27/25,3/30/25,"Milwaukee, WI",2026-05-11T16:37:48+00:00,,11,2526
+2025,35803,https://ijs.usfigureskating.org/leaderboard/results/2025/35803/index.asp,200,The 5th Annual Quad Cities Victory Skate,3/28/25,3/29/25,"Davenport, IA",2026-05-11T16:37:29+00:00,,11,2526
+2025,34424,https://ijs.usfigureskating.org/leaderboard/results/2025/34424/index.asp,200,Fort Collins Classic 2025,4/3/25,4/6/25,"Fort Collins, CO",2026-05-11T16:32:42+00:00,,11,2526
+2025,35655,https://ijs.usfigureskating.org/leaderboard/results/2025/35655/index.asp,200,38th Annual FL Open Figure Skating Championships,4/3/25,4/6/25,"Orlando, FL",2026-05-11T16:36:50+00:00,,11,2526
+2025,35811,https://ijs.usfigureskating.org/leaderboard/results/2025/35811/index.asp,200,2025 Skate Kansas City,4/3/25,4/6/25,"Shawnee, KS",2026-05-11T16:37:31+00:00,,11,2526
+2025,36006,https://ijs.usfigureskating.org/leaderboard/results/2025/36006/index.asp,200,2025 Providence Open,4/3/25,4/6/25,"Providence, RI",2026-05-11T16:38:19+00:00,,11,2526
+2025,35731,https://ijs.usfigureskating.org/leaderboard/results/2025/35731/index.asp,200,2025 Genesee Invitational,4/4/25,4/6/25,"Rochester, NY",2026-05-11T16:37:08+00:00,,11,2526
+2025,35972,https://ijs.usfigureskating.org/leaderboard/results/2025/35972/index.asp,200,2025 Eastern Sectional High School Final,4/4/25,4/6/25,"Burlington, VT",2026-05-11T16:38:12+00:00,,11,2526
+2025,35901,https://ijs.usfigureskating.org/leaderboard/results/2025/35901/index.asp,200,2025 Blades on Broadway,4/5/25,4/6/25,"Everett, WA",2026-05-11T16:37:55+00:00,,11,2526
+2025,36035,https://ijs.usfigureskating.org/leaderboard/results/2025/36035/index.asp,200,2025 Curtain Call North,4/5/25,4/6/25,"Simi Valley, CA",2026-05-11T16:38:25+00:00,,11,2526
+2025,35747,https://ijs.usfigureskating.org/leaderboard/results/2025/35747/index.asp,200,Fiesta Skate 2025,4/10/25,4/13/25,"Peoria, AZ",2026-05-11T16:37:13+00:00,,11,2526
+2025,35771,https://ijs.usfigureskating.org/leaderboard/results/2025/35771/index.asp,200,Skate Nashville 2025,4/10/25,4/13/25,"Nashville, TN",2026-05-11T16:37:20+00:00,,11,2526
+2025,35854,https://ijs.usfigureskating.org/leaderboard/results/2025/35854/index.asp,200,2025 Reach for the Peaks,4/10/25,4/12/25,"Provo, UT",2026-05-11T16:37:42+00:00,,11,2526
+2025,35881,https://ijs.usfigureskating.org/leaderboard/results/2025/35881/index.asp,200,2025 Cape Cod Spring Classic,4/11/25,4/13/25,"Orleans, MA",2026-05-11T16:37:50+00:00,,11,2526
+2025,35884,https://ijs.usfigureskating.org/leaderboard/results/2025/35884/index.asp,200,2025 Tri-State Memorial Figure Skating Competition,4/11/25,4/13/25,"Southgate, MI",2026-05-11T16:37:51+00:00,,11,2526
+2025,36001,https://ijs.usfigureskating.org/leaderboard/results/2025/36001/index.asp,200,2025 Cody Spring Classic/Cowboy State Games,4/11/25,4/13/25,"Cody, Wyoming",2026-05-11T16:38:18+00:00,,11,2526
+2025,35819,https://ijs.usfigureskating.org/leaderboard/results/2025/35819/index.asp,200,2025 Oregon Open Figure Skating Championships,4/12/25,4/13/25,"Medford, OR",2026-05-11T16:37:34+00:00,,11,2526
+2025,35847,https://ijs.usfigureskating.org/leaderboard/results/2025/35847/index.asp,200,2025 Spring Spectacular,4/12/25,4/13/25,"Anaheim, CA",2026-05-11T16:37:41+00:00,,11,2526
+2025,35853,https://ijs.usfigureskating.org/leaderboard/results/2025/35853/index.asp,200,2025 Sikumi Invitational (2025 Excel Series Host),4/12/25,4/13/25,"Annville, PA",2026-05-11T16:37:42+00:00,,11,2526
+2025,35868,https://ijs.usfigureskating.org/leaderboard/results/2025/35868/index.asp,200,Spring Funtastics 2025,4/12/25,4/13/25,"Arvada, CO",2026-05-11T16:37:46+00:00,,11,2526
+2025,35925,https://ijs.usfigureskating.org/leaderboard/results/2025/35925/index.asp,200,2025 Theatre On Ice Spring Classic,4/13/25,4/13/25,"Boxborough, MA",2026-05-11T16:38:01+00:00,,11,2526
+2025,36045,https://ijs.usfigureskating.org/leaderboard/results/2025/36045/index.asp,200,2025 Spin into Spring,4/19/25,4/19/25,"Lewis Center, OH",2026-05-11T16:38:27+00:00,,11,2526
+2025,35773,https://ijs.usfigureskating.org/leaderboard/results/2025/35773/index.asp,200,50th Annual Ladybug Competition,4/23/25,4/27/25,"Flossmoor, IL",2026-05-11T16:37:20+00:00,,11,2526
+2025,35846,https://ijs.usfigureskating.org/leaderboard/results/2025/35846/index.asp,200,2025 Boise Ice Classic,4/24/25,4/27/25,"Boise, ID",2026-05-11T16:37:40+00:00,,11,2526
+2025,35721,https://ijs.usfigureskating.org/leaderboard/results/2025/35721/index.asp,200,2025 Jo Williams Memorial Cup,4/25/25,4/27/25,"Spokane, WA",2026-05-11T16:37:05+00:00,,11,2526
+2025,35729,https://ijs.usfigureskating.org/leaderboard/results/2025/35729/index.asp,200,CRC Kickoff 2025,4/25/25,4/27/25,"Chesapeake, VA",2026-05-11T16:37:07+00:00,,11,2526
+2025,35859,https://ijs.usfigureskating.org/leaderboard/results/2025/35859/index.asp,200,2025 Spring Fling,4/25/25,4/27/25,"Chagrin Falls, OH",2026-05-11T16:37:44+00:00,,11,2526
+2025,35882,https://ijs.usfigureskating.org/leaderboard/results/2025/35882/index.asp,200,2025 Southern Connecticut Open,4/25/25,4/27/25,"Darien, CT",2026-05-11T16:37:50+00:00,,11,2526
+2025,35945,https://ijs.usfigureskating.org/leaderboard/results/2025/35945/index.asp,200,2025 La Jolla Open,4/25/25,4/27/25,"San Diego, CA",2026-05-11T16:38:06+00:00,,11,2526
+2025,36036,https://ijs.usfigureskating.org/leaderboard/results/2025/36036/index.asp,200,CRC Kickoff 2025 (TOI ONLY),4/25/25,4/27/25,"Chesapeake, VA",2026-05-11T16:38:26+00:00,,11,2526
+2025,35888,https://ijs.usfigureskating.org/leaderboard/results/2025/35888/index.asp,200,2025 Crystalline Classic,4/26/25,4/27/25,"Santa Rosa, CA",2026-05-11T16:37:52+00:00,,11,2526
+2025,36147,https://ijs.usfigureskating.org/leaderboard/results/2025/36147/index.asp,200,2025 Star of the North Figure Skating Competition,4/26/25,4/26/25,"Chaska, MN",2026-05-11T16:38:50+00:00,,11,2526
+2025,35657,https://ijs.usfigureskating.org/leaderboard/results/2025/35657/index.asp,200,2025 Westchester Classic,5/2/25,5/4/25,"Rye, NY",2026-05-11T16:36:50+00:00,,11,2526
+2025,35735,https://ijs.usfigureskating.org/leaderboard/results/2025/35735/index.asp,200,20th Annual California Championships,5/2/25,5/4/25,"Artesia, CA",2026-05-11T16:37:09+00:00,,11,2526
+2025,35822,https://ijs.usfigureskating.org/leaderboard/results/2025/35822/index.asp,200,2025 Excel and Beyond,5/2/25,5/4/25,"Bloomington, IL",2026-05-11T16:37:34+00:00,,11,2526
+2025,35857,https://ijs.usfigureskating.org/leaderboard/results/2025/35857/index.asp,200,2025 Picken Dance Classic,5/2/25,5/4/25,"Reston, VA",2026-05-11T16:37:43+00:00,,11,2526
+2025,35872,https://ijs.usfigureskating.org/leaderboard/results/2025/35872/index.asp,200,2025 Magic City Ice Classic,5/2/25,5/4/25,"Pelham, AL",2026-05-11T16:37:48+00:00,,11,2526
+2025,36063,https://ijs.usfigureskating.org/leaderboard/results/2025/36063/index.asp,200,2025 Central Carolina Skating Classic,5/2/25,5/4/25,"Hillsborough, NC",2026-05-11T16:38:31+00:00,,11,2526
+2025,35742,https://ijs.usfigureskating.org/leaderboard/results/2025/35742/index.asp,200,2025 Champlain Valley Open,5/3/25,5/4/25,"Burlington, VT",2026-05-11T16:37:11+00:00,,11,2526
+2025,35810,https://ijs.usfigureskating.org/leaderboard/results/2025/35810/index.asp,200,2025 Mountain Classic,5/3/25,5/4/25,"Wilkes Barre, PA",2026-05-11T16:37:31+00:00,,11,2526
+2025,36057,https://ijs.usfigureskating.org/leaderboard/results/2025/36057/index.asp,200,18th Annual June Bug Competition,5/3/25,5/3/25,"St. Paul, MN",2026-05-11T16:38:30+00:00,,11,2526
+2025,36094,https://ijs.usfigureskating.org/leaderboard/results/2025/36094/index.asp,200,2025 Three Rivers Spring Skate,5/3/25,5/4/25,"Pittsburgh, PA",2026-05-11T16:38:38+00:00,,11,2526
+2025,35763,https://ijs.usfigureskating.org/leaderboard/results/2025/35763/index.asp,200,Skate Vegas 2025,5/7/25,5/11/25,"Henderson, NV",2026-05-11T16:37:17+00:00,,11,2526
+2025,36056,https://ijs.usfigureskating.org/leaderboard/results/2025/36056/index.asp,200,2025 Memorial Trophy,5/8/25,5/11/25,"Houston, TX",2026-05-11T16:38:30+00:00,,11,2526
+2025,35784,https://ijs.usfigureskating.org/leaderboard/results/2025/35784/index.asp,200,2025 Spring Jubilee,5/9/25,5/10/25,"San Jose, CA",2026-05-11T16:37:23+00:00,,11,2526
+2025,35878,https://ijs.usfigureskating.org/leaderboard/results/2025/35878/index.asp,200,WWFSC Excel Competition 2025,5/9/25,5/10/25,"Crystal Lake, IL",2026-05-11T16:37:49+00:00,,11,2526
+2025,36095,https://ijs.usfigureskating.org/leaderboard/results/2025/36095/index.asp,200,The Skating Club of Boston Club Competition 2025,5/10/25,5/10/25,"Norwood, MA",2026-05-11T16:38:38+00:00,,11,2526
+2025,36124,https://ijs.usfigureskating.org/leaderboard/results/2025/36124/index.asp,200,2025 Centennial Spring Classic,5/10/25,5/10/25,"Monument, CO",2026-05-11T16:38:44+00:00,,11,2526
+2025,35726,https://ijs.usfigureskating.org/leaderboard/results/2025/35726/index.asp,200,2025 Copper State Classic,5/15/25,5/18/25,"Mesa, AZ",2026-05-11T16:37:06+00:00,,11,2526
+2025,35756,https://ijs.usfigureskating.org/leaderboard/results/2025/35756/index.asp,200,2025 Roseville Open Competition,5/15/25,5/18/25,"Roseville, MN",2026-05-11T16:37:15+00:00,,11,2526
+2025,35764,https://ijs.usfigureskating.org/leaderboard/results/2025/35764/index.asp,200,2025 North Shore Open,5/15/25,5/18/25,"Reading, MA",2026-05-11T16:37:18+00:00,,11,2526
+2025,35787,https://ijs.usfigureskating.org/leaderboard/results/2025/35787/index.asp,200,41st Margaret Faulkner Springtime Invitational,5/15/25,5/18/25,"Ann Arbor, MI",2026-05-11T16:37:25+00:00,,11,2526
+2025,35839,https://ijs.usfigureskating.org/leaderboard/results/2025/35839/index.asp,200,2025 Lake City Classic,5/15/25,5/18/25,"Coeur D Alene, ID",2026-05-11T16:37:38+00:00,,11,2526
+2025,35733,https://ijs.usfigureskating.org/leaderboard/results/2025/35733/index.asp,200,2025 Nassau County Figure Skating Championship,5/16/25,5/18/25,"Hicksville, NY",2026-05-11T16:37:08+00:00,,11,2526
+2025,35910,https://ijs.usfigureskating.org/leaderboard/results/2025/35910/index.asp,200,2025 Mayblades,5/16/25,5/18/25,"Tacoma, WA",2026-05-11T16:37:58+00:00,,11,2526
+2025,36171,https://ijs.usfigureskating.org/leaderboard/results/2025/36171/index.asp,200,2025 Sunshine State Challenge,5/16/25,5/18/25,"Wesley Chapel, FL",2026-05-11T16:38:55+00:00,,11,2526
+2025,36111,https://ijs.usfigureskating.org/leaderboard/results/2025/36111/index.asp,200,2025 North Shore Open TOI,5/18/25,5/18/25,"Reading, MA",2026-05-11T16:38:41+00:00,,11,2526
+2025,36199,https://ijs.usfigureskating.org/leaderboard/results/2025/36199/index.asp,200,2025 Orange Classic,5/18/25,5/18/25,Yorba Linda,2026-05-11T16:39:02+00:00,,11,2526
+2025,35748,https://ijs.usfigureskating.org/leaderboard/results/2025/35748/index.asp,200,2025 White Rose Invitational,5/24/25,5/25/25,"York, PA",2026-05-11T16:37:13+00:00,,11,2526
+2025,35730,https://ijs.usfigureskating.org/leaderboard/results/2025/35730/index.asp,200,Ice Fest 2025,5/29/25,6/1/25,"Mountlake Ter, WA",2026-05-11T16:37:08+00:00,,11,2526
+2025,35740,https://ijs.usfigureskating.org/leaderboard/results/2025/35740/index.asp,200,2025 Traverse City Cherry Classic,5/29/25,6/1/25,"Traverse City, MI",2026-05-11T16:37:10+00:00,,11,2526
+2025,35717,https://ijs.usfigureskating.org/leaderboard/results/2025/35717/index.asp,200,2025 Metro Indy Skating Challenge,5/30/25,6/1/25,"Carmel, IN",2026-05-11T16:37:03+00:00,,11,2526
+2025,35724,https://ijs.usfigureskating.org/leaderboard/results/2025/35724/index.asp,200,2025 Cardinal Classic,5/30/25,6/1/25,"Woodbridge, VA",2026-05-11T16:37:06+00:00,,11,2526
+2025,35739,https://ijs.usfigureskating.org/leaderboard/results/2025/35739/index.asp,200,Braemar Competition 2025,5/30/25,6/1/25,"Edina, MN",2026-05-11T16:37:10+00:00,,11,2526
+2025,35793,https://ijs.usfigureskating.org/leaderboard/results/2025/35793/index.asp,200,2025 Heart of America Invitational,5/30/25,6/1/25,"Overland Park, KS",2026-05-11T16:37:26+00:00,,11,2526
+2025,35941,https://ijs.usfigureskating.org/leaderboard/results/2025/35941/index.asp,200,2025 Miami Open Championship,5/30/25,6/1/25,"Miami, FL",2026-05-11T16:38:05+00:00,,11,2526
+2025,36090,https://ijs.usfigureskating.org/leaderboard/results/2025/36090/index.asp,200,2025 Cardinal Classic Theatre on Ice,5/30/25,6/1/25,"Woodbridge, VA",2026-05-11T16:38:37+00:00,,11,2526
+2025,36149,https://ijs.usfigureskating.org/leaderboard/results/2025/36149/index.asp,200,2025 Santa Fe SkateFest,5/30/25,6/1/25,"Santa Fe, NM",2026-05-11T16:38:50+00:00,,11,2526
+2025,35722,https://ijs.usfigureskating.org/leaderboard/results/2025/35722/index.asp,200,2025 Sierra Nevada Ice Classic,5/31/25,6/1/25,"Reno, NV",2026-05-11T16:37:05+00:00,,11,2526
+2025,35723,https://ijs.usfigureskating.org/leaderboard/results/2025/35723/index.asp,200,2025 Princeton Lisa McGraw Webster Spring Classic,5/31/25,6/1/25,"Princeton, NJ",2026-05-11T16:37:05+00:00,,11,2526
+2025,36126,https://ijs.usfigureskating.org/leaderboard/results/2025/36126/index.asp,200,2025 Front Range Invitational,5/31/25,6/1/25,"Greeley, CO",2026-05-11T16:38:44+00:00,,11,2526
+2025,36185,https://ijs.usfigureskating.org/leaderboard/results/2025/36185/index.asp,200,2025 All Year Open,5/31/25,6/1/25,"Irvine, CA",2026-05-11T16:38:59+00:00,,11,2526
+2025,35560,https://ijs.usfigureskating.org/leaderboard/results/2025/35560/index.asp,200,Utah Skatefest 2025,6/4/25,6/7/25,"West Valley City, UT",2026-05-11T16:36:29+00:00,,11,2526
+2025,35537,https://ijs.usfigureskating.org/leaderboard/results/2025/35537/index.asp,200,3rd Annual Paradise Coast Classic,6/5/25,6/8/25,"Estero, FL",2026-05-11T16:36:24+00:00,,11,2526
+2025,35744,https://ijs.usfigureskating.org/leaderboard/results/2025/35744/index.asp,200,Skate Dallas 2025,6/5/25,6/8/25,"Allen, TX",2026-05-11T16:37:12+00:00,,11,2526
+2025,35720,https://ijs.usfigureskating.org/leaderboard/results/2025/35720/index.asp,200,2025 Eastern Iowa Invitational,6/6/25,6/8/25,"Cedar Rapids, IA",2026-05-11T16:37:04+00:00,,11,2526
+2025,36081,https://ijs.usfigureskating.org/leaderboard/results/2025/36081/index.asp,200,Hollydell Summer Open 2025,6/7/25,6/7/25,"Sewell, New Jersey",2026-05-11T16:38:35+00:00,,11,2526
+2025,36202,https://ijs.usfigureskating.org/leaderboard/results/2025/36202/index.asp,200,2025 LAFSC Showcase for Skaters,6/7/25,6/8/25,"Burbank, CA",2026-05-11T16:39:03+00:00,,11,2526
+2025,35798,https://ijs.usfigureskating.org/leaderboard/results/2025/35798/index.asp,200,2025 Southport Summer Classic,6/11/25,6/14/25,"Pleasant Prairie, WI",2026-05-11T16:37:28+00:00,,11,2526
+2025,36220,https://ijs.usfigureskating.org/leaderboard/results/2025/36220/index.asp,200,2025 Garden State Games,6/13/25,6/14/25,"Wayne, New Jersey",2026-05-11T16:39:07+00:00,,11,2526
+2025,35987,https://ijs.usfigureskating.org/leaderboard/results/2025/35987/index.asp,200,2025 SkateFest Competition,6/14/25,6/15/25,"Royal Oak, MI",2026-05-11T16:38:15+00:00,,11,2526
+2025,36236,https://ijs.usfigureskating.org/leaderboard/results/2025/36236/index.asp,200,2025 Southern California Interclub Championships,6/14/25,6/15/25,"Paramount, CA",2026-05-11T16:39:11+00:00,,11,2526
+2025,35795,https://ijs.usfigureskating.org/leaderboard/results/2025/35795/index.asp,200,Chesapeake Open and Compete USA 2025,6/18/25,6/22/25,"Laurel, MD",2026-05-11T16:37:27+00:00,,11,2526
+2025,36167,https://ijs.usfigureskating.org/leaderboard/results/2025/36167/index.asp,200,2025 Lake Placid Figure Skating Championships,6/18/25,6/21/25,"Lake Placid, NY",2026-05-11T16:38:54+00:00,,11,2526
+2025,35656,https://ijs.usfigureskating.org/leaderboard/results/2025/35656/index.asp,200,First Coast Classic 2025,6/20/25,6/22/25,"Jacksonville, FL",2026-05-11T16:36:50+00:00,,11,2526
+2025,36164,https://ijs.usfigureskating.org/leaderboard/results/2025/36164/index.asp,200,2025 Arizona Ice Classic,6/20/25,6/22/25,"Chandler, AZ",2026-05-11T16:38:54+00:00,,11,2526
+2025,36217,https://ijs.usfigureskating.org/leaderboard/results/2025/36217/index.asp,200,2025 National Theatre On Ice,6/24/25,6/28/25,"Allen, TX",2026-05-11T16:39:06+00:00,,11,2526
+2025,36127,https://ijs.usfigureskating.org/leaderboard/results/2025/36127/index.asp,200,2025 Grand Rapids Open,6/27/25,6/28/25,"Grand Rapids, MI",2026-05-11T16:38:45+00:00,,11,2526
+2025,36152,https://ijs.usfigureskating.org/leaderboard/results/2025/36152/index.asp,200,Dogwood Open 2025,6/27/25,6/29/25,"Morrisville, NC",2026-05-11T16:38:51+00:00,,11,2526
+2025,36222,https://ijs.usfigureskating.org/leaderboard/results/2025/36222/index.asp,200,49th Annual Kathy Slack Troy Summer Competition,6/27/25,6/29/25,"Troy, OH",2026-05-11T16:39:07+00:00,,11,2526
+2025,36132,https://ijs.usfigureskating.org/leaderboard/results/2025/36132/index.asp,200,2025 ISCC Open - Compete USA,6/28/25,6/28/25,"Simsbury, CT",2026-05-11T16:38:46+00:00,,11,2526
+2025,36229,https://ijs.usfigureskating.org/leaderboard/results/2025/36229/index.asp,200,Skate Milwaukee 2025,7/9/25,7/13/25,"Milwaukee, WI",2026-05-11T16:39:09+00:00,,11,2526
+2025,36278,https://ijs.usfigureskating.org/leaderboard/results/2025/36278/index.asp,200,2025 Junior Cup,7/9/25,7/13/25,"Milwaukee, WI",2026-05-11T16:39:19+00:00,,11,2526
+2025,36290,https://ijs.usfigureskating.org/leaderboard/results/2025/36290/index.asp,200,2025 Excel National Festival,7/9/25,7/13/25,"Colorado Springs, CO",2026-05-11T16:39:22+00:00,,11,2526
+2025,35775,https://ijs.usfigureskating.org/leaderboard/results/2025/35775/index.asp,200,2025 Orange Blossom,7/10/25,7/13/25,"Clearwater, FL",2026-05-11T16:37:21+00:00,,11,2526
+2025,36288,https://ijs.usfigureskating.org/leaderboard/results/2025/36288/index.asp,200,2025 Red White and Blue,7/13/25,7/13/25,"Vacaville, CA",2026-05-11T16:39:22+00:00,,11,2526
+2025,35766,https://ijs.usfigureskating.org/leaderboard/results/2025/35766/index.asp,200,Skate Wilmington 2025,7/16/25,7/20/25,"Wilmington, DE",2026-05-11T16:37:18+00:00,,11,2526
+2025,35825,https://ijs.usfigureskating.org/leaderboard/results/2025/35825/index.asp,200,2025 Cactus Classic,7/17/25,7/20/25,"Scottsdale, AZ",2026-05-11T16:37:35+00:00,,11,2526
+2025,35923,https://ijs.usfigureskating.org/leaderboard/results/2025/35923/index.asp,200,2025 Peach Open,7/18/25,7/20/25,"Atlanta IceForum, Duluth, GA",2026-05-11T16:38:01+00:00,,11,2526
+2025,36203,https://ijs.usfigureskating.org/leaderboard/results/2025/36203/index.asp,200,2025 Skate St. Paul,7/18/25,7/19/25,"Richfield, MN",2026-05-11T16:39:03+00:00,,11,2526
+2025,35774,https://ijs.usfigureskating.org/leaderboard/results/2025/35774/index.asp,200,2025 Peach Classic,7/19/25,7/20/25,"Duluth, GA",2026-05-11T16:37:21+00:00,,11,2526
+2025,35828,https://ijs.usfigureskating.org/leaderboard/results/2025/35828/index.asp,200,2025 Los Angeles Open Championships,7/19/25,7/20/25,"Burbank, CA",2026-05-11T16:37:36+00:00,,11,2526
+2025,35981,https://ijs.usfigureskating.org/leaderboard/results/2025/35981/index.asp,200,2025 Sun Valley Summer Championships,7/19/25,7/20/25,"Sun Valley, Idaho",2026-05-11T16:38:14+00:00,,11,2526
+2025,36133,https://ijs.usfigureskating.org/leaderboard/results/2025/36133/index.asp,200,Skate Tulsa 2025,7/19/25,7/20/25,WeStreet Ice Center,2026-05-11T16:38:47+00:00,,11,2526
+2025,36151,https://ijs.usfigureskating.org/leaderboard/results/2025/36151/index.asp,200,2025 Charleston Open,7/25/25,7/27/25,"North Charleston, SC",2026-05-11T16:38:51+00:00,,11,2526
+2025,36314,https://ijs.usfigureskating.org/leaderboard/results/2025/36314/index.asp,200,26th Annual Chicago Open,7/25/25,7/26/25,"Glenview, IL",2026-05-11T16:39:28+00:00,,11,2526
+2025,36292,https://ijs.usfigureskating.org/leaderboard/results/2025/36292/index.asp,200,2025 National Showcase,7/28/25,8/2/25,"Rochester, MI",2026-05-11T16:39:23+00:00,,11,2526
+2025,36221,https://ijs.usfigureskating.org/leaderboard/results/2025/36221/index.asp,200,2025 Philadelphia Summer Championships,7/29/25,8/3/25,"Aston, PA",2026-05-11T16:39:07+00:00,,11,2526
+2025,36226,https://ijs.usfigureskating.org/leaderboard/results/2025/36226/index.asp,200,2025 DuPage Open - Non Qual,8/1/25,8/3/25,"Evanston, IL",2026-05-11T16:39:08+00:00,,11,2526
+2025,36303,https://ijs.usfigureskating.org/leaderboard/results/2025/36303/index.asp,200,2025 Scott Hamilton Invitational,8/1/25,8/3/25,"Nashville, TN",2026-05-11T16:39:26+00:00,,11,2526
+2025,36291,https://ijs.usfigureskating.org/leaderboard/results/2025/36291/index.asp,200,2025 EDGE OF THE SOUND,8/2/25,8/2/25,"BREMERTON, WA",2026-05-11T16:39:23+00:00,,11,2526
+2025,35870,https://ijs.usfigureskating.org/leaderboard/results/2025/35870/index.asp,200,Copper Cup 2025,8/6/25,8/10/25,"Bountiful, UT",2026-05-11T16:37:47+00:00,,11,2526
+2025,35637,https://ijs.usfigureskating.org/leaderboard/results/2025/35637/index.asp,200,2025 Silicon Valley Open Non-Qualifying Competitio,8/7/25,8/10/25,"San Jose, CA",2026-05-11T16:36:46+00:00,,11,2526
+2025,36163,https://ijs.usfigureskating.org/leaderboard/results/2025/36163/index.asp,200,The Hershey Open & Neal Wood Memorial Open,8/7/25,8/8/25,"Hershey Park Arena, Hershey  PA",2026-05-11T16:38:53+00:00,,11,2526
+2025,36280,https://ijs.usfigureskating.org/leaderboard/results/2025/36280/index.asp,200,2025 Top of The World Skating Competition,8/8/25,8/9/25,"Anchorage, Alaska",2026-05-11T16:39:20+00:00,,11,2526
+2025,36184,https://ijs.usfigureskating.org/leaderboard/results/2025/36184/index.asp,200,2025 Battle of the Blades,8/9/25,8/10/25,"Fort Wayne, IN",2026-05-11T16:38:58+00:00,,11,2526
+2025,35894,https://ijs.usfigureskating.org/leaderboard/results/2025/35894/index.asp,200,2025 Last Chance for Solo Dance Skate Kalamazoo,8/14/25,8/17/25,"Kalamazoo, MI",2026-05-11T16:37:54+00:00,,11,2526
+2025,35712,https://ijs.usfigureskating.org/leaderboard/results/2025/35712/index.asp,200,2025 Skate Chautauqua,8/15/25,8/17/25,"Jamestown, NY",2026-05-11T16:37:02+00:00,,11,2526
+2025,35848,https://ijs.usfigureskating.org/leaderboard/results/2025/35848/index.asp,200,2025 Skate the Lake,8/15/25,8/17/25,"Pleasant Prairie, WI",2026-05-11T16:37:41+00:00,,11,2526
+2025,36206,https://ijs.usfigureskating.org/leaderboard/results/2025/36206/index.asp,200,2025 Potomac Memorial Open Nonqualifying Competiti,8/15/25,8/17/25,"Ashburn, VA",2026-05-11T16:39:04+00:00,,11,2526
+2025,36305,https://ijs.usfigureskating.org/leaderboard/results/2025/36305/index.asp,200,2025 Apple Ice Classic,8/15/25,8/17/25,"Wenatchee, WA",2026-05-11T16:39:26+00:00,,11,2526
+2025,36317,https://ijs.usfigureskating.org/leaderboard/results/2025/36317/index.asp,200,2025 Minnesota L'etoile du Nord Challenge,8/16/25,8/17/25,"Coon Rapids, MN",2026-05-11T16:39:29+00:00,,11,2526
+2025,36352,https://ijs.usfigureskating.org/leaderboard/results/2025/36352/index.asp,200,2025 Mini Championship Challenge,8/16/25,8/17/25,"Coon Rapids, MN",2026-05-11T16:39:37+00:00,,11,2526
+2025,36302,https://ijs.usfigureskating.org/leaderboard/results/2025/36302/index.asp,200,Skate Detroit 2025,8/19/25,8/24/25,"Bloomfield Hills, MI",2026-05-11T16:39:25+00:00,,11,2526
+2025,36192,https://ijs.usfigureskating.org/leaderboard/results/2025/36192/index.asp,200,2025 Silver State Open Championships Nonqual,8/21/25,8/24/25,"Henderson, NV",2026-05-11T16:39:00+00:00,,11,2526
+2025,36301,https://ijs.usfigureskating.org/leaderboard/results/2025/36301/index.asp,200,2025 Atlanta Open Non-Qual,8/21/25,8/24/25,"Cumming, GA",2026-05-11T16:39:25+00:00,,11,2526
+2025,36244,https://ijs.usfigureskating.org/leaderboard/results/2025/36244/index.asp,200,37th Annual Ice Crystal Classic,8/22/25,8/23/25,"Vancouver, WA",2026-05-11T16:39:12+00:00,,11,2526
+2025,36287,https://ijs.usfigureskating.org/leaderboard/results/2025/36287/index.asp,200,2025 Skate San Francisco,8/22/25,8/24/25,"San Francisco, CA",2026-05-11T16:39:21+00:00,,11,2526
+2025,36343,https://ijs.usfigureskating.org/leaderboard/results/2025/36343/index.asp,200,2025 Skate by the Sea,8/23/25,8/23/25,"San Diego, CA",2026-05-11T16:39:35+00:00,,11,2526
+2025,36351,https://ijs.usfigureskating.org/leaderboard/results/2025/36351/index.asp,200,2025 Oklahoma Open,8/23/25,8/24/25,"Oklahoma City, OK",2026-05-11T16:39:36+00:00,,11,2526
+2025,36186,https://ijs.usfigureskating.org/leaderboard/results/2025/36186/index.asp,200,2025 Golden West Non-Qual Championships,8/29/25,8/31/25,"Irvine, CA",2026-05-11T16:38:59+00:00,,11,2526
+2025,36228,https://ijs.usfigureskating.org/leaderboard/results/2025/36228/index.asp,200,Skate Houston 2025,8/29/25,9/1/25,"Sugar Land, TX",2026-05-11T16:39:09+00:00,,11,2526
+2025,36284,https://ijs.usfigureskating.org/leaderboard/results/2025/36284/index.asp,200,2025 Southwest Florida Fall Classic,8/30/25,8/30/25,"Ellenton, Florida",2026-05-11T16:39:21+00:00,,11,2526
+2025,36285,https://ijs.usfigureskating.org/leaderboard/results/2025/36285/index.asp,200,The 99th Annual Middle Atlantics Competition Non Q,9/3/25,9/7/25,"New York, NY",2026-05-11T16:39:21+00:00,,11,2526
+2025,36155,https://ijs.usfigureskating.org/leaderboard/results/2025/36155/index.asp,200,2025 Greater Chicago Fall Invitational Non-Qualify,9/4/25,9/7/25,"Evanston, IL",2026-05-11T16:38:52+00:00,,11,2526
+2025,35889,https://ijs.usfigureskating.org/leaderboard/results/2025/35889/index.asp,200,2025 John Smith Memorial,9/5/25,9/6/25,"Extreme Ice Center, Indian Trail, NC",2026-05-11T16:37:52+00:00,,11,2526
+2025,36227,https://ijs.usfigureskating.org/leaderboard/results/2025/36227/index.asp,200,2025 Ice in the Pines,9/5/25,9/7/25,"Flagstaff, AZ",2026-05-11T16:39:09+00:00,,11,2526
+2025,35906,https://ijs.usfigureskating.org/leaderboard/results/2025/35906/index.asp,200,2025 Skate St. Moritz,9/6/25,9/7/25,"Oakland, CA",2026-05-11T16:37:57+00:00,,11,2526
+2025,35930,https://ijs.usfigureskating.org/leaderboard/results/2025/35930/index.asp,200,2025 National Solo Dance Final,9/10/25,9/14/25,"Salt Lake City, UT",2026-05-11T16:38:02+00:00,,11,2526
+2025,35654,https://ijs.usfigureskating.org/leaderboard/results/2025/35654/index.asp,200,2025 Colorado Springs Invitational-RMSG,9/11/25,9/14/25,"Monument, CO",2026-05-11T16:36:49+00:00,,11,2526
+2025,36230,https://ijs.usfigureskating.org/leaderboard/results/2025/36230/index.asp,200,2025 Southern Indiana Ice Classic,9/12/25,9/14/25,"Evansville, IN",2026-05-11T16:39:09+00:00,,11,2526
+2025,36295,https://ijs.usfigureskating.org/leaderboard/results/2025/36295/index.asp,200,2025 Carousel Classic,9/12/25,9/14/25,"Eugene, OR",2026-05-11T16:39:24+00:00,,11,2526
+2025,36250,https://ijs.usfigureskating.org/leaderboard/results/2025/36250/index.asp,200,2025 Maplewood Fall Classic,9/18/25,9/21/25,"Vadnais Heights, MN",2026-05-11T16:39:14+00:00,,11,2526
+2025,36315,https://ijs.usfigureskating.org/leaderboard/results/2025/36315/index.asp,200,Challenge Cup 2025,9/18/25,9/21/25,"Ardmore, PA",2026-05-11T16:39:28+00:00,,11,2526
+2025,35725,https://ijs.usfigureskating.org/leaderboard/results/2025/35725/index.asp,200,46th Annual Pasadena Open Championships,9/19/25,9/21/25,"Pasadena, CA",2026-05-11T16:37:06+00:00,,11,2526
+2025,36098,https://ijs.usfigureskating.org/leaderboard/results/2025/36098/index.asp,200,2025 Pacific Northwest Interclub Skating Champions,9/19/25,9/21/25,"Spokane, Wa",2026-05-11T16:38:39+00:00,,11,2526
+2025,36235,https://ijs.usfigureskating.org/leaderboard/results/2025/36235/index.asp,200,2025 Skate Cleveland Non-Qual,9/19/25,9/21/25,"Cleveland, OH",2026-05-11T16:39:10+00:00,,11,2526
+2025,36324,https://ijs.usfigureskating.org/leaderboard/results/2025/36324/index.asp,200,2025 Pony Express Championships,9/19/25,9/21/25,"St. Joseph, MO",2026-05-11T16:39:30+00:00,,11,2526
+2025,36339,https://ijs.usfigureskating.org/leaderboard/results/2025/36339/index.asp,200,2025 Falling Leaves CRC Championship,9/26/25,9/28/25,"Glen Allen, VA",2026-05-11T16:39:34+00:00,,11,2526
+2025,36360,https://ijs.usfigureskating.org/leaderboard/results/2025/36360/index.asp,200,14th Annual Interclub Invitational Series Final,9/27/25,9/28/25,"Paramount, CA",2026-05-11T16:39:38+00:00,,11,2526
+2025,36381,https://ijs.usfigureskating.org/leaderboard/results/2025/36381/index.asp,200,2025 Austin Fall Festival,9/27/25,9/27/25,"Cedar Park, TX",2026-05-11T16:39:44+00:00,,11,2526
+2025,36216,https://ijs.usfigureskating.org/leaderboard/results/2025/36216/index.asp,200,2025 Texas Trophy,9/30/25,10/4/25,"Plano, TX",2026-05-11T16:39:06+00:00,,11,2526
+2025,35850,https://ijs.usfigureskating.org/leaderboard/results/2025/35850/index.asp,200,2025 Oktoberfest,10/3/25,10/5/25,"Cottonwood Heights, UT",2026-05-11T16:37:41+00:00,,11,2526
+2025,36330,https://ijs.usfigureskating.org/leaderboard/results/2025/36330/index.asp,200,2025 Florida Figure Skating Championships,10/3/25,10/5/25,"Jacksonville, FL",2026-05-11T16:39:32+00:00,,11,2526
+2025,36373,https://ijs.usfigureskating.org/leaderboard/results/2025/36373/index.asp,200,2025 LA Autumn Classic,10/3/25,10/5/25,"El Segundo, CA",2026-05-11T16:39:42+00:00,,11,2526
+2025,36396,https://ijs.usfigureskating.org/leaderboard/results/2025/36396/index.asp,200,2025 LA Autumn Classic (SYNCHRO ONLY),10/3/25,10/5/25,"El Segundo, CA",2026-05-11T16:39:48+00:00,,11,2526
+2025,35885,https://ijs.usfigureskating.org/leaderboard/results/2025/35885/index.asp,200,2025 Hiawathaland Open & Compete USA Competition,10/10/25,10/12/25,"Rochester, MN",2026-05-11T16:37:51+00:00,,11,2526
+2025,36413,https://ijs.usfigureskating.org/leaderboard/results/2025/36413/index.asp,200,2025 Connecticut High School Classic,10/11/25,10/11/25,"West Hartford, CT",2026-05-11T16:39:52+00:00,,11,2526
+2025,36432,https://ijs.usfigureskating.org/leaderboard/results/2025/36432/index.asp,200,2025 Spooktacular,10/11/25,10/11/25,"Lakewood, CA",2026-05-11T16:39:56+00:00,,11,2526
+2025,36390,https://ijs.usfigureskating.org/leaderboard/results/2025/36390/index.asp,200,2025 Skate by the Lake,10/16/25,10/19/25,"McCall, ID",2026-05-11T16:39:46+00:00,,11,2526
+2025,36363,https://ijs.usfigureskating.org/leaderboard/results/2025/36363/index.asp,200,2025 16th Annual Capital City Championships,10/24/25,10/25/25,"Bismarck, ND",2026-05-11T16:39:39+00:00,,11,2526
+2025,36392,https://ijs.usfigureskating.org/leaderboard/results/2025/36392/index.asp,200,2025 Shores Autumn Classic,10/24/25,10/25/25,"St Clr Shores, MI",2026-05-11T16:39:47+00:00,,11,2526
+2025,36365,https://ijs.usfigureskating.org/leaderboard/results/2025/36365/index.asp,200,2025 Cape Cod Harvest Classic,10/25/25,10/26/25,"Orleans, MA",2026-05-11T16:39:40+00:00,,11,2526
+2025,36389,https://ijs.usfigureskating.org/leaderboard/results/2025/36389/index.asp,200,Skating Spooktacular 2025,10/25/25,10/26/25,"North Canton, OH",2026-05-11T16:39:46+00:00,,11,2526
+2025,36385,https://ijs.usfigureskating.org/leaderboard/results/2025/36385/index.asp,200,60th Annual Arrowhead Open Championships,10/26/25,10/26/25,"Ontario, CA",2026-05-11T16:39:45+00:00,,11,2526
+2025,36492,https://ijs.usfigureskating.org/leaderboard/results/2025/36492/index.asp,200,2025 Fort Collins Fright Fest,10/26/25,10/26/25,"EPIC, Fort Collins, CO",2026-05-11T16:40:09+00:00,,11,2526
+2025,36464,https://ijs.usfigureskating.org/leaderboard/results/2025/36464/index.asp,200,2025 Autumn Skate Fest,10/31/25,11/2/25,"Burnsville, MN",2026-05-11T16:40:03+00:00,,11,2526
+2025,36336,https://ijs.usfigureskating.org/leaderboard/results/2025/36336/index.asp,200,2025 Granite City Classic,11/7/25,11/8/25,Municipal Athletic Complex (MAC),2026-05-11T16:39:33+00:00,,11,2526
+2025,36356,https://ijs.usfigureskating.org/leaderboard/results/2025/36356/index.asp,200,Ann Arbor Adult Open 2025,11/7/25,11/8/25,"Ann Arbor, MI",2026-05-11T16:39:37+00:00,,11,2526
+2025,36588,https://ijs.usfigureskating.org/leaderboard/results/2025/36588/index.asp,200,2025 North Atlantic High School Competition,11/8/25,11/9/25,"Falmouth, ME",2026-05-11T16:40:30+00:00,,11,2526
+2025,36436,https://ijs.usfigureskating.org/leaderboard/results/2025/36436/index.asp,200,Desert Ice Open Competition 2025,11/14/25,11/16/25,Las Vegas Nevada,2026-05-11T16:39:57+00:00,,11,2526
+2025,36332,https://ijs.usfigureskating.org/leaderboard/results/2025/36332/index.asp,200,2025 Autumn Skills Competition,11/15/25,11/15/25,"Broollyn, Ohio",2026-05-11T16:39:32+00:00,,11,2526
+2025,36440,https://ijs.usfigureskating.org/leaderboard/results/2025/36440/index.asp,200,2025 Autumn Antics,11/16/25,11/16/25,"Peoria, AZ",2026-05-11T16:39:58+00:00,,11,2526
+2025,36456,https://ijs.usfigureskating.org/leaderboard/results/2025/36456/index.asp,200,2025 Holiday Classic Figure Skating Competition,11/21/25,11/22/25,"ICON Sports Center, Grand Forks, ND",2026-05-11T16:40:01+00:00,,11,2526
+2025,36504,https://ijs.usfigureskating.org/leaderboard/results/2025/36504/index.asp,200,Autumn Skate 2025,11/22/25,11/23/25,"Wilmington, DE",2026-05-11T16:40:12+00:00,,11,2526
+2025,36623,https://ijs.usfigureskating.org/leaderboard/results/2025/36623/index.asp,200,2025 Aspen Invitational,12/5/25,12/6/25,"Aspen, CO",2026-05-11T16:40:38+00:00,,11,2526
+2025,36746,https://ijs.usfigureskating.org/leaderboard/results/2025/36746/index.asp,200,34th Annual Skaneateles Figure Skating Invitationa,12/6/25,12/7/25,Skaneateles Community Center,2026-05-11T16:41:03+00:00,,11,2526
+2025,36617,https://ijs.usfigureskating.org/leaderboard/results/2025/36617/index.asp,200,2025 Jingle Blades Competition,12/7/25,12/7/25,"Darien, IL",2026-05-11T16:40:36+00:00,,11,2526
+2025,36499,https://ijs.usfigureskating.org/leaderboard/results/2025/36499/index.asp,200,2025 Holiday Season Competition,12/27/25,12/27/25,"Lewis Center, OH",2026-05-11T16:40:11+00:00,,11,2526
+2025,30917,https://ijs.usfigureskating.org/leaderboard/results/2025/30917/index.asp,200,2025 Pacific Coast Adult Sectional FS Championship,3/13/25,3/16/25,"Paramount, CA",2026-05-11T16:21:01+00:00,,13,2425
+2025,30911,https://ijs.usfigureskating.org/leaderboard/results/2025/30911/index.asp,200,2025 Eastern Adult Sectional FS Championships,3/14/25,3/16/25,"Extreme Ice Center, Indian Trail, NC",2026-05-11T16:21:00+00:00,,13,2425
+2025,30914,https://ijs.usfigureskating.org/leaderboard/results/2025/30914/index.asp,200,2025 Midwestern Adult Sectional FS Championships,3/21/25,3/23/25,"Madison, WI",2026-05-11T16:21:01+00:00,,13,2425
+2025,30920,https://ijs.usfigureskating.org/leaderboard/results/2025/30920/index.asp,200,2025 U.S. Adult Figure Skating Championships,3/31/25,4/5/25,"St Louis Park, MN",2026-05-11T16:21:02+00:00,,12,2425
+2025,34272,https://ijs.usfigureskating.org/leaderboard/results/2025/34272/index.asp,200,2025 U.S. Collegiate Championships - Invitational,7/18/25,7/20/25,"Flossmoor, IL",2026-05-11T16:32:10+00:00,,14,2526

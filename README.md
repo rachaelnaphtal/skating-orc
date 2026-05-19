@@ -4,6 +4,10 @@ This project generates OAC style reports for judges.
 
 More instructions to come, but full reports can be run through running download_results.py.
 
+## IJS discovery and batch load
+
+To find USFS IJS competitions by numeric ID and load them from a CSV (discover → metadata → full scrape), see **[scripts/README.md](scripts/README.md)**.
+
 # Setup libraries
 install homebrew or anaconda
 install python

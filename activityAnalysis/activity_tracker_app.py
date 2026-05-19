@@ -108,7 +108,7 @@ DISC_ABBREV = {
 
 
 def _competition_type_sort_key(competition_type_id) -> int:
-    """Within a calendar year: US Synchro Champs, US Champs, adult/collegiate champs, SYS sectionals, SPD (+ adult) sectionals."""
+    """Within a calendar year: US Synchro Champs, US Champs, Adult/Collegiate champs, SYS sectionals, SPD (+ adult) sectionals."""
     tid = int(competition_type_id)
     if tid == 8:
         return 0

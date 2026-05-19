@@ -40,6 +40,13 @@ Examples::
 
 Requires ``DATABASE_URL`` (or PG* env vars). Chromium may start for PDF-mode segments when
 not using HTML-only paths (same as a normal scrape).
+
+Full usage, flags, and workflow: scripts/README.md
+
+Full scrape reuses one HTTP session and DB session for the whole CSV run, passes discover
+dates/location into ``scrape()`` (skips an extra index fetch when both dates are present),
+and commits once per competition instead of after every segment. One-off loads from the
+apps are unchanged (they do not pass those options).
 """
 
 from __future__ import annotations
@@ -64,6 +71,11 @@ from event_regex_presets import (  # noqa: E402
 )
 from officials_competition_types import (  # noqa: E402
     competition_load_flags_from_officials_type_id,
+)
+from ijs_scrape_log import (  # noqa: E402
+    configure as configure_scrape_logging,
+    pop_warnings,
+    print_batch_summary,
 )
 
 
@@ -103,6 +115,17 @@ def parse_bool_cell(val: str | None) -> bool | None:
     if t in ("0", "false", "f", "no", "n"):
         return False
     return None
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, rem = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {rem}s"
+    h, rem_m = divmod(m, 60)
+    return f"{h}h {rem_m}m {rem}s"
 
 
 def parse_type_id(val: str | None) -> int | None:
@@ -281,7 +304,28 @@ def main(argv: list[str] | None = None) -> int:
         metavar="BOOL",
         help="Metadata-only: default nqs when CSV omits it.",
     )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Console logging WARNING and above only (per-segment detail at DEBUG).",
+    )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Console DEBUG logging (very noisy).",
+    )
+    p.add_argument(
+        "--log-file",
+        type=str,
+        default="",
+        metavar="PATH",
+        help="Also write DEBUG logs to this file.",
+    )
     args = p.parse_args(argv)
+
+    if args.quiet and args.verbose:
+        print("Use only one of --quiet and --verbose.", file=sys.stderr)
+        return 2
 
     try:
         level_tup = _parse_csv_choices(args.event_levels, LEVEL_CHOICES, "event level")
@@ -406,56 +450,109 @@ def main(argv: list[str] | None = None) -> int:
 
     import downloadResults as download_results  # noqa: E402
 
+    configure_scrape_logging(
+        quiet=args.quiet,
+        verbose=args.verbose,
+        log_file=args.log_file.strip() or None,
+    )
+
+    http_session = download_results._scrape_http_session()
+    db_session = get_db_session()
+    database_loader = DatabaseLoader(db_session, defer_commits=True)
+
     ok = 0
-    errors: list[str] = []
-    for r in eligible:
-        raw_url = str(r.get("url", "")).strip()
-        base_url = normalize_ijs_results_base_url(raw_url)
-        name = str(r.get("competition_name", "")).strip()
-        sy = _resolved_season_year(r, args.season_year)
-        oa_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
-        assert oa_id is not None
-        qualifying, nqs = _flags_for_row(r, oa_id)
+    errors: list[tuple[str, str]] = []
+    warn_by_url: dict[str, list[str]] = {}
+    try:
+        for i, r in enumerate(eligible, start=1):
+            raw_url = str(r.get("url", "")).strip()
+            base_url = normalize_ijs_results_base_url(raw_url)
+            name = str(r.get("competition_name", "")).strip()
+            sy = _resolved_season_year(r, args.season_year)
+            oa_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
+            assert oa_id is not None
+            qualifying, nqs = _flags_for_row(r, oa_id)
 
-        isFSM = not raw_url.strip().endswith("index.asp")
+            isFSM = not raw_url.strip().endswith("index.asp")
 
-        scrape_kw: dict = dict(
-            base_url=base_url,
-            report_name=name,
-            event_regex=event_regex,
-            only_rule_errors=args.only_rule_errors,
-            use_gcp=False,
-            write_excel=False,
-            write_to_database=True,
-            year=sy,
-            judge_filter=args.judge_filter.strip(),
-            specific_exclude=args.specific_exclude.strip(),
-            use_html=True,
-            isFSM=isFSM,
-            qualifying=qualifying,
-            nqs=nqs,
-            officials_analysis_competition_type_id=oa_id,
-            update_officials_competition_type=True,
-        )
-        if args.pdf_folder.strip():
-            scrape_kw["pdf_folder"] = args.pdf_folder.strip()
+            competition_metadata = {
+                "start_date": parse_mdy_or_iso(str(r.get("start_date", ""))),
+                "end_date": parse_mdy_or_iso(str(r.get("end_date", ""))),
+                "location": str(r.get("location", "")).strip() or None,
+            }
 
-        print(f"--- scrape: {base_url} | {name[:70]!r}", flush=True)
-        try:
-            download_results.scrape(**scrape_kw)
-            ok += 1
-        except Exception as ex:  # noqa: BLE001
-            errors.append(f"{base_url}: {ex}")
-        if args.delay > 0:
-            time.sleep(args.delay)
+            scrape_kw: dict = dict(
+                base_url=base_url,
+                report_name=name,
+                event_regex=event_regex,
+                only_rule_errors=args.only_rule_errors,
+                use_gcp=False,
+                write_excel=False,
+                write_to_database=True,
+                year=sy,
+                judge_filter=args.judge_filter.strip(),
+                specific_exclude=args.specific_exclude.strip(),
+                use_html=True,
+                isFSM=isFSM,
+                qualifying=qualifying,
+                nqs=nqs,
+                officials_analysis_competition_type_id=oa_id,
+                update_officials_competition_type=True,
+                http_session=http_session,
+                database_loader=database_loader,
+                competition_metadata=competition_metadata,
+                commit_per_segment=False,
+                quiet=args.quiet,
+                verbose=args.verbose,
+                configure_logging=False,
+            )
+            if args.pdf_folder.strip():
+                scrape_kw["pdf_folder"] = args.pdf_folder.strip()
 
-    print(f"Finished scrape for {ok} competition(s).")
-    if errors:
-        print(f"{len(errors)} error(s):", file=sys.stderr)
-        for e in errors[:30]:
-            print(f"  {e}", file=sys.stderr)
-        return 1
-    return 0
+            started_at = time.time()
+            if args.quiet:
+                print(
+                    f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} start "
+                    f"{base_url} | {name[:70]!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[{i}/{len(eligible)}] scrape {base_url} | {name[:70]!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            try:
+                download_results.scrape(**scrape_kw)
+                ok += 1
+                w = pop_warnings()
+                if w:
+                    warn_by_url[base_url] = w
+                if args.quiet:
+                    print(
+                        f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} done "
+                        f"({_fmt_elapsed(time.time() - started_at)}) {base_url}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except Exception as ex:  # noqa: BLE001
+                errors.append((base_url, str(ex)))
+                pop_warnings()
+                if args.quiet:
+                    print(
+                        f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} failed "
+                        f"({_fmt_elapsed(time.time() - started_at)}) {base_url}: {ex}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if args.delay > 0:
+                time.sleep(args.delay)
+    finally:
+        db_session.close()
+
+    print_batch_summary(ok=ok, failed=errors, warn_by_url=warn_by_url)
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

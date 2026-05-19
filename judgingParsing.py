@@ -31,9 +31,21 @@ from gcp_interactions_helper import read_file_from_gcp
 USING_ISU_COMPONENT_METHOD = False
 
 
+def _parsing_log(msg: str, *, issue: bool = True) -> None:
+    """Log parse issues at WARNING (collected for batch summary) or DEBUG."""
+    if issue:
+        from ijs_scrape_log import note_warning
+
+        note_warning(msg)
+    else:
+        import logging
+
+        logging.getLogger("ijs.parsing").debug(msg)
+
+
 def _parsing_user_message(msg: str) -> None:
-    """Parse/score warnings: always log to stderr; ``st.error`` only when Streamlit imports and runs."""
-    print(msg, file=sys.stderr)
+    """Parse/score warnings: log + ``st.error`` when Streamlit is active."""
+    _parsing_log(msg, issue=True)
     try:
         import streamlit as st  # type: ignore
     except ImportError:
@@ -204,7 +216,10 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             if line.startswith(str(element_number)) :
                 line=line[len(str(element_number)):]
             elif line.startswith(str(element_number+1)):
-                print(f"error parsing line for {skater_name} {event_name} {lines[i-1]}")
+                _parsing_log(
+                    f"error parsing line for {skater_name} {event_name} {lines[i-1]}",
+                    issue=True,
+                )
                 element_number=element_number+1
                 line=line[len(str(element_number)):]
             
@@ -277,9 +292,10 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                 continue
 
             if current_skater is None and (element_match or pcs_match):
-                print(
+                _parsing_log(
                     f"Element or PCS found without skater "
-                    f"(found {len(skater_details)} so far) — {event_name}"
+                    f"(found {len(skater_details)} so far) — {event_name}",
+                    issue=True,
                 )
 
     # -----------------------------
@@ -290,13 +306,14 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
         expected = float(skater_details[skater])
 
         if found != expected:
-            print(
+            _parsing_log(
                 f"TES mismatch for {skater}: "
-                f"expected {expected}, found {found}"
+                f"expected {expected}, found {found}",
+                issue=True,
             )
 
         if len(pcs_per_skater[skater]) < 3:
-            print(f"Missing PCS for {skater} in {event_name}")
+            _parsing_log(f"Missing PCS for {skater} in {event_name}", issue=True)
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
@@ -513,8 +530,10 @@ def process_scores(pdf, event_regex="", use_gcp=False):
         if len(pcs) < 3:
             athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
             if not athlete_dev_event:
-                _parsing_user_message(
-                    f"Components missing for skater {skater} {event_name}"
+                from ijs_scrape_log import record_parsing_issue
+
+                record_parsing_issue(
+                    "missing_pcs_columns", event_name, skater=skater
                 )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
@@ -590,8 +609,11 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
         current_skater = skater_info["name"]
         skater_details[current_skater] = skater_info
         if int(skater_info["rank"]) != len(skater_details):
-            print(
-                f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
+            _parsing_log(
+                f"Skater {skater_info['name']} has incorrect rank. "
+                f"Expected {len(skater_details)} got {skater_info['rank']}",
+                issue=True,
+            )
             # raise ValueError(
             #     f"Skater {skater_info["name"]} has incorrect rank. Expected {len(skater_details)} got {skater_info["rank"]}")
 
@@ -647,8 +669,10 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
         if len(pcs) < 3:
             athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
             if not athlete_dev_event:
-                _parsing_user_message(
-                    f"Components missing for skater {skater} {event_name}"
+                from ijs_scrape_log import record_parsing_issue
+
+                record_parsing_issue(
+                    "missing_pcs_columns", event_name, skater=skater
                 )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
@@ -671,8 +695,14 @@ def create_all_element_dict(judges, elements_per_skater, event_name):
             for judge in judges:
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
-                    print(
-                        f"Missing elements for skater {skater} judge {judgeNumber}")
+                    from ijs_scrape_log import record_parsing_issue
+
+                    record_parsing_issue(
+                        "missing_element_score",
+                        event_name,
+                        skater=skater,
+                        judge_number=judgeNumber,
+                    )
                     continue
 
                 deviation = judge_score - avg
@@ -719,7 +749,14 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
             for judge in judges:
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
-                    print(f"Missing components for skater {skater}")
+                    from ijs_scrape_log import record_parsing_issue
+
+                    record_parsing_issue(
+                        "missing_pcs_score",
+                        event_name,
+                        skater=skater,
+                        judge_number=judgeNumber,
+                    )
                     continue
                 deviation = judge_score - avg
                 thrown_out = is_score_thrown_out(judge_score, all_scores)
@@ -780,7 +817,7 @@ def extract_judge_scores(
     elif use_html:
         page_contents = get_page_contents(url, session=http_session)
         if not page_contents:
-            print(f"WARNING: Empty or failed HTML fetch for {url!r}")
+            _parsing_log(f"Empty or failed HTML fetch for {url!r}", issue=True)
             return ("", None, None, None, [], [], [])
         soup = BeautifulSoup(page_contents, "html.parser")
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = process_scores_html(
@@ -811,9 +848,17 @@ def extract_judge_scores(
 
     if not only_rule_errors:
         element_deviations = findElementDeviations(
-            elements_per_skater, judges, judge_filter=judge_filter)
+            elements_per_skater,
+            judges,
+            judge_filter=judge_filter,
+            event_name=event_name,
+        )
         pcs_errors = findPCSDeviations(
-            pcs_per_skater, judges, judge_filter=judge_filter)
+            pcs_per_skater,
+            judges,
+            judge_filter=judge_filter,
+            event_name=event_name,
+        )
     total_errors = count_total_errors_per_judge(
         judges, element_errors, element_deviations, pcs_errors
     )
@@ -837,6 +882,12 @@ def extract_judge_scores(
             judges, elements_per_skater, event_name
         )
         all_pcs_dict = create_all_pcs_dict(judges, pcs_per_skater, event_name)
+    try:
+        from ijs_scrape_log import flush_parsing_issues
+
+        flush_parsing_issues(event_name)
+    except ImportError:
+        pass
     return (
         event_name,
         total_errors,
@@ -908,10 +959,15 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
             for judgeNumber in range(1, len(allScores) + 1):
                 
                 if allScores[judgeNumber - 1] is None:
-                    # This is a missing score or judge that isn't included
-                    if judgeNumber < len(judges)+1:
-                        print(
-                            f"Missing elements for skater {skater} judge {judgeNumber}")
+                    if judgeNumber < len(judges) + 1:
+                        from ijs_scrape_log import record_parsing_issue
+
+                        record_parsing_issue(
+                            "missing_element_score",
+                            event_name,
+                            skater=skater,
+                            judge_number=judgeNumber,
+                        )
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
@@ -996,7 +1052,9 @@ def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
     }
 
 
-def findElementDeviations(skater_scores, judges, judge_filter=""):
+def findElementDeviations(
+    skater_scores, judges, judge_filter="", event_name: str = ""
+):
     errors = []
     for skater in skater_scores:
         for element in skater_scores[skater]:
@@ -1008,9 +1066,15 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
-                    if judgeNumber < len(judges)+1:
-                        print(
-                            f"Missing elements for skater {skater} judge {judgeNumber}")
+                    if judgeNumber < len(judges) + 1:
+                        from ijs_scrape_log import record_parsing_issue
+
+                        record_parsing_issue(
+                            "missing_element_score",
+                            event_name,
+                            skater=skater,
+                            judge_number=judgeNumber,
+                        )
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
@@ -1032,7 +1096,9 @@ def findElementDeviations(skater_scores, judges, judge_filter=""):
     return errors
 
 
-def findPCSDeviations(skater_scores, judges, judge_filter=""):
+def findPCSDeviations(
+    skater_scores, judges, judge_filter="", event_name: str = ""
+):
     errors = []
     for skater in skater_scores:
         deviation_points = [float(0)] * (len(judges) + 1)
@@ -1047,9 +1113,15 @@ def findPCSDeviations(skater_scores, judges, judge_filter=""):
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
-                    if judgeNumber < len(judges)+1:
-                        print(
-                            f"Missing component for skater {skater} judge {judgeNumber}")
+                    if judgeNumber < len(judges) + 1:
+                        from ijs_scrape_log import record_parsing_issue
+
+                        record_parsing_issue(
+                            "missing_pcs_score",
+                            event_name,
+                            skater=skater,
+                            judge_number=judgeNumber,
+                        )
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
