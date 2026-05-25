@@ -20,6 +20,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
+import pandas as pd
+
 from analytics import JudgeAnalytics
 from database import get_db_session
 from element_deviation_ranking import compute_element_deviation_rankings
@@ -94,12 +96,58 @@ def execute_element_deviation_rankings(run_params: ElementRankingRunParams) -> d
         session.close()
 
 
+def package_element_ranking_result(result: dict, base_pickle_path: str) -> dict:
+    """
+    Move large objects to sidecar pickles so the parent Streamlit process
+    does not load panel medians / σ̂ params when reading the main result.
+    """
+    out = dict(result)
+    ctrl = out.pop("control_by_element", None)
+    if isinstance(ctrl, pd.DataFrame) and not ctrl.empty:
+        ctrl_path = base_pickle_path + ".ctrl.pkl"
+        with open(ctrl_path, "wb") as f:
+            pickle.dump(ctrl, f, protocol=pickle.HIGHEST_PROTOCOL)
+        out["control_by_element_path"] = ctrl_path
+    params = out.pop("params", None)
+    if params:
+        params_path = base_pickle_path + ".params.pkl"
+        with open(params_path, "wb") as f:
+            pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
+        out["params_path"] = params_path
+    return out
+
+
+def load_ranking_params(result: dict) -> dict:
+    params = result.get("params")
+    if params:
+        return params
+    path = result.get("params_path")
+    if path and os.path.isfile(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return {}
+
+
+def load_control_by_element(result: dict) -> pd.DataFrame:
+    ctrl = result.get("control_by_element")
+    if isinstance(ctrl, pd.DataFrame) and not ctrl.empty:
+        return ctrl
+    path = result.get("control_by_element_path")
+    if path and os.path.isfile(path):
+        with open(path, "rb") as f:
+            loaded = pickle.load(f)
+        if isinstance(loaded, pd.DataFrame):
+            return loaded
+    return pd.DataFrame()
+
+
 def _worker_main(run_params: ElementRankingRunParams, out_pickle_path: str) -> None:
     err_path = out_pickle_path + ".err"
     try:
         result = execute_element_deviation_rankings(run_params)
+        packaged = package_element_ranking_result(result, out_pickle_path)
         with open(out_pickle_path, "wb") as f:
-            pickle.dump(result, f)
+            pickle.dump(packaged, f, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception:
         with open(err_path, "w", encoding="utf-8") as f:
             f.write(traceback.format_exc())
@@ -155,7 +203,14 @@ def cleanup_ranking_artifacts(
 ) -> None:
     paths: list[str] = []
     if result_path:
-        paths.extend([result_path, result_path + ".err"])
+        paths.extend(
+            [
+                result_path,
+                result_path + ".err",
+                result_path + ".ctrl.pkl",
+                result_path + ".params.pkl",
+            ]
+        )
     if params_path:
         paths.append(params_path)
     for path in paths:

@@ -7,6 +7,8 @@ Shared by ``scripts/load_judge_rankings.py`` and the Streamlit
 
 from __future__ import annotations
 
+import gc
+import os
 from datetime import date
 from typing import Iterable, Optional
 
@@ -32,6 +34,17 @@ MIN_ELEMENT_MARKING_EVENT_DATE = MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
 
 FLOOR_SIGMA = 0.05
 MIN_BIN_COUNT = 30
+
+
+def memory_efficient_mode() -> bool:
+    """Heroku / low-RAM: slimmer pipeline (on-demand judge detail, sidecar pickles)."""
+    if os.environ.get("DYNO"):
+        return True
+    return os.environ.get("ELEMENT_RANKING_LOW_MEMORY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def sigma_model(c, alpha, beta, gamma):
@@ -69,6 +82,7 @@ def load_element_marking_data(
     event_end_date: date | None = None,
     discipline_type_ids: Optional[Iterable[int]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
+    judge_ids: Optional[Iterable[int]] = None,
 ) -> pd.DataFrame:
     """
     element_id, judge_id, judge_score, discipline_type_id, element_type_id, competition_year.
@@ -93,6 +107,10 @@ def load_element_marking_data(
     )
     if where_clause is not None:
         stmt = stmt.where(where_clause)
+    if judge_ids:
+        stmt = stmt.where(
+            ElementScorePerJudge.judge_id.in_([int(j) for j in judge_ids])
+        )
     stmt = analytics._filter_select_competition_scope(stmt, competition_scope)
     effective_start = MIN_ELEMENT_MARKING_EVENT_DATE
     if event_start_date is not None:
@@ -103,14 +121,40 @@ def load_element_marking_data(
     df = pd.read_sql(stmt, session.bind)
     if df.empty:
         return df
-    df["judge_score"] = df["judge_score"].astype(float)
+    df["element_id"] = pd.to_numeric(df["element_id"], downcast="integer")
+    df["judge_id"] = pd.to_numeric(df["judge_id"], downcast="integer")
+    for col in ("discipline_type_id", "element_type_id"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+    df["judge_score"] = df["judge_score"].astype(np.float32)
     return df
+
+
+def control_scores_by_element(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per element_id with panel median GOE (for low-memory judge drill-down)."""
+    return (
+        df.groupby("element_id", sort=False)["judge_score"]
+        .median()
+        .astype(np.float32)
+        .rename("control_score")
+        .reset_index()
+    )
 
 
 def compute_control_scores(df: pd.DataFrame) -> pd.DataFrame:
     """Adds control_score (median GOE per element) and error."""
-    med = df.groupby("element_id")["judge_score"].median().rename("control_score")
-    out = df.merge(med, on="element_id", how="left")
+    out = df.copy()
+    out["control_score"] = out.groupby("element_id", sort=False)["judge_score"].transform(
+        "median"
+    )
+    out["error"] = out["judge_score"] - out["control_score"]
+    return out
+
+
+def apply_control_scores_from_table(
+    df: pd.DataFrame, control_by_element: pd.DataFrame
+) -> pd.DataFrame:
+    out = df.merge(control_by_element, on="element_id", how="left")
     out["error"] = out["judge_score"] - out["control_score"]
     return out
 
@@ -156,21 +200,30 @@ def fit_sigma_discrete(
 
     Returns {(disc_id, elem_type_id, control_int): sigma_hat}.
     """
-    params: dict = {}
-    grouped = df.dropna(subset=["discipline_type_id", "element_type_id"]).copy()
-    grouped["control_int"] = grouped["control_score"].round().astype(int)
+    grouped = df.dropna(subset=["discipline_type_id", "element_type_id"])
+    if grouped.empty:
+        return {}
+    control_int = grouped["control_score"].round().astype(np.int16)
+    stats = (
+        grouped.assign(control_int=control_int)
+        .groupby(
+            ["discipline_type_id", "element_type_id", "control_int"],
+            sort=False,
+        )["error"]
+        .agg(["std", "count"])
+    )
+    stats = stats[(stats["count"] >= min_bin_count) & stats["std"].notna() & (stats["std"] > 0)]
+    return {
+        (int(d), int(e), int(k)): float(sd)
+        for (d, e, k), sd in stats["std"].items()
+    }
 
-    for (disc_id, elem_type_id, k), g in grouped.groupby(
-        ["discipline_type_id", "element_type_id", "control_int"]
-    ):
-        if len(g) < min_bin_count:
-            continue
-        sd = g["error"].std(ddof=1)
-        if sd <= 0 or np.isnan(sd):
-            continue
-        params[(int(disc_id), int(elem_type_id), int(k))] = float(sd)
 
-    return params
+def judge_ids_for_identity_label(analytics: JudgeAnalytics, judge_name: str) -> list[int]:
+    for group in analytics.get_judge_analysis_identity_groups():
+        if group["label"] == judge_name:
+            return sorted({int(j) for j in group["judge_ids"]})
+    return []
 
 
 def sigma_hat_row_discrete(
@@ -320,47 +373,48 @@ def compute_judge_discipline_breakdown(
     work: pd.DataFrame,
     discipline_id_to_name: dict[int, str],
     element_type_id_to_name: dict[int, str],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Per judge × discipline and per judge × discipline × element type."""
-    work = work.copy()
-    work["discipline"] = work["discipline_type_id"].map(discipline_id_to_name)
-    work["element_type"] = work["element_type_id"].map(element_type_id_to_name)
+    w = work.copy()
+    w["discipline"] = w["discipline_type_id"].map(discipline_id_to_name)
+    w["element_type"] = w["element_type_id"].map(element_type_id_to_name)
 
-    disc_rows = []
-    for (judge_name, discipline), g in work.groupby(["judge_name", "discipline"], dropna=False):
-        if pd.isna(discipline):
-            continue
-        disc_rows.append(
-            {
-                "Judge": judge_name,
-                "Discipline": discipline,
-                "Element marks": len(g),
-                "Partial marking score": _partial_marking_score(g["m_pj"]),
-                "Mean GOE bias": float(g["error"].mean()),
-                "Mean |error|": float(g["error"].abs().mean()),
-                "Mean σ̂": float(g["sigma_hat"].mean()),
+    disc_base = w.dropna(subset=["discipline"])
+    if disc_base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    disc = (
+        disc_base.groupby(["judge_name", "discipline"], sort=False)
+        .agg(
+            **{
+                "Element marks": ("m_pj", "size"),
+                "Partial marking score": ("m_pj", _partial_marking_score),
+                "Mean GOE bias": ("error", "mean"),
+                "Mean |error|": ("error", lambda s: float(s.abs().mean())),
+                "Mean σ̂": ("sigma_hat", "mean"),
             }
         )
+        .reset_index()
+        .rename(columns={"judge_name": "Judge"})
+    )
 
-    elem_rows = []
-    for (judge_name, discipline, element_type), g in work.groupby(
-        ["judge_name", "discipline", "element_type"], dropna=False
-    ):
-        if pd.isna(discipline) or pd.isna(element_type):
-            continue
-        elem_rows.append(
-            {
-                "Judge": judge_name,
-                "Discipline": discipline,
-                "Element type": element_type,
-                "Element marks": len(g),
-                "Partial marking score": _partial_marking_score(g["m_pj"]),
-                "Mean GOE bias": float(g["error"].mean()),
-                "Mean |error|": float(g["error"].abs().mean()),
+    elem_base = w.dropna(subset=["discipline", "element_type"])
+    elem = (
+        elem_base.groupby(
+            ["judge_name", "discipline", "element_type"], sort=False
+        )
+        .agg(
+            **{
+                "Element marks": ("m_pj", "size"),
+                "Partial marking score": ("m_pj", _partial_marking_score),
+                "Mean GOE bias": ("error", "mean"),
+                "Mean |error|": ("error", lambda s: float(s.abs().mean())),
             }
         )
-
-    return pd.DataFrame(disc_rows), pd.DataFrame(elem_rows).sort_values(
+        .reset_index()
+        .rename(columns={"judge_name": "Judge", "element_type": "Element type"})
+    )
+    return disc, elem.sort_values(
         ["Judge", "Partial marking score"], ascending=[True, False]
     )
 
@@ -374,23 +428,36 @@ def build_sigma_bins_dataframe(
     min_bin_count: int = MIN_BIN_COUNT,
 ) -> pd.DataFrame:
     """σ̂ (error stdev) by discipline, element type, and rounded control GOE."""
-    grouped = df.dropna(subset=["discipline_type_id", "element_type_id"]).copy()
-    grouped["control_int"] = grouped["control_score"].round().astype(int)
+    grouped = df.dropna(subset=["discipline_type_id", "element_type_id"])
+    if grouped.empty:
+        return pd.DataFrame()
+    stats = (
+        grouped.assign(
+            control_int=grouped["control_score"].round().astype(np.int16)
+        )
+        .groupby(
+            ["discipline_type_id", "element_type_id", "control_int"],
+            sort=False,
+        )["error"]
+        .agg(["std", "count"])
+        .reset_index()
+    )
     rows = []
-    for (disc_id, elem_type_id, control_int), g in grouped.groupby(
-        ["discipline_type_id", "element_type_id", "control_int"]
-    ):
-        n = len(g)
-        sd = float(g["error"].std(ddof=1)) if n >= 2 else np.nan
-        key = (int(disc_id), int(elem_type_id), int(control_int))
+    for row in stats.itertuples(index=False):
+        disc_id = int(row.discipline_type_id)
+        elem_type_id = int(row.element_type_id)
+        control_int = int(row.control_int)
+        n = int(row.count)
+        sd = float(row.std) if n >= 2 and pd.notna(row.std) else np.nan
+        key = (disc_id, elem_type_id, control_int)
         in_model = key in params and n >= min_bin_count
         rows.append(
             {
-                "Discipline": discipline_id_to_name.get(int(disc_id), str(disc_id)),
+                "Discipline": discipline_id_to_name.get(disc_id, str(disc_id)),
                 "Element type": element_type_id_to_name.get(
-                    int(elem_type_id), str(elem_type_id)
+                    elem_type_id, str(elem_type_id)
                 ),
-                "Control GOE": int(control_int),
+                "Control GOE": control_int,
                 "Marks in bin": n,
                 "Error stdev (all marks)": round(sd, 4) if pd.notna(sd) else None,
                 "σ̂ used in model": round(params[key], 4) if in_model else None,
@@ -462,6 +529,49 @@ def marking_score_summary(judge_summary: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def compute_judge_detail_for_identity(
+    analytics: JudgeAnalytics,
+    judge_name: str,
+    control_by_element: pd.DataFrame,
+    params: dict,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+    discipline_type_ids: Optional[list[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+    floor_sigma: float = FLOOR_SIGMA,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load one identity's marks and build drill-down tables (uses precomputed panel medians)."""
+    judge_ids = judge_ids_for_identity_label(analytics, judge_name)
+    if not judge_ids or control_by_element.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    session = analytics.session
+    disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
+    elem_map = {int(i): n for i, n in analytics.get_element_types()}
+
+    df = load_element_marking_data(
+        session,
+        analytics,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        event_start_date=event_start_date,
+        event_end_date=event_end_date,
+        discipline_type_ids=discipline_type_ids,
+        competition_scope=competition_scope,
+        judge_ids=judge_ids,
+    )
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = apply_control_scores_from_table(df, control_by_element)
+    df["judge_name"] = judge_name
+    work = annotate_normalized_marks(df, params, floor_sigma=floor_sigma)
+    return compute_judge_discipline_breakdown(work, disc_map, elem_map)
+
+
 def compute_element_deviation_rankings(
     analytics: JudgeAnalytics,
     *,
@@ -474,6 +584,7 @@ def compute_element_deviation_rankings(
     min_marks: int = 0,
     floor_sigma: float = FLOOR_SIGMA,
     min_bin_count: int = MIN_BIN_COUNT,
+    include_judge_detail: bool | None = None,
 ) -> dict:
     """
     Run the full pipeline. Returns dict with keys:
@@ -507,7 +618,14 @@ def compute_element_deviation_rankings(
             "error": "No element score rows found for the selected filters.",
         }
 
+    low_memory = (
+        include_judge_detail is False
+        if include_judge_detail is not None
+        else memory_efficient_mode()
+    )
+
     n_raw = len(df)
+    control_by_element = control_scores_by_element(df)
     df = compute_control_scores(df)
     df = attach_judge_identities(df, analytics)
     params = fit_sigma_discrete(df, min_bin_count=min_bin_count)
@@ -523,11 +641,21 @@ def compute_element_deviation_rankings(
         elem_map,
         min_bin_count=min_bin_count,
     )
-    judge_discipline_detail, judge_element_detail = compute_judge_discipline_breakdown(
-        work.loc[work["judge_name"].isin(judge_summary["judge_name"])],
-        disc_map,
-        elem_map,
-    )
+
+    if low_memory:
+        judge_discipline_detail = pd.DataFrame()
+        judge_element_detail = pd.DataFrame()
+    else:
+        judge_discipline_detail, judge_element_detail = (
+            compute_judge_discipline_breakdown(
+                work.loc[work["judge_name"].isin(judge_summary["judge_name"])],
+                disc_map,
+                elem_map,
+            )
+        )
+
+    del df, work
+    gc.collect()
 
     return {
         "marking": marking,
@@ -535,8 +663,10 @@ def compute_element_deviation_rankings(
         "sigma_bins": sigma_bins,
         "judge_discipline_detail": judge_discipline_detail,
         "judge_element_detail": judge_element_detail,
+        "control_by_element": control_by_element if low_memory else pd.DataFrame(),
         "params": params,
         "n_raw_marks": n_raw,
         "n_sigma_buckets": len(params),
         "error": None,
+        "low_memory": low_memory,
     }

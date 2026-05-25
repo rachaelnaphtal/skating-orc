@@ -7,11 +7,18 @@ Example (judging analytics)::
 
 Example (activity tracker)::
 
-    ?report=person&official_id=12345
+    ?report=sectionals&official_type=competition-judge&discipline=no-discipline
+        &competition_group=spd-sectionals&show_other_roles=1
+    ?report=championships&include_lower_levels=0
+    ?report=person&official=12345
+    ?report=competition&competition=99
+    ?report=nqs&level=sectional,national
+    ?report=appointments&achieved_from=2024-01-01&achieved_to=2024-12-31&active_only=1
 """
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus
@@ -152,6 +159,63 @@ def apply_int_select_param(
 
     st.session_state[session_key] = value
     return True
+
+
+def apply_int_select_param_aliases(
+    param_names: Iterable[str],
+    session_key: str,
+    options: Iterable[int],
+) -> bool:
+    for name in param_names:
+        if apply_int_select_param(name, session_key, options):
+            return True
+    return False
+
+
+def apply_bool_param(param_name: str, session_key: str) -> bool:
+    raw = qp_get(param_name)
+    if raw is None:
+        return False
+    import streamlit as st
+
+    token = raw.strip().lower()
+    if token in ("1", "true", "yes", "on"):
+        st.session_state[session_key] = True
+        return True
+    if token in ("0", "false", "no", "off"):
+        st.session_state[session_key] = False
+        return True
+    return False
+
+
+def apply_date_param(param_name: str, session_key: str) -> bool:
+    text = qp_get(param_name)
+    if not text:
+        return False
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return False
+    import streamlit as st
+
+    st.session_state[session_key] = parsed
+    return True
+
+
+def label_to_query_slug(label: str) -> str:
+    """Stable URL token from a display label (e.g. ``Competition Judge`` → ``competition-judge``)."""
+    text = str(label).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-") or "item"
+
+
+def slug_map_for_labels(labels: Iterable[str]) -> dict[str, str]:
+    """Map URL slugs to selectbox labels; duplicate slugs keep the first label."""
+    out: dict[str, str] = {}
+    for lab in labels:
+        slug = label_to_query_slug(lab)
+        out.setdefault(slug, lab)
+    return out
 
 
 def sync_query_params(**params: Any) -> None:
@@ -557,6 +621,7 @@ _ACTIVITY_REPORT_OPTIONS = tuple(ACTIVITY_REPORT_SLUG_TO_LABEL.values())
 
 
 def init_activity_tracker_from_query() -> None:
+    """Apply ``?report=`` / ``?page=`` once per URL change (see ``query_params_changed``)."""
     apply_page_slug(
         qp_get("report") or qp_get("page"),
         ACTIVITY_REPORT_SLUG_TO_LABEL,
@@ -571,31 +636,213 @@ def apply_activity_entity_ids_from_query(
 ) -> None:
     """Run after dropdown option lists are known (person / competition reports)."""
     if official_options is not None:
-        apply_int_select_param(
-            "official_id", "per_person_official_select", official_options
+        apply_int_select_param_aliases(
+            ("official", "official_id"),
+            "per_person_official_select",
+            official_options,
         )
     if competition_options is not None:
-        apply_int_select_param(
-            "competition_id", "per_competition_select", competition_options
+        apply_int_select_param_aliases(
+            ("competition", "competition_id"),
+            "per_competition_select",
+            competition_options,
         )
+
+
+_ACTIVITY_CHAMPIONSHIP_FILTER_REPORTS = (
+    ACTIVITY_REPORT_SLUG_TO_LABEL["championships"],
+    ACTIVITY_REPORT_SLUG_TO_LABEL["sectionals"],
+)
+
+
+def apply_activity_official_type_from_query(appt_options: list[str]) -> None:
+    """Apply ``?official_type=`` before the Official Type selectbox is drawn."""
+    if not appt_options:
+        return
+    apply_choice_param(
+        "official_type",
+        "activity_official_type",
+        appt_options,
+        slug_map=slug_map_for_labels(appt_options),
+    )
+
+
+def apply_activity_discipline_from_query(disc_options: list[str]) -> None:
+    """Apply ``?discipline=`` before the Discipline selectbox is drawn."""
+    if not disc_options:
+        return
+    apply_choice_param(
+        "discipline",
+        "activity_discipline",
+        disc_options,
+        slug_map=slug_map_for_labels(disc_options),
+    )
+
+
+def apply_activity_championship_filters_from_query(
+    appt_options: list[str],
+    disc_options: list[str] | None = None,
+) -> None:
+    """Official type / discipline (both must run before their widgets)."""
+    apply_activity_official_type_from_query(appt_options)
+    if disc_options is not None:
+        apply_activity_discipline_from_query(disc_options)
+
+
+def apply_activity_competition_group_from_query(
+    options: list[str],
+    session_key: str = "activity_competition_group",
+) -> None:
+    apply_choice_param(
+        "competition_group",
+        session_key,
+        options,
+        slug_map=slug_map_for_labels(options),
+    )
+
+
+def apply_activity_matrix_checkboxes_from_query(
+    *, include_lower_levels: bool = False
+) -> None:
+    """Other roles / lower levels for championships & sectionals matrix."""
+    apply_bool_param("show_other_roles", "activity_show_other_roles")
+    if include_lower_levels:
+        apply_bool_param("include_lower_levels", "activity_include_lower_levels")
+
+
+def apply_activity_achieved_dates_from_query() -> None:
+    """Appointments-by-date report: achieved_from / achieved_to (ISO), active_only."""
+    apply_date_param("achieved_from", "appt_achieved_start")
+    apply_date_param("achieved_to", "appt_achieved_end")
+    apply_bool_param("active_only", "appt_achieved_active_only")
+
+
+def apply_multiselect_param_slugs(
+    param_name: str,
+    session_key: str,
+    allowed: Iterable[str],
+    slug_map: Mapping[str, str],
+) -> bool:
+    names = qp_get_list(param_name)
+    if not names:
+        return False
+    allowed_set = set(allowed)
+    valid = []
+    for token in names:
+        label = slug_map.get(token, token)
+        if label in allowed_set:
+            valid.append(label)
+    if not valid:
+        return False
+    import streamlit as st
+
+    st.session_state[session_key] = valid
+    return True
+
+
+def apply_activity_level_filter_from_query(
+    level_options: list[str],
+    session_key: str,
+) -> None:
+    apply_multiselect_param_slugs(
+        "level",
+        session_key,
+        level_options,
+        slug_map=slug_map_for_labels(level_options),
+    )
+
+
+_ACTIVITY_OPTIONAL_QUERY_KEYS = (
+    "official",
+    "official_id",
+    "competition",
+    "competition_id",
+    "official_type",
+    "discipline",
+    "competition_group",
+    "show_other_roles",
+    "include_lower_levels",
+    "level",
+    "achieved_from",
+    "achieved_to",
+    "active_only",
+)
+
+_REPORT_ASSIGNMENTS = ACTIVITY_REPORT_SLUG_TO_LABEL["assignments"]
+_REPORT_REFEREE = ACTIVITY_REPORT_SLUG_TO_LABEL["referee"]
+_REPORT_NQS = ACTIVITY_REPORT_SLUG_TO_LABEL["nqs"]
+_REPORT_SYNCHRO = ACTIVITY_REPORT_SLUG_TO_LABEL["synchro"]
+_REPORT_APPOINTMENTS = ACTIVITY_REPORT_SLUG_TO_LABEL["appointments"]
+
+
+def _param_or_none(value: Any) -> Any:
+    if value is None or value == "" or value == []:
+        return None
+    return value
 
 
 def sync_activity_tracker_query_params(report_mode: str) -> None:
     import streamlit as st
 
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = {k: None for k in _ACTIVITY_OPTIONAL_QUERY_KEYS}
     slug = ACTIVITY_LABEL_TO_REPORT_SLUG.get(report_mode)
     if slug:
         params["report"] = slug
+
     if report_mode == REPORT_PERSON_ASSIGNMENTS_LABEL:
         oid = st.session_state.get("per_person_official_select")
-        if oid is not None:
-            params["official_id"] = int(oid)
+        params["official"] = int(oid) if oid is not None else None
     elif report_mode == REPORT_COMPETITION_ASSIGNMENTS_LABEL:
         cid = st.session_state.get("per_competition_select")
-        if cid is not None:
-            params["competition_id"] = int(cid)
-    sync_query_params(**params)
+        params["competition"] = int(cid) if cid is not None else None
+    elif report_mode in _ACTIVITY_CHAMPIONSHIP_FILTER_REPORTS:
+        appt = st.session_state.get("activity_official_type")
+        disc = st.session_state.get("activity_discipline")
+        params["official_type"] = (
+            label_to_query_slug(str(appt)) if appt else None
+        )
+        params["discipline"] = (
+            label_to_query_slug(str(disc)) if disc else None
+        )
+        comp_grp = st.session_state.get("activity_competition_group")
+        params["competition_group"] = (
+            label_to_query_slug(str(comp_grp)) if comp_grp else None
+        )
+        if st.session_state.get("activity_show_other_roles"):
+            params["show_other_roles"] = "1"
+        if report_mode == ACTIVITY_REPORT_SLUG_TO_LABEL["championships"]:
+            ill = st.session_state.get("activity_include_lower_levels")
+            if ill is not None:
+                params["include_lower_levels"] = "1" if ill else "0"
+    elif report_mode == _REPORT_ASSIGNMENTS:
+        cg = st.session_state.get("assignments_report_comp_group")
+        params["competition_group"] = (
+            label_to_query_slug(str(cg)) if cg else None
+        )
+    elif report_mode == _REPORT_REFEREE:
+        cg = st.session_state.get("referee_report_comp_group")
+        params["competition_group"] = (
+            label_to_query_slug(str(cg)) if cg else None
+        )
+    elif report_mode in (_REPORT_NQS, _REPORT_SYNCHRO):
+        key = "synchro_level_filter" if report_mode == _REPORT_SYNCHRO else "nqs_level_filter"
+        levels = st.session_state.get(key) or []
+        if levels:
+            params["level"] = ",".join(
+                label_to_query_slug(str(l)) for l in levels
+            )
+    elif report_mode == _REPORT_APPOINTMENTS:
+        start = st.session_state.get("appt_achieved_start")
+        end = st.session_state.get("appt_achieved_end")
+        if start is not None:
+            params["achieved_from"] = start.isoformat()
+        if end is not None:
+            params["achieved_to"] = end.isoformat()
+        active = st.session_state.get("appt_achieved_active_only")
+        if active is not None:
+            params["active_only"] = "1" if active else "0"
+
+    sync_query_params(**{k: _param_or_none(v) for k, v in params.items()})
 
 
 REPORT_PERSON_ASSIGNMENTS_LABEL = "Per-person assignments"

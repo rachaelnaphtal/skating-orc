@@ -9,9 +9,16 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from app_query_params import (
+    apply_activity_achieved_dates_from_query,
+    apply_activity_competition_group_from_query,
+    apply_activity_discipline_from_query,
     apply_activity_entity_ids_from_query,
+    apply_activity_level_filter_from_query,
+    apply_activity_matrix_checkboxes_from_query,
+    apply_activity_official_type_from_query,
     init_activity_tracker_from_query,
-    render_query_help,
+    mark_query_params_applied,
+    query_params_changed,
     sync_activity_tracker_query_params,
 )
 from load_activity_data import (
@@ -570,7 +577,24 @@ if (
 ):
     st.session_state.activity_report_mode = _ACTIVITY_REPORT_OPTIONS[0]
 
-init_activity_tracker_from_query()
+_ACTIVITY_QP_FLAG = "_activity_qp_tuple"
+_activity_url_changed = query_params_changed(_ACTIVITY_QP_FLAG)
+
+if _activity_url_changed:
+    init_activity_tracker_from_query()
+
+
+def _sync_activity_tracker_url() -> None:
+    """Write current filters to the browser URL (safe to call more than once per run)."""
+    sync_activity_tracker_query_params(report_mode)
+    mark_query_params_applied(_ACTIVITY_QP_FLAG)
+
+
+def _activity_stop() -> None:
+    """Sync URL then halt (most reports exit before the bottom of the script)."""
+    _sync_activity_tracker_url()
+    st.stop()
+
 
 report_mode = st.radio(
     "Report",
@@ -578,6 +602,8 @@ report_mode = st.radio(
     horizontal=True,
     key="activity_report_mode",
 )
+
+_sync_activity_tracker_url()
 
 active_appointments_only = True
 if report_mode in (
@@ -760,10 +786,13 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
         default_appt = (
             "Competition Judge" if "Competition Judge" in appt_options else appt_options[0]
         )
+        if _activity_url_changed:
+            apply_activity_official_type_from_query(appt_options)
         selected_appt_type = st.selectbox(
             "Official Type",
             options=appt_options,
             index=appt_options.index(default_appt),
+            key="activity_official_type",
         )
 
     appointment_type_id = appt_types_map[selected_appt_type]
@@ -777,7 +806,9 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
         disc_options = list(disciplines_map.keys())
         if not disc_options:
             st.info("No disciplines found for this official type.")
-            st.stop()
+            _activity_stop()
+        if _activity_url_changed:
+            apply_activity_discipline_from_query(disc_options)
         default_disc = None
         for candidate in (
             "Singles/Pairs",
@@ -801,21 +832,28 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
             "Discipline",
             options=disc_options,
             index=disc_options.index(default_disc) if default_disc in disc_options else 0,
+            key="activity_discipline",
         )
 
     discipline_id = disciplines_map[selected_discipline]
     # Sectionals + no real discipline: choose SPD vs Synchro sectionals. Championships + no discipline: Champs.
     if _is_no_discipline_selection(discipline_id):
         if report_mode == REPORT_SECTIONALS_DETAILED:
+            _sectional_comp_options = [
+                "Combined (all sectionals)",
+                "SPD sectionals",
+                "Synchro sectionals",
+            ]
+            if _activity_url_changed:
+                apply_activity_competition_group_from_query(
+                    _sectional_comp_options
+                )
             comp_choice = st.radio(
                 "Competition",
-                options=[
-                    "Combined (all sectionals)",
-                    "SPD sectionals",
-                    "Synchro sectionals",
-                ],
+                options=_sectional_comp_options,
                 index=0,
                 horizontal=True,
+                key="activity_competition_group",
             )
             if comp_choice == "Combined (all sectionals)":
                 sectional_competition_type_ids = SECTIONAL_ACTIVITY_COMPETITION_TYPES
@@ -825,10 +863,19 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
                 sectional_competition_type_ids = SECTIONAL_SYNCHRO_COMPETITION_TYPES
             competition_type_id = DEFAULT_COMPETITION_TYPE
         else:
+            _champs_comp_options = [
+                "US Championships",
+                "US Synchro Championships",
+            ]
+            if _activity_url_changed:
+                apply_activity_competition_group_from_query(
+                    _champs_comp_options
+                )
             comp_choice = st.radio(
                 "Competition",
-                options=["US Championships", "US Synchro Championships"],
+                options=_champs_comp_options,
                 horizontal=True,
+                key="activity_competition_group",
             )
             competition_type_id = (
                 8
@@ -837,6 +884,7 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
             )
             sectional_competition_type_ids = None
     else:
+        st.session_state.pop("activity_competition_group", None)
         competition_type_id = COMPETITION_TYPE_MAP.get(
             discipline_id, DEFAULT_COMPETITION_TYPE
         )
@@ -856,8 +904,13 @@ else:
     sectional_competition_type_ids = None
 
 if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
+    if _activity_url_changed:
+        apply_activity_matrix_checkboxes_from_query(
+            include_lower_levels=(report_mode == REPORT_CHAMPIONSHIPS_DETAILED)
+        )
     show_other_roles = st.checkbox(
-        f"Show attendance in other roles  ({OTHER_ROLE_SYMBOL} = present at competition in a different role)"
+        f"Show attendance in other roles  ({OTHER_ROLE_SYMBOL} = present at competition in a different role)",
+        key="activity_show_other_roles",
     )
     show_section_info = st.checkbox(
         "Add information on section",
@@ -869,6 +922,7 @@ if report_mode in (REPORT_CHAMPIONSHIPS_DETAILED, REPORT_SECTIONALS_DETAILED):
             value=True,
             help="When checked, all assignments count, including lower-levels-only. "
             "When unchecked, only assignments that are not lower-levels-only.",
+            key="activity_include_lower_levels",
         )
     else:
         include_lower_levels = None
@@ -881,6 +935,8 @@ st.divider()
 
 
 if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
+    if _activity_url_changed:
+        apply_activity_achieved_dates_from_query()
     st.subheader("Appointments by achieved date")
     st.caption(
         "Uses **achieved date** on each directory appointment row. "
@@ -912,7 +968,7 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
 
     if appt_end < appt_start:
         st.error("The end date must be on or after the start date.")
-        st.stop()
+        _activity_stop()
 
     raw_appt = load_appointments_achieved_date_report(
         appt_start, appt_end, appt_active_only
@@ -1315,7 +1371,7 @@ if report_mode == REPORT_APPOINTMENTS_BY_ACHIEVED_DATE:
     if appt_currency is not None:
         date_str = pd.Timestamp(appt_currency).strftime("%-m/%-d/%Y")
         st.caption(f"Appointment snapshot max achieved date in DB: {date_str}")
-    st.stop()
+    _activity_stop()
 
 
 def normalize_df(df):
@@ -1497,9 +1553,14 @@ def load_competition_assignment_rows(competition_id: int):
 
 
 if report_mode == REPORT_REFEREE_SERVICE:
+    _referee_comp_options = list(SUMMARY_COMPETITION_TYPES.keys())
+    if _activity_url_changed:
+        apply_activity_competition_group_from_query(
+            _referee_comp_options, session_key="referee_report_comp_group"
+        )
     comp_group = st.selectbox(
         "Competition Type Group",
-        options=list(SUMMARY_COMPETITION_TYPES.keys()),
+        options=_referee_comp_options,
         index=0,
         key="referee_report_comp_group",
     )
@@ -1535,7 +1596,7 @@ if report_mode == REPORT_REFEREE_SERVICE:
             st.caption(
                 f"Data coverage: {ref_cov} competitions in this group with at least one referee."
             )
-            st.stop()
+            _activity_stop()
         by_name = dict(zip(disc_df["discipline_name"], disc_df["discipline_id"]))
         names = sorted(by_name.keys())
         picked = st.selectbox(
@@ -1562,7 +1623,7 @@ if report_mode == REPORT_REFEREE_SERVICE:
         st.caption(
             f"Data coverage: {ref_competition_count} competitions in this view with at least one referee."
         )
-        st.stop()
+        _activity_stop()
 
     norm_label = f"Normalized ({window_years} yr)"
     _sectional_ref_report = comp_group in (
@@ -1687,14 +1748,14 @@ if report_mode == REPORT_REFEREE_SERVICE:
     if appt_date is not None:
         date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
         st.caption(f"Appointment data current as of {date_str}")
-    st.stop()
+    _activity_stop()
 
 
 if report_mode == REPORT_PERSON_ASSIGNMENTS:
     officials_df = load_all_directory_officials()
     if officials_df.empty:
         st.info("No officials were found in the directory.")
-        st.stop()
+        _activity_stop()
     id_to_name = dict(
         zip(officials_df["official_id"].astype(int), officials_df["full_name"])
     )
@@ -1708,7 +1769,8 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         return (label if label else "\uffff", int(oid))
 
     oid_list = sorted(id_to_name.keys(), key=_per_person_sort_key)
-    apply_activity_entity_ids_from_query(official_options=oid_list)
+    if _activity_url_changed:
+        apply_activity_entity_ids_from_query(official_options=oid_list)
     pick_oid = st.selectbox(
         "Official",
         options=oid_list,
@@ -1831,20 +1893,21 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         section_subheader="Additional Nonqualifying Activity",
         expander_widget_key="person_seg_official_nonqual_exp",
     )
-    st.stop()
+    _activity_stop()
 
 
 if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
     comps_df = load_competitions_report_dropdown()
     if comps_df.empty:
         st.info("No competitions found in the database.")
-        st.stop()
+        _activity_stop()
     label_map = {
         int(row["competition_id"]): f"{int(row['year'])} — {row['name']}"
         for _, row in comps_df.iterrows()
     }
     cid_list = [int(x) for x in comps_df["competition_id"].tolist()]
-    apply_activity_entity_ids_from_query(competition_options=cid_list)
+    if _activity_url_changed:
+        apply_activity_entity_ids_from_query(competition_options=cid_list)
     pick_cid = st.selectbox(
         "Competition",
         options=cid_list,
@@ -1872,20 +1935,20 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
                 ),
             },
         )
-    st.stop()
+    _activity_stop()
 
 
 if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
     synchro = report_mode == REPORT_SYNCHRO_ACTIVITY
     if not activity_database_is_postgresql():
         if synchro:
-            st.stop()
+            _activity_stop()
         else:
             st.info(
                 "This report needs PostgreSQL with judging ``public`` tables and a "
                 "``competition.nqs`` column (see migration ``005_public_competition_nqs.sql``)."
             )
-        st.stop()
+        _activity_stop()
     _nq_key = "synchro_" if synchro else "nqs_"
     _official_type_options = (
         [
@@ -1934,6 +1997,11 @@ if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
         if synchro
         else NQS_REPORT_LEVEL_FILTER_BY_LABEL
     )
+    _level_option_labels = list(_level_options.keys())
+    if _activity_url_changed:
+        apply_activity_level_filter_from_query(
+            _level_option_labels, session_key=f"{_nq_key}level_filter"
+        )
     nqs_level_labels = st.multiselect(
         "Official level (directory)",
         options=list(_level_options.keys()),
@@ -1942,7 +2010,7 @@ if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
     )
     if not nqs_level_labels:
         st.info("Select at least one appointment level.")
-        st.stop()
+        _activity_stop()
     nqs_directory_level_ids = tuple(
         sorted(_level_options[lbl] for lbl in nqs_level_labels)
     )
@@ -2129,14 +2197,20 @@ if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
                     st.plotly_chart(_count_fig, width="stretch")
                 else:
                     st.info("No officials to chart for this selection.")
-    st.stop()
+    _activity_stop()
 
 
 if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
+    _assign_comp_options = list(SUMMARY_COMPETITION_TYPES.keys())
+    if _activity_url_changed:
+        apply_activity_competition_group_from_query(
+            _assign_comp_options, session_key="assignments_report_comp_group"
+        )
     comp_group = st.selectbox(
         "Competition Type Group",
-        options=list(SUMMARY_COMPETITION_TYPES.keys()),
+        options=_assign_comp_options,
         index=0,
+        key="assignments_report_comp_group",
     )
     comp_type_ids = SUMMARY_COMPETITION_TYPES[comp_group]
     competition_count = load_competition_count(tuple(comp_type_ids))
@@ -2145,7 +2219,7 @@ if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
     if summary_df.empty:
         st.info("No assignments found for the selected competition type group.")
         st.caption(f"Data coverage: {competition_count} unique competitions in this group.")
-        st.stop()
+        _activity_stop()
 
     if not show_section_info:
         summary_df = summary_df.drop(columns=["region"], errors="ignore")
@@ -2157,7 +2231,7 @@ if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
         )
         if summary_df.empty:
             st.info("No officials match the current section filter.")
-            st.stop()
+            _activity_stop()
 
     summary_rename = {
         "full_name": "Name",
@@ -2226,7 +2300,7 @@ if report_mode == REPORT_NUMBER_OF_ASSIGNMENTS:
     if appt_date is not None:
         date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
         st.caption(f"Appointment data current as of {date_str}")
-    st.stop()
+    _activity_stop()
 
 
 is_sectionals_detailed = report_mode == REPORT_SECTIONALS_DETAILED
@@ -2297,7 +2371,7 @@ if df.empty:
         "No officials found for the selected filters"
         + (" (or no rows match the section filter)." if show_section_info else ".")
     )
-    st.stop()
+    _activity_stop()
 
 year_cols_sorted = sorted(year_cols, reverse=True)
 meta_cols = [c for c in df.columns if c not in year_cols]
@@ -2865,14 +2939,4 @@ if appt_date is not None:
     date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
     st.caption(f"Appointment data current as of {date_str}")
 
-render_query_help([
-    "**Report:** `?report=` (or `?page=`) — `championships`, `sectionals`, "
-    "`assignments`, `referee`, `person`, `competition`, `nqs`, `synchro`, "
-    "`appointments`",
-    "",
-    "**Per-person:** `?official_id=` (directory official id)",
-    "",
-    "**Per-competition:** `?competition_id=`",
-])
-
-sync_activity_tracker_query_params(report_mode)
+_sync_activity_tracker_url()

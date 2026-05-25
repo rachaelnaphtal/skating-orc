@@ -44,10 +44,16 @@ from element_deviation_ranking import (
     MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
     MIN_ELEMENT_MARKING_EVENT_DATE,
     compute_element_deviation_rankings,
+    compute_judge_detail_for_identity,
+    memory_efficient_mode,
 )
 from element_deviation_ranking_job import (
     cleanup_ranking_artifacts,
+    execute_element_deviation_rankings,
+    load_control_by_element,
+    load_ranking_params,
     load_ranking_result,
+    package_element_ranking_result,
     read_ranking_error,
     start_ranking_subprocess,
     terminate_ranking_subprocess,
@@ -838,6 +844,67 @@ def _cancel_element_ranking_job() -> None:
     st.session_state.pop("element_ranking_error_msg", None)
 
 
+def _element_ranking_use_subprocess() -> bool:
+    """
+    Run analysis in a child process (keeps Streamlit responsive; child RAM is freed on exit).
+
+    Two Heroku **web** dynos do not add memory for one request — each dyno still has its own
+    limit. Set ``ELEMENT_RANKING_NO_SUBPROCESS=1`` to run in-process instead.
+    """
+    if os.environ.get("ELEMENT_RANKING_NO_SUBPROCESS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    return True
+
+
+def _element_ranking_filter_kwargs(run_params: tuple) -> dict:
+    from datetime import date as _date
+
+    (
+        start_season_year,
+        end_season_year,
+        discipline_ids_tuple,
+        competition_scope,
+        event_start_iso,
+        event_end_iso,
+        _min_marks,
+        floor_sigma,
+        _min_bin_count,
+    ) = run_params
+    return {
+        "start_season_year": start_season_year,
+        "end_season_year": end_season_year,
+        "event_start_date": _date.fromisoformat(event_start_iso)
+        if event_start_iso
+        else None,
+        "event_end_date": _date.fromisoformat(event_end_iso) if event_end_iso else None,
+        "discipline_type_ids": list(discipline_ids_tuple)
+        if discipline_ids_tuple
+        else None,
+        "competition_scope": competition_scope,
+        "floor_sigma": floor_sigma,
+    }
+
+
+def _run_element_ranking_compute(run_params: tuple, *, package: bool = True) -> dict:
+    """Run rankings in-process; skip ``st.cache_data`` on memory-limited hosts."""
+    if memory_efficient_mode():
+        result = execute_element_deviation_rankings(run_params)
+    else:
+        result = _cached_element_deviation_rankings(*run_params)
+    if package:
+        base = st.session_state.get("element_ranking_pickle_path")
+        if not base:
+            fd, base = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
+            os.close(fd)
+            st.session_state.element_ranking_pickle_path = base
+        return package_element_ranking_result(result, base)
+    return result
+
+
 @st.cache_data(ttl=300)
 def _cached_element_deviation_rankings(
     start_season_year: str | None,
@@ -1197,20 +1264,34 @@ PCS scores and throwouts are not part of this model.
 
     if run_clicked and not job_running:
         _stop_element_ranking_process()
-        fd, pickle_path = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
-        os.close(fd)
-        proc = start_ranking_subprocess(run_params, pickle_path)
-        st.session_state.element_ranking_proc = proc
-        st.session_state.element_ranking_pickle_path = pickle_path
         st.session_state.element_ranking_run_params = run_params
-        st.session_state.element_ranking_status = "running"
         st.session_state.pop("element_ranking_result", None)
         st.session_state.pop("element_ranking_error_msg", None)
-        st.rerun()
+        for _k in list(st.session_state.keys()):
+            if isinstance(_k, tuple) and _k[:1] == ("element_ranking_judge_detail",):
+                del st.session_state[_k]
+        if _element_ranking_use_subprocess():
+            fd, pickle_path = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
+            os.close(fd)
+            st.session_state.element_ranking_pickle_path = pickle_path
+            proc = start_ranking_subprocess(run_params, pickle_path)
+            st.session_state.element_ranking_proc = proc
+            st.session_state.element_ranking_status = "running"
+            st.rerun()
+        else:
+            fd, pickle_path = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
+            os.close(fd)
+            st.session_state.element_ranking_pickle_path = pickle_path
+            with st.spinner("Computing rankings…"):
+                st.session_state.element_ranking_result = _run_element_ranking_compute(
+                    run_params
+                )
+            st.session_state.element_ranking_status = "done"
+            st.rerun()
 
     if job_running:
         st.warning(
-            "Analysis is running in the background. You can switch pages; "
+            "Analysis is running in a separate process. You can switch pages; "
             "return here and click **Cancel analysis** to stop it."
         )
         time.sleep(0.8)
@@ -1272,6 +1353,12 @@ PCS scores and throwouts are not part of this model.
         f"{floor_sigma:.2f}",
         help="Minimum σ̂ used when normalizing marks (see Model parameters).",
     )
+    if result.get("low_memory"):
+        st.caption(
+            "Memory-saving mode (typical on Heroku): rankings run in a worker process; "
+            "judge drill-down loads when you select a judge. Narrow season/discipline "
+            "filters if the dyno restarts (R14/R15)."
+        )
 
     if result["marking"].empty:
         st.info("No judges remain after filters and minimum marks threshold.")
@@ -1381,12 +1468,27 @@ PCS scores and throwouts are not part of this model.
                 f"({bias:+.3f} GOE vs panel median per element mark)."
             )
         _detail_col_config = _element_ranking_judge_detail_column_config()
-        jd = result.get("judge_discipline_detail", pd.DataFrame())
-        je = result.get("judge_element_detail", pd.DataFrame())
+        if result.get("low_memory"):
+            control_tbl = load_control_by_element(result)
+            params = load_ranking_params(result)
+            detail_key = ("element_ranking_judge_detail", stored_params, pick_judge)
+            if detail_key not in st.session_state:
+                with st.spinner(f"Loading breakdown for {pick_judge}…"):
+                    st.session_state[detail_key] = compute_judge_detail_for_identity(
+                        get_analytics_safe(),
+                        pick_judge,
+                        control_tbl,
+                        params,
+                        **_element_ranking_filter_kwargs(stored_params),
+                    )
+            jd, je = st.session_state[detail_key]
+        else:
+            jd = result.get("judge_discipline_detail", pd.DataFrame())
+            je = result.get("judge_element_detail", pd.DataFrame())
+            jd = jd.loc[jd["Judge"] == pick_judge] if not jd.empty else jd
+            je = je.loc[je["Judge"] == pick_judge] if not je.empty else je
         if not jd.empty:
-            jd_one = jd.loc[jd["Judge"] == pick_judge].sort_values(
-                "Partial marking score"
-            )
+            jd_one = jd.sort_values("Partial marking score")
             st.markdown("**By discipline** (partial score = √(mean(m²)) within that discipline)")
             st.dataframe(
                 jd_one,
@@ -1395,9 +1497,7 @@ PCS scores and throwouts are not part of this model.
                 column_config=_detail_col_config,
             )
         if not je.empty:
-            je_one = je.loc[je["Judge"] == pick_judge].sort_values(
-                "Partial marking score", ascending=False
-            )
+            je_one = je.sort_values("Partial marking score", ascending=False)
             st.markdown(
                 "**By discipline and element type** "
                 "(largest partial scores first — where the judge diverged most)"
