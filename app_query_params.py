@@ -188,6 +188,7 @@ ANALYSIS_PAGE_SLUG_TO_LABEL = {
     "rule-errors": "Rule Errors Analysis",
     "competition": "Competition Analysis",
     "load-competition": "Load Competition",
+    "element-deviation-ranking": "Element Deviation Ranking Analysis",
 }
 ANALYSIS_LABEL_TO_PAGE_SLUG = {
     v: k for k, v in ANALYSIS_PAGE_SLUG_TO_LABEL.items()
@@ -299,6 +300,7 @@ def _scope_session_key_for_page(page: str) -> str | None:
         "Cross-Judge Benchmarking": "cross_judge_competition_scope",
         "Rule Errors Analysis": "rule_errors_qualifying",
         "Panel size benchmarks": "panel_benchmarks_scope",
+        "Element Deviation Ranking Analysis": "element_ranking_competition_scope",
     }.get(page)
 
 
@@ -338,6 +340,46 @@ def apply_analysis_filters_for_page(
             import streamlit as st
 
             st.session_state["individual_judge_use_event_dates"] = True
+
+    elif page == "Element Deviation Ranking Analysis":
+        apply_choice_param(
+            "competition_scope",
+            "element_ranking_competition_scope",
+            COMPETITION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=COMPETITION_SCOPE_SLUG_TO_LABEL,
+        )
+        start_sy = qp_get("start_season")
+        end_sy = qp_get("end_season")
+        if start_sy:
+            import streamlit as st
+
+            st.session_state["element_ranking_start_season"] = start_sy
+        if end_sy:
+            import streamlit as st
+
+            st.session_state["element_ranking_end_season"] = end_sy
+        scope_label = st.session_state.get(
+            "element_ranking_competition_scope", "All competitions"
+        )
+        apply_multiselect_param(
+            "disciplines",
+            "element_ranking_disciplines",
+            _discipline_names_for_scope(analytics, scope_label),
+        )
+        if _apply_date_param("start_date", "element_ranking_start_date") or _apply_date_param(
+            "end_date", "element_ranking_end_date"
+        ):
+            import streamlit as st
+
+            st.session_state["element_ranking_use_event_dates"] = True
+        min_m = qp_get("min_marks")
+        if min_m:
+            try:
+                import streamlit as st
+
+                st.session_state["element_ranking_min_marks"] = int(min_m)
+            except ValueError:
+                pass
 
     elif page == "Cross-Judge Benchmarking":
         apply_choice_param("view", "cross_judge_view", _CROSS_JUDGE_VIEWS)
@@ -423,6 +465,29 @@ def sync_analysis_app_query_params(page: str) -> None:
                 params["start_date"] = start.isoformat()
             if end is not None:
                 params["end_date"] = end.isoformat()
+
+    elif page == "Element Deviation Ranking Analysis":
+        scope_ss = st.session_state.get("element_ranking_competition_scope")
+        if scope_ss:
+            params["competition_scope"] = COMPETITION_SCOPE_LABEL_TO_SLUG.get(scope_ss)
+        start_sy = st.session_state.get("element_ranking_start_season")
+        if start_sy and start_sy != "Any":
+            params["start_season"] = str(start_sy)
+        end_sy = st.session_state.get("element_ranking_end_season")
+        if end_sy and end_sy != "Any":
+            params["end_season"] = str(end_sy)
+        disc = st.session_state.get("element_ranking_disciplines")
+        params["disciplines"] = disc if disc else None
+        if st.session_state.get("element_ranking_use_event_dates"):
+            start = st.session_state.get("element_ranking_start_date")
+            end = st.session_state.get("element_ranking_end_date")
+            if start is not None:
+                params["start_date"] = start.isoformat()
+            if end is not None:
+                params["end_date"] = end.isoformat()
+        min_m = st.session_state.get("element_ranking_min_marks")
+        if min_m and int(min_m) > 0:
+            params["min_marks"] = int(min_m)
 
     elif page == "Cross-Judge Benchmarking":
         for qp_name, ss_key in (

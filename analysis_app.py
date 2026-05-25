@@ -1,3 +1,7 @@
+import os
+import tempfile
+import time
+
 import streamlit as st
 import pandas as pd
 import traceback
@@ -34,6 +38,19 @@ from app_query_params import (
     query_params_changed,
     render_query_help,
     sync_analysis_app_query_params,
+)
+from element_deviation_ranking import (
+    FLOOR_SIGMA as _ELEM_RANK_FLOOR_SIGMA,
+    MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
+    MIN_ELEMENT_MARKING_EVENT_DATE,
+    compute_element_deviation_rankings,
+)
+from element_deviation_ranking_job import (
+    cleanup_ranking_artifacts,
+    load_ranking_result,
+    read_ranking_error,
+    start_ranking_subprocess,
+    terminate_ranking_subprocess,
 )
 
 # Page configuration
@@ -128,9 +145,12 @@ _REPO_ROOT = _os.path.dirname(_os.path.abspath(__file__))
 _DOWNLOAD_RESULTS_PY = _os.path.join(_REPO_ROOT, "downloadResults.py")
 _nav_pages = [
     "Individual Judge Analysis",
-    "Cross-Judge Benchmarking",     "Temporal Trend Analysis",
+    "Cross-Judge Benchmarking",
+    "Element Deviation Ranking Analysis",
+    "Temporal Trend Analysis",
     "Panel size benchmarks",
-    "Rule Errors Analysis", "Competition Analysis",
+    "Rule Errors Analysis",
+    "Competition Analysis",
 ]
 if _os.path.isfile(_DOWNLOAD_RESULTS_PY):
     _nav_pages.append("Load Competition")
@@ -766,6 +786,628 @@ def cross_judge_benchmarking_page():
             'Judge', 'Competition', metric_names[metric], 'Total Scores'
         ]
         st.dataframe(display_df, width="stretch")
+
+
+def _finalize_element_ranking_job() -> None:
+    """If a background ranking process finished, load or record its outcome."""
+    proc = st.session_state.get("element_ranking_proc")
+    if proc is None or proc.is_alive():
+        return
+
+    pickle_path = st.session_state.get("element_ranking_pickle_path")
+    exitcode = proc.exitcode
+    st.session_state.element_ranking_proc = None
+
+    if exitcode == 0 and pickle_path and os.path.isfile(pickle_path):
+        st.session_state.element_ranking_result = load_ranking_result(pickle_path)
+        st.session_state.element_ranking_status = "done"
+        st.session_state.pop("element_ranking_error_msg", None)
+    elif exitcode is not None and exitcode < 0:
+        st.session_state.element_ranking_status = "cancelled"
+        st.session_state.pop("element_ranking_result", None)
+    else:
+        st.session_state.element_ranking_status = "error"
+        st.session_state.pop("element_ranking_result", None)
+        err = read_ranking_error(pickle_path) if pickle_path else None
+        st.session_state.element_ranking_error_msg = (
+            err or f"Analysis process exited with code {exitcode}."
+        )
+
+    handle = st.session_state.get("element_ranking_proc")
+    params_path = getattr(handle, "params_path", None) if handle else None
+    cleanup_ranking_artifacts(pickle_path, params_path)
+    st.session_state.element_ranking_proc = None
+    st.session_state.element_ranking_pickle_path = None
+
+
+def _stop_element_ranking_process() -> None:
+    """Terminate child process and remove temp files without changing UI status."""
+    handle = st.session_state.get("element_ranking_proc")
+    terminate_ranking_subprocess(handle)
+    pickle_path = st.session_state.get("element_ranking_pickle_path")
+    params_path = getattr(handle, "params_path", None) if handle else None
+    cleanup_ranking_artifacts(pickle_path, params_path)
+    st.session_state.element_ranking_proc = None
+    st.session_state.element_ranking_pickle_path = None
+
+
+def _cancel_element_ranking_job() -> None:
+    _stop_element_ranking_process()
+    st.session_state.element_ranking_status = "cancelled"
+    st.session_state.pop("element_ranking_result", None)
+    st.session_state.pop("element_ranking_error_msg", None)
+
+
+@st.cache_data(ttl=300)
+def _cached_element_deviation_rankings(
+    start_season_year: str | None,
+    end_season_year: str | None,
+    discipline_ids_tuple: tuple[int, ...] | None,
+    competition_scope: str,
+    event_start_iso: str | None,
+    event_end_iso: str | None,
+    min_marks: int,
+    floor_sigma: float,
+    min_bin_count: int,
+):
+    from datetime import date as _date
+
+    analytics = get_analytics_safe()
+    event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
+    event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
+    return compute_element_deviation_rankings(
+        analytics,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        event_start_date=event_start,
+        event_end_date=event_end,
+        discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
+        competition_scope=competition_scope,
+        min_marks=min_marks,
+        floor_sigma=floor_sigma,
+        min_bin_count=min_bin_count,
+    )
+
+
+def _element_ranking_rankings_column_config() -> dict:
+    return {
+        "rank": st.column_config.NumberColumn(
+            "Rank",
+            format="%d",
+            help="Order by marking score (1 = lowest M = closest to the control-score model).",
+        ),
+        "Marking score": st.column_config.NumberColumn(
+            "Marking score",
+            format="%.4f",
+            help=(
+                "M = √(mean(m²)) over element marks, with m = (GOE − panel median) / σ̂. "
+                "Lower means closer to the panel-median / σ̂ model (not necessarily "
+                "“better” judging in absolute terms)."
+            ),
+        ),
+        "Element marks": st.column_config.NumberColumn(
+            "Element marks",
+            format="%d",
+            help="Number of element GOE marks for this judge identity after filters.",
+        ),
+        "Mean GOE bias": st.column_config.NumberColumn(
+            "Mean GOE bias",
+            format="%+.3f",
+            help=(
+                "Signed average GOE − panel median. Positive = tends to mark above "
+                "the panel median; negative = tends to mark below."
+            ),
+        ),
+        "Mean |error|": st.column_config.NumberColumn(
+            "Mean |error|",
+            format="%.3f",
+            help=(
+                "Average |GOE − panel median GOE| in raw GOE units (before σ̂ normalization)."
+            ),
+        ),
+        "Mean σ̂": st.column_config.NumberColumn(
+            "Mean σ̂",
+            format="%.3f",
+            help=(
+                "Average intrinsic spread σ̂ applied to this judge’s marks (fitted bin, "
+                "neighbor bin, or fallback)."
+            ),
+        ),
+        "Mean |m|": st.column_config.NumberColumn(
+            "Mean |m|",
+            format="%.3f",
+            help=(
+                "Average |m| where m = (GOE − panel median) / σ̂. Complements marking score "
+                "(which uses RMS of m)."
+            ),
+        ),
+    }
+
+
+def _element_ranking_sigma_bins_column_config() -> dict:
+    return {
+        "Control GOE": st.column_config.NumberColumn(
+            "Control GOE",
+            format="%d",
+            help="Panel median GOE for the bin, rounded to the nearest integer.",
+        ),
+        "Marks in bin": st.column_config.NumberColumn(
+            "Marks in bin",
+            format="%d",
+            help=(
+                "Element marks in the filtered data for this discipline, element type, "
+                "and control GOE (all judges combined)."
+            ),
+        ),
+        "Error stdev (all marks)": st.column_config.NumberColumn(
+            "Error stdev (all marks)",
+            format="%.4f",
+            help=(
+                "Sample standard deviation of (judge GOE − panel median GOE) within the bin."
+            ),
+        ),
+        "σ̂ used in model": st.column_config.NumberColumn(
+            "σ̂ used in model",
+            format="%.4f",
+            help=(
+                "σ̂ fitted for this bin when it meets the minimum mark count (floored at "
+                "Floor σ̂). Empty if the bin was not included in the model."
+            ),
+        ),
+        "In model": st.column_config.CheckboxColumn(
+            "In model",
+            help=(
+                "Checked when this bin had enough marks to fit σ̂ and that value is used "
+                "for marks in the bin (before neighbor / fallback lookup)."
+            ),
+        ),
+    }
+
+
+def _element_ranking_judge_detail_column_config() -> dict:
+    return {
+        "Element marks": st.column_config.NumberColumn(
+            "Element marks",
+            format="%d",
+            help="Element marks for this judge in the row’s discipline (and element type, if shown).",
+        ),
+        "Partial marking score": st.column_config.NumberColumn(
+            "Partial marking score",
+            format="%.4f",
+            help=(
+                "√(mean(m²)) using only marks in this row’s slice (same formula as overall "
+                "marking score, scoped to discipline or element type)."
+            ),
+        ),
+        "Mean GOE bias": st.column_config.NumberColumn(
+            "Mean GOE bias",
+            format="%+.3f",
+            help="Signed mean GOE − panel median in this slice; positive = above median.",
+        ),
+        "Mean |error|": st.column_config.NumberColumn(
+            "Mean |error|",
+            format="%.3f",
+            help="Average |GOE − panel median| in this slice (raw GOE units).",
+        ),
+        "Mean σ̂": st.column_config.NumberColumn(
+            "Mean σ̂",
+            format="%.3f",
+            help="Average σ̂ applied to marks in this discipline slice.",
+        ),
+    }
+
+
+def element_deviation_ranking_page():
+    """Element GOE marking scores vs panel-median control (sigma-normalized)."""
+    st.header("Element Deviation Ranking Analysis")
+    st.caption(
+        "Ranks judges by how closely their element GOEs track a **panel control score** "
+        "(median GOE per element), after normalizing spread by discipline, element type, "
+        "and rounded control GOE. **Lower marking score = closer to the model** "
+        "(not necessarily “better” judging in absolute terms)."
+    )
+
+    with st.expander("Methodology", expanded=False):
+        st.markdown(
+            """
+**1. Data** — Element GOE marks from competitions on or after **2018-07-01**
+(current scale). Judges linked to the same directory official are merged
+(same identity groups as Individual Judge / Cross-Judge).
+
+**2. Control score** — For each element, the panel **median** GOE across judges.
+**Error** = judge GOE − control score.
+
+**3. Intrinsic spread σ̂** — For each combination of *(discipline, element type,
+rounded control GOE)* with at least ``min_bin_count`` marks, estimate σ̂ as the
+sample standard deviation of errors in that bin. If a mark’s bin is missing, try
+neighboring integer GOE levels (±1, ±2), else a global fallback σ (with a floor).
+
+**4. Normalized mark** — ``m = error / σ̂`` (per mark).
+
+**5. Marking score** — Per judge identity:
+``M = √(mean(m²))``. Ranked ascending (rank 1 = lowest M).
+
+PCS scores and throwouts are not part of this model.
+            """
+        )
+
+    analytics = get_analytics_safe()
+
+    st.subheader("Filters")
+    scope_label = st.selectbox(
+        "Competition scope",
+        list(_COMPETITION_SCOPE_LABELS),
+        index=0,
+        key="element_ranking_competition_scope",
+        help="Filters competitions via linked officials competition type.",
+    )
+    scope_key = _competition_scope_key(scope_label)
+
+    years = analytics.get_years()
+    col_y1, col_y2, col_d = st.columns(3)
+    with col_y1:
+        start_season = st.selectbox(
+            "Season year from",
+            ["Any"] + years,
+            key="element_ranking_start_season",
+        )
+        start_season_year = None if start_season == "Any" else start_season
+    with col_y2:
+        end_season = st.selectbox(
+            "Season year to",
+            ["Any"] + years,
+            key="element_ranking_end_season",
+        )
+        end_season_year = None if end_season == "Any" else end_season
+    with col_d:
+        discipline_types = (
+            analytics.qualifying_event_segment_discipline_types()
+            if scope_key != COMPETITION_SCOPE_ALL
+            else analytics.get_discipline_types()
+        )
+        discipline_names = [name for _id, name in discipline_types]
+        selected_disciplines = st.multiselect(
+            "Discipline types",
+            discipline_names,
+            key="element_ranking_disciplines",
+        )
+        discipline_ids = [
+            dt_id for dt_id, name in discipline_types if name in selected_disciplines
+        ] if selected_disciplines else None
+
+    st.caption(
+        f"Element marks are limited to competitions on or after "
+        f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale). "
+        "Earlier events are excluded even when season years are wider."
+    )
+    use_event_dates = st.checkbox(
+        "Narrow by competition event dates",
+        key="element_ranking_use_event_dates",
+        help=(
+            "Further restrict the date window above the 2018-07-01 minimum. "
+            "Uses start date when set, else end date. Events with neither date are excluded."
+        ),
+    )
+    event_start_iso = None
+    event_end_iso = None
+    if use_event_dates:
+        date_min, date_max = analytics.get_competition_event_date_bounds(
+            competition_scope=scope_key,
+            discipline_type_ids=discipline_ids,
+        )
+        date_min = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+        date_max = max(date_max, date_min)
+        default_start = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            event_start = st.date_input(
+                "Event on or after",
+                value=default_start,
+                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                max_value=date_max,
+                key="element_ranking_start_date",
+            )
+        with dc2:
+            event_end = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                max_value=date_max,
+                key="element_ranking_end_date",
+            )
+        if event_start > event_end:
+            st.warning("Start date is after end date; results may be empty.")
+        event_start_iso = event_start.isoformat()
+        event_end_iso = event_end.isoformat()
+
+    st.subheader("Model parameters")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        min_marks = st.number_input(
+            "Minimum element marks per judge",
+            min_value=0,
+            value=0,
+            step=50,
+            key="element_ranking_min_marks",
+            help="Exclude identities with fewer marks after filters.",
+        )
+    with p2:
+        floor_sigma = st.number_input(
+            "Floor σ̂",
+            min_value=0.01,
+            max_value=1.0,
+            value=float(_ELEM_RANK_FLOOR_SIGMA),
+            step=0.01,
+            format="%.2f",
+            key="element_ranking_floor_sigma",
+            help=(
+                "Minimum intrinsic spread σ̂ applied to every element mark. "
+                "Fitted bin standard deviations and the global fallback σ are "
+                "raised to this floor so m = (GOE − control) / σ̂ does not "
+                "inflate when a bin’s spread is very small."
+            ),
+        )
+    with p3:
+        min_bin_count = st.number_input(
+            "Min marks per σ̂ bin",
+            min_value=5,
+            max_value=200,
+            value=int(_ELEM_RANK_MIN_BIN_COUNT),
+            step=5,
+            key="element_ranking_min_bin_count",
+            help="(discipline, element type, rounded control GOE) buckets with fewer marks are skipped.",
+        )
+
+    disc_tuple = tuple(discipline_ids) if discipline_ids else None
+    run_params = (
+        start_season_year,
+        end_season_year,
+        disc_tuple,
+        scope_key,
+        event_start_iso,
+        event_end_iso,
+        int(min_marks),
+        float(floor_sigma),
+        int(min_bin_count),
+    )
+    _finalize_element_ranking_job()
+    job_status = st.session_state.get("element_ranking_status", "idle")
+    job_running = job_status == "running"
+
+    btn_col_run, btn_col_cancel = st.columns(2)
+    with btn_col_run:
+        run_clicked = st.button(
+            "Run analysis",
+            type="primary",
+            key="element_ranking_run_btn",
+            disabled=job_running,
+            help="Loads element marks and fits σ̂ bins. Can take a minute on wide filters.",
+        )
+    with btn_col_cancel:
+        cancel_clicked = st.button(
+            "Cancel analysis",
+            key="element_ranking_cancel_btn",
+            disabled=not job_running,
+            help="Stops the background job (may take a few seconds).",
+        )
+
+    if cancel_clicked and job_running:
+        _cancel_element_ranking_job()
+        st.rerun()
+
+    if run_clicked and not job_running:
+        _stop_element_ranking_process()
+        fd, pickle_path = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
+        os.close(fd)
+        proc = start_ranking_subprocess(run_params, pickle_path)
+        st.session_state.element_ranking_proc = proc
+        st.session_state.element_ranking_pickle_path = pickle_path
+        st.session_state.element_ranking_run_params = run_params
+        st.session_state.element_ranking_status = "running"
+        st.session_state.pop("element_ranking_result", None)
+        st.session_state.pop("element_ranking_error_msg", None)
+        st.rerun()
+
+    if job_running:
+        st.warning(
+            "Analysis is running in the background. You can switch pages; "
+            "return here and click **Cancel analysis** to stop it."
+        )
+        time.sleep(0.8)
+        st.rerun()
+
+    if job_status == "cancelled":
+        st.info("Analysis cancelled.")
+        return
+
+    if job_status == "error":
+        st.error(
+            st.session_state.get(
+                "element_ranking_error_msg", "Analysis failed."
+            )
+        )
+        return
+
+    stored_params = st.session_state.get("element_ranking_run_params")
+    result = st.session_state.get("element_ranking_result")
+    if result is None:
+        st.info(
+            "Set filters and click **Run analysis**. "
+            "Rankings are not computed automatically so navigation stays responsive."
+        )
+        return
+    if stored_params != run_params:
+        st.warning(
+            "Filters or model parameters changed since the last run. "
+            "Click **Run analysis** to refresh results."
+        )
+        return
+
+    if result["error"]:
+        st.warning(result["error"])
+        return
+
+    st.subheader("Run summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        "Element marks (filtered)",
+        f"{result['n_raw_marks']:,}",
+        help="All element GOE marks in the filtered dataset (before per-judge minimum).",
+    )
+    m2.metric(
+        "σ̂ bins fitted",
+        f"{result['n_sigma_buckets']:,}",
+        help=(
+            "Count of (discipline, element type, rounded control GOE) bins with at least "
+            "the minimum marks used to estimate σ̂."
+        ),
+    )
+    m3.metric(
+        "Judges ranked",
+        len(result["marking"]),
+        help="Judge identities meeting the minimum element marks threshold.",
+    )
+    m4.metric(
+        "Floor σ̂",
+        f"{floor_sigma:.2f}",
+        help="Minimum σ̂ used when normalizing marks (see Model parameters).",
+    )
+
+    if result["marking"].empty:
+        st.info("No judges remain after filters and minimum marks threshold.")
+        return
+
+    marking = result["marking"]
+
+    st.subheader("Distribution of marking scores")
+    if not result["summary"].empty:
+        st.dataframe(
+            result["summary"],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Statistic": st.column_config.TextColumn(
+                    "Statistic",
+                    help="Summary stats across judges’ marking scores (M = √(mean(m²))).",
+                ),
+                "Value": st.column_config.NumberColumn(
+                    "Value",
+                    format="%.6f",
+                    help="Value of the statistic for the judge population in this run.",
+                ),
+            },
+        )
+    fig = px.histogram(
+        marking,
+        x="Marking score",
+        nbins=min(40, max(10, len(marking) // 5)),
+        title="Marking scores across judges (lower = closer to control-score model)",
+    )
+    fig.update_layout(bargap=0.05)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Rankings")
+    st.caption(
+        "**Marking score** = √(mean(m²)) over element marks, with m = (GOE − panel median) / σ̂. "
+        "**Mean GOE bias** is the signed average raw GOE − panel median (+ above, − below). "
+        "**Mean |m|** is the average absolute normalized mark."
+    )
+    st.dataframe(
+        marking,
+        width="stretch",
+        hide_index=True,
+        column_config=_element_ranking_rankings_column_config(),
+    )
+    st.download_button(
+        "Download rankings CSV",
+        data=marking.to_csv(index=False).encode("utf-8"),
+        file_name="element_deviation_rankings.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("σ̂ parameters (by discipline, element type, control GOE)")
+    st.caption(
+        "For each bin with at least **min marks per σ̂ bin** panel marks in the filtered data, "
+        "**Error stdev** is the sample SD of (GOE − median). **σ̂ used in model** is that value "
+        "(floored at the configured minimum) when the bin is included; otherwise a neighbor or "
+        "fallback σ is used per mark."
+    )
+    sigma_bins = result.get("sigma_bins", pd.DataFrame())
+    if sigma_bins.empty:
+        st.info("No σ̂ bins to display for the current filters.")
+    else:
+        st.dataframe(
+            sigma_bins,
+            width="stretch",
+            hide_index=True,
+            column_config=_element_ranking_sigma_bins_column_config(),
+        )
+        st.download_button(
+            "Download σ̂ parameters CSV",
+            data=sigma_bins.to_csv(index=False).encode("utf-8"),
+            file_name="element_sigma_parameters.csv",
+            mime="text/csv",
+        )
+
+    judge_names = marking["Judge"].tolist() if "Judge" in marking.columns else []
+    if judge_names:
+        st.subheader("How a judge’s score breaks down")
+        pick_judge = st.selectbox(
+            "Select judge",
+            judge_names,
+            key="element_ranking_detail_judge",
+        )
+        judge_row = marking.loc[marking["Judge"] == pick_judge]
+        if not judge_row.empty and "Mean GOE bias" in judge_row.columns:
+            bias = float(judge_row["Mean GOE bias"].iloc[0])
+            bias_label = (
+                "above panel median"
+                if bias > 0.005
+                else "below panel median"
+                if bias < -0.005
+                else "near panel median"
+            )
+            st.metric(
+                "Overall mean GOE bias",
+                f"{bias:+.3f}",
+                help=(
+                    "Signed average of (judge GOE − panel median GOE) over all element "
+                    "marks for this judge. Positive = systematically higher GOEs than "
+                    "the panel median; negative = systematically lower."
+                ),
+            )
+            st.caption(
+                f"On average this judge marks **{bias_label}** "
+                f"({bias:+.3f} GOE vs panel median per element mark)."
+            )
+        _detail_col_config = _element_ranking_judge_detail_column_config()
+        jd = result.get("judge_discipline_detail", pd.DataFrame())
+        je = result.get("judge_element_detail", pd.DataFrame())
+        if not jd.empty:
+            jd_one = jd.loc[jd["Judge"] == pick_judge].sort_values(
+                "Partial marking score"
+            )
+            st.markdown("**By discipline** (partial score = √(mean(m²)) within that discipline)")
+            st.dataframe(
+                jd_one,
+                width="stretch",
+                hide_index=True,
+                column_config=_detail_col_config,
+            )
+        if not je.empty:
+            je_one = je.loc[je["Judge"] == pick_judge].sort_values(
+                "Partial marking score", ascending=False
+            )
+            st.markdown(
+                "**By discipline and element type** "
+                "(largest partial scores first — where the judge diverged most)"
+            )
+            st.dataframe(
+                je_one,
+                width="stretch",
+                hide_index=True,
+                column_config=_detail_col_config,
+            )
 
 
 def temporal_trend_analysis():
@@ -2451,6 +3093,9 @@ elif page == "Competition Analysis":
 elif page == "Cross-Judge Benchmarking":
     cross_judge_benchmarking_page()
 
+elif page == "Element Deviation Ranking Analysis":
+    element_deviation_ranking_page()
+
 elif page == "Temporal Trend Analysis":
     temporal_trend_analysis()
 
@@ -2743,8 +3388,9 @@ else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")
 
 render_query_help([
-    "**Navigation:** `?page=` — `individual`, `cross-judge`, `temporal`, "
-    "`panel-size-benchmarks`, `rule-errors`, `competition`, `load-competition`",
+    "**Navigation:** `?page=` — `individual`, `cross-judge`, "
+    "`element-deviation-ranking`, `temporal`, `panel-size-benchmarks`, "
+    "`rule-errors`, `competition`, `load-competition`",
     "",
     "**Scope (most pages):** `?competition_scope=` — `all`, `qualifying`, `nqs`, "
     "`sectionals`, `championships`",
@@ -2755,6 +3401,9 @@ render_query_help([
     "",
     "**Cross-judge:** `?view=`, `?metric=`, `?score_type=`, `?year=`, `?disciplines=`, "
     "`?start_date=` / `?end_date=` (ISO dates, with event-date filter enabled)",
+    "",
+    "**Element deviation ranking:** `?competition_scope=`, `?start_season=`, "
+    "`?end_season=`, `?disciplines=`, `?start_date=` / `?end_date=`, `?min_marks=`",
     "",
     "**Temporal:** `?analysis_type=`, `?metric=`, `?score_type=`, `?judge=`",
     "",
