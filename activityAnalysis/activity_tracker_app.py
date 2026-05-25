@@ -1,6 +1,19 @@
+import os
 import re
+import sys
 
 import streamlit as st
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from app_query_params import (
+    apply_activity_entity_ids_from_query,
+    init_activity_tracker_from_query,
+    render_query_help,
+    sync_activity_tracker_query_params,
+)
 from load_activity_data import (
     get_assigned_competition_counts,
     get_competition_count_for_types,
@@ -539,20 +552,31 @@ NQS_COLUMN_2122_HELP = (
     "NQS was cancelled this year due to Covid so this reflects the US Championship Series."
 )
 
+_ACTIVITY_REPORT_OPTIONS = [
+    REPORT_CHAMPIONSHIPS_DETAILED,
+    REPORT_SECTIONALS_DETAILED,
+    REPORT_NUMBER_OF_ASSIGNMENTS,
+    REPORT_REFEREE_SERVICE,
+    REPORT_PERSON_ASSIGNMENTS,
+    REPORT_COMPETITION_ASSIGNMENTS,
+    REPORT_NQS_DETAILED,
+    REPORT_SYNCHRO_ACTIVITY,
+    REPORT_APPOINTMENTS_BY_ACHIEVED_DATE,
+]
+
+if (
+    "activity_report_mode" not in st.session_state
+    or st.session_state.activity_report_mode not in _ACTIVITY_REPORT_OPTIONS
+):
+    st.session_state.activity_report_mode = _ACTIVITY_REPORT_OPTIONS[0]
+
+init_activity_tracker_from_query()
+
 report_mode = st.radio(
     "Report",
-    options=[
-        REPORT_CHAMPIONSHIPS_DETAILED,
-        REPORT_SECTIONALS_DETAILED,
-        REPORT_NUMBER_OF_ASSIGNMENTS,
-        REPORT_REFEREE_SERVICE,
-        REPORT_PERSON_ASSIGNMENTS,
-        REPORT_COMPETITION_ASSIGNMENTS,
-        REPORT_NQS_DETAILED,
-        REPORT_SYNCHRO_ACTIVITY,
-        REPORT_APPOINTMENTS_BY_ACHIEVED_DATE
-    ],
+    options=_ACTIVITY_REPORT_OPTIONS,
     horizontal=True,
+    key="activity_report_mode",
 )
 
 active_appointments_only = True
@@ -1684,6 +1708,7 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         return (label if label else "\uffff", int(oid))
 
     oid_list = sorted(id_to_name.keys(), key=_per_person_sort_key)
+    apply_activity_entity_ids_from_query(official_options=oid_list)
     pick_oid = st.selectbox(
         "Official",
         options=oid_list,
@@ -1819,6 +1844,7 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
         for _, row in comps_df.iterrows()
     }
     cid_list = [int(x) for x in comps_df["competition_id"].tolist()]
+    apply_activity_entity_ids_from_query(competition_options=cid_list)
     pick_cid = st.selectbox(
         "Competition",
         options=cid_list,
@@ -2838,3 +2864,15 @@ appt_date = load_appt_data_date()
 if appt_date is not None:
     date_str = pd.Timestamp(appt_date).strftime("%-m/%-d/%Y")
     st.caption(f"Appointment data current as of {date_str}")
+
+render_query_help([
+    "**Report:** `?report=` (or `?page=`) — `championships`, `sectionals`, "
+    "`assignments`, `referee`, `person`, `competition`, `nqs`, `synchro`, "
+    "`appointments`",
+    "",
+    "**Per-person:** `?official_id=` (directory official id)",
+    "",
+    "**Per-competition:** `?competition_id=`",
+])
+
+sync_activity_tracker_query_params(report_mode)

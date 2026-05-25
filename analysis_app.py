@@ -27,6 +27,14 @@ from event_regex_presets import (
     LEVEL_CHOICES,
     effective_event_regex,
 )
+from app_query_params import (
+    apply_analysis_filters_for_page,
+    init_analysis_app_from_query,
+    mark_query_params_applied,
+    query_params_changed,
+    render_query_help,
+    sync_analysis_app_query_params,
+)
 
 # Page configuration
 st.set_page_config(page_title="Figure Skating Judge Analytics",
@@ -67,14 +75,22 @@ def _cached_pooled_cross_judge_metrics(
     competition_ids_tuple,
     discipline_ids_tuple,
     competition_scope: str,
+    event_start_iso: str | None,
+    event_end_iso: str | None,
 ):
+    from datetime import date as _date
+
     analytics = get_analytics_safe()
+    event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
+    event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
     return analytics.get_pooled_cross_judge_metrics(
         score_type=score_type,
         year_filter=year_filter,
         competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
         discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
         competition_scope=competition_scope,
+        event_start_date=event_start,
+        event_end_date=event_end,
     )
 
 
@@ -113,7 +129,7 @@ _DOWNLOAD_RESULTS_PY = _os.path.join(_REPO_ROOT, "downloadResults.py")
 _nav_pages = [
     "Individual Judge Analysis",
     "Cross-Judge Benchmarking",     "Temporal Trend Analysis",
-    "Panel benchmarks",
+    "Panel size benchmarks",
     "Rule Errors Analysis", "Competition Analysis",
 ]
 if _os.path.isfile(_DOWNLOAD_RESULTS_PY):
@@ -121,11 +137,17 @@ if _os.path.isfile(_DOWNLOAD_RESULTS_PY):
 
 # Persisted selectbox state can reference a removed/renamed label after deploy; coerce so the
 # sidebar always stays usable (otherwise Streamlit may error or show an empty/wrong selection).
+if st.session_state.get("primary_nav_page") == "Panel benchmarks":
+    st.session_state.primary_nav_page = "Panel size benchmarks"
 if (
     "primary_nav_page" not in st.session_state
     or st.session_state.primary_nav_page not in _nav_pages
 ):
     st.session_state.primary_nav_page = _nav_pages[0]
+
+_url_params_changed = query_params_changed()
+
+init_analysis_app_from_query(_nav_pages, from_url=_url_params_changed)
 
 # Use radio, not selectbox: when the last item ("Load Competition") is selected, the native
 # dropdown often scrolls the menu so the first option sits above the visible area — it looks
@@ -134,6 +156,10 @@ page = st.sidebar.radio(
     "Select Analysis Type",
     _nav_pages,
     key="primary_nav_page",
+)
+
+apply_analysis_filters_for_page(
+    page, get_analytics_safe(), from_url=_url_params_changed
 )
 
 
@@ -390,13 +416,17 @@ def cross_judge_benchmarking_page():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        heatmap_type = st.selectbox("View",
-                                    ["Judge Overview", "Judge vs Competition"])
+        heatmap_type = st.selectbox(
+            "View",
+            ["Judge Overview", "Judge vs Competition"],
+            key="cross_judge_view",
+        )
 
     with col2:
         metric = st.selectbox("Performance Metric", [
             "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation", "excess_anomalies", "rule_errors"
         ],
+                              key="cross_judge_metric",
                               format_func=lambda x: {
                                   "throwout_rate": "Throwout Rate (%)",
                                   "anomaly_rate": "Anomaly Rate (%)",
@@ -407,8 +437,11 @@ def cross_judge_benchmarking_page():
                               }[x])
 
     with col3:
-        score_type = st.selectbox("Score Type", ["both", "pcs", "element"],
-                                  format_func=lambda x: {
+        score_type = st.selectbox(
+            "Score Type",
+            ["both", "pcs", "element"],
+            key="cross_judge_score_type",
+            format_func=lambda x: {
                                       "both": "Combined (PCS + Elements)",
                                       "pcs": "PCS Only",
                                       "element": "Elements Only"
@@ -418,6 +451,7 @@ def cross_judge_benchmarking_page():
         "Competition scope",
         list(_COMPETITION_SCOPE_LABELS),
         index=0,
+        key="cross_judge_competition_scope",
         help=(
             "Qualifying: linked officials type is set and not id 11 (nonqualifying). "
             "NQS: linked officials type id 10. "
@@ -426,6 +460,50 @@ def cross_judge_benchmarking_page():
         ),
     )
     competition_scope = _competition_scope_key(competition_scope_label)
+
+    use_event_dates = st.checkbox(
+        "Filter by competition event dates",
+        key="cross_judge_use_event_dates",
+        help=(
+            "Uses each competition's start date when set, otherwise its end date. "
+            "Events with neither date are excluded when this filter is on."
+        ),
+    )
+    cross_event_start = None
+    cross_event_end = None
+    if use_event_dates:
+        analytics_dates = get_analytics_safe()
+        date_min, date_max = analytics_dates.get_competition_event_date_bounds(
+            competition_scope=competition_scope,
+        )
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            cross_event_start = st.date_input(
+                "Event on or after",
+                value=date_min,
+                min_value=date_min,
+                max_value=date_max,
+                key="cross_judge_start_date",
+            )
+        with date_col2:
+            cross_event_end = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=date_min,
+                max_value=date_max,
+                key="cross_judge_end_date",
+            )
+        if cross_event_start > cross_event_end:
+            st.warning("Start date is after end date; results may be empty.")
+
+    event_start_iso = (
+        cross_event_start.isoformat()
+        if use_event_dates and cross_event_start
+        else None
+    )
+    event_end_iso = (
+        cross_event_end.isoformat() if use_event_dates and cross_event_end else None
+    )
 
     metric_names = {
         "throwout_rate": "Throwout Rate (%)",
@@ -444,16 +522,27 @@ def cross_judge_benchmarking_page():
         with col1:
             analytics = get_analytics_safe()
             years = analytics.get_years()
-            year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
+            year_filter = st.selectbox(
+                "Filter by Year",
+                ["All Years"] + years,
+                key="cross_judge_year",
+            )
             year_filter = None if year_filter == "All Years" else year_filter
 
         with col2:
-            competitions = analytics.get_competitions(competition_scope=competition_scope)
+            competitions = analytics.get_competitions(
+                competition_scope=competition_scope,
+                event_start_date=cross_event_start if use_event_dates else None,
+                event_end_date=cross_event_end if use_event_dates else None,
+            )
             competition_names = [
                 f"{name} ({year})" for comp_id, name, year in competitions
             ]
-            selected_competitions = st.multiselect("Filter by Competitions",
-                                                   competition_names)
+            selected_competitions = st.multiselect(
+                "Filter by Competitions",
+                competition_names,
+                key="cross_judge_competitions",
+            )
             competition_ids = [
                 comp_id for comp_id, name, year in competitions
                 if f"{name} ({year})" in selected_competitions
@@ -466,8 +555,11 @@ def cross_judge_benchmarking_page():
                 else analytics.get_discipline_types()
             )
             discipline_names = [name for dt_id, name in discipline_types]
-            selected_disciplines = st.multiselect("Filter by Discipline Type",
-                                                  discipline_names)
+            selected_disciplines = st.multiselect(
+                "Filter by Discipline Type",
+                discipline_names,
+                key="cross_judge_disciplines",
+            )
             discipline_ids = [
                 dt_id for dt_id, name in discipline_types
                 if name in selected_disciplines
@@ -482,8 +574,20 @@ def cross_judge_benchmarking_page():
             competition_ids_tuple,
             discipline_ids_tuple,
             competition_scope_key,
+            event_start_iso_key,
+            event_end_iso_key,
         ):
+            from datetime import date as _date
+
             analytics = get_analytics_safe()
+            event_start = (
+                _date.fromisoformat(event_start_iso_key)
+                if event_start_iso_key
+                else None
+            )
+            event_end = (
+                _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
+            )
             return analytics.get_judge_performance_heatmap_data(
                 metric=metric,
                 score_type=score_type,
@@ -491,6 +595,8 @@ def cross_judge_benchmarking_page():
                 competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
                 discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
                 competition_scope=competition_scope_key,
+                event_start_date=event_start,
+                event_end_date=event_end,
             )
 
         with st.spinner("Loading data..."):
@@ -504,6 +610,8 @@ def cross_judge_benchmarking_page():
                 comp_ids_tuple,
                 disc_ids_tuple,
                 competition_scope,
+                event_start_iso,
+                event_end_iso,
             )
             _render_pooled_benchmark_block(pm, score_type)
 
@@ -514,6 +622,8 @@ def cross_judge_benchmarking_page():
                 comp_ids_tuple,
                 disc_ids_tuple,
                 competition_scope,
+                event_start_iso,
+                event_end_iso,
             )
 
         if heatmap_df.empty:
@@ -563,22 +673,50 @@ def cross_judge_benchmarking_page():
 
     else:  # Judge vs Competition
         pm_jc = _cached_pooled_cross_judge_metrics(
-            score_type, None, None, None, competition_scope
+            score_type,
+            None,
+            None,
+            None,
+            competition_scope,
+            event_start_iso,
+            event_end_iso,
         )
         _render_pooled_benchmark_block(pm_jc, score_type)
 
         @st.cache_data(ttl=300)
-        def get_cached_judge_comp_heatmap(metric, score_type, competition_scope_key):
+        def get_cached_judge_comp_heatmap(
+            metric,
+            score_type,
+            competition_scope_key,
+            event_start_iso_key,
+            event_end_iso_key,
+        ):
+            from datetime import date as _date
+
             analytics = get_analytics_safe()
+            event_start = (
+                _date.fromisoformat(event_start_iso_key)
+                if event_start_iso_key
+                else None
+            )
+            event_end = (
+                _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
+            )
             return analytics.get_judge_competition_heatmap_data(
                 metric=metric,
                 score_type=score_type,
                 competition_scope=competition_scope_key,
+                event_start_date=event_start,
+                event_end_date=event_end,
             )
 
         with st.spinner("Loading judge vs competition data..."):
             heatmap_df = get_cached_judge_comp_heatmap(
-                metric, score_type, competition_scope
+                metric,
+                score_type,
+                competition_scope,
+                event_start_iso,
+                event_end_iso,
             )
 
         if heatmap_df.empty:
@@ -639,15 +777,26 @@ def temporal_trend_analysis():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        analysis_type = st.selectbox("Analysis Type", [
-            "Individual Judge Trends", "Overall System Trends",
-            "Judge Consistency Ranking"
-        ])
+        analysis_type = st.selectbox(
+            "Analysis Type",
+            [
+                "Individual Judge Trends",
+                "Overall System Trends",
+                "Judge Consistency Ranking",
+            ],
+            key="temporal_analysis_type",
+        )
 
     with col2:
-        metric = st.selectbox("Performance Metric", [
-            "throwout_rate", "anomaly_rate", "rule_error_rate", "avg_deviation"
-        ],
+        metric = st.selectbox(
+            "Performance Metric",
+            [
+                "throwout_rate",
+                "anomaly_rate",
+                "rule_error_rate",
+                "avg_deviation",
+            ],
+            key="temporal_metric",
                               format_func=lambda x: {
                                   "throwout_rate": "Throwout Rate (%)",
                                   "anomaly_rate": "Anomaly Rate (%)",
@@ -656,8 +805,11 @@ def temporal_trend_analysis():
                               }[x])
 
     with col3:
-        score_type = st.selectbox("Score Type", ["both", "pcs", "element"],
-                                  format_func=lambda x: {
+        score_type = st.selectbox(
+            "Score Type",
+            ["both", "pcs", "element"],
+            key="temporal_score_type",
+            format_func=lambda x: {
                                       "both": "Combined (PCS + Elements)",
                                       "pcs": "PCS Only",
                                       "element": "Elements Only"
@@ -691,8 +843,11 @@ def temporal_trend_analysis():
             st.error("No judges found in database")
             return
 
-        selected_judge_display = st.selectbox("Select Judge",
-                                              ig_labels)
+        selected_judge_display = st.selectbox(
+            "Select Judge",
+            ig_labels,
+            key="temporal_judge_select",
+        )
         selected_judge_ids = ig_map[selected_judge_display]
 
         # Get temporal trends data
@@ -948,8 +1103,11 @@ if page == "Individual Judge Analysis":
         st.error("No judges found in database")
         st.stop()
 
-    selected_judge_display = st.selectbox("Select Judge",
-                                          ig_labels)
+    selected_judge_display = st.selectbox(
+        "Select Judge",
+        ig_labels,
+        key="individual_judge_select",
+    )
     selected_judge_ids = ig_map[selected_judge_display]
 
     # Filters
@@ -968,47 +1126,100 @@ if page == "Individual Judge Analysis":
     )
     individual_competition_scope = _competition_scope_key(individual_scope_label)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
-        years = analytics.get_years()
-        year_filter = st.selectbox("Filter by Year", ["All Years"] + years)
-        year_filter = None if year_filter == "All Years" else year_filter
-
-    with col2:
-        # Scored events plus protocol appearances (segment_official) for linked directory official
-        judge_competitions = analytics.get_judge_competitions(
+        years = analytics.get_judge_years(
             selected_judge_ids,
             competition_scope=individual_competition_scope,
         )
-        competition_names = [
-            f"{name} ({year})" for comp_id, name, year in judge_competitions
-        ]
-        selected_competitions = st.multiselect(
-            "Filter by Competitions",
-            competition_names,
-            help="Ordered by event date (start date, or end date if missing), newest first. "
-            "Includes scored events and protocol appearances (segment_official). "
-            "Only competitions matching the competition scope above are listed.",
+        year_filter = st.selectbox(
+            "Filter by season year",
+            ["All Years"] + years,
+            key="individual_judge_year",
+            help=(
+                "USFS season year on each competition record (``competition.year``), "
+                "for events this judge scored or appeared on in protocol data."
+            ),
         )
-        competition_ids = [
-            comp_id for comp_id, name, year in judge_competitions
-            if f"{name} ({year})" in selected_competitions
-        ] if selected_competitions else None
+        year_filter = None if year_filter == "All Years" else year_filter
 
-    with col3:
+    with col2:
         discipline_types = (
             analytics.qualifying_event_segment_discipline_types()
             if individual_competition_scope != COMPETITION_SCOPE_ALL
             else analytics.get_discipline_types()
         )
         discipline_names = [name for dt_id, name in discipline_types]
-        selected_disciplines = st.multiselect("Filter by Discipline Type",
-                                              discipline_names)
+        selected_disciplines = st.multiselect(
+            "Filter by Discipline Type",
+            discipline_names,
+            key="individual_judge_disciplines",
+            help="Also limits the competition list and protocol roles to these segment disciplines.",
+        )
         discipline_ids = [
             dt_id for dt_id, name in discipline_types
             if name in selected_disciplines
         ] if selected_disciplines else None
+
+    use_event_dates = st.checkbox(
+        "Filter by competition event dates",
+        key="individual_judge_use_event_dates",
+        help=(
+            "Uses each competition's start date when set, otherwise its end date. "
+            "Events with neither date are excluded when this filter is on."
+        ),
+    )
+    event_start_date = None
+    event_end_date = None
+    if use_event_dates:
+        date_min, date_max = analytics.get_competition_event_date_bounds(
+            selected_judge_ids,
+            competition_scope=individual_competition_scope,
+            discipline_type_ids=discipline_ids,
+        )
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            event_start_date = st.date_input(
+                "Event on or after",
+                value=date_min,
+                min_value=date_min,
+                max_value=date_max,
+                key="individual_judge_start_date",
+            )
+        with date_col2:
+            event_end_date = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=date_min,
+                max_value=date_max,
+                key="individual_judge_end_date",
+            )
+        if event_start_date > event_end_date:
+            st.warning("Start date is after end date; results may be empty.")
+
+    judge_competitions = analytics.get_judge_competitions(
+        selected_judge_ids,
+        competition_scope=individual_competition_scope,
+        discipline_type_ids=discipline_ids,
+        event_start_date=event_start_date if use_event_dates else None,
+        event_end_date=event_end_date if use_event_dates else None,
+    )
+    competition_names = [
+        f"{name} ({year})" for comp_id, name, year in judge_competitions
+    ]
+    selected_competitions = st.multiselect(
+        "Filter by Competitions",
+        competition_names,
+        help="Ordered by event date (start date, or end date if missing), newest first. "
+        "Includes scored events and protocol appearances (segment_official) in the "
+        "selected discipline types. Only competitions matching the competition scope above "
+        "are listed.",
+    )
+    competition_ids = [
+        comp_id for comp_id, name, year in judge_competitions
+        if f"{name} ({year})" in selected_competitions
+    ] if selected_competitions else None
 
     # Get data
     with st.spinner("Loading judge data..."):
@@ -1018,6 +1229,8 @@ if page == "Individual Judge Analysis":
             competition_ids,
             discipline_ids,
             competition_scope=individual_competition_scope,
+            event_start_date=event_start_date if use_event_dates else None,
+            event_end_date=event_end_date if use_event_dates else None,
         )
         element_df = analytics.get_judge_element_stats(
             selected_judge_ids,
@@ -1025,6 +1238,8 @@ if page == "Individual Judge Analysis":
             competition_ids,
             discipline_ids,
             competition_scope=individual_competition_scope,
+            event_start_date=event_start_date if use_event_dates else None,
+            event_end_date=event_end_date if use_event_dates else None,
         )
         segment_df = analytics.get_judge_segment_stats(
             selected_judge_ids,
@@ -1032,6 +1247,8 @@ if page == "Individual Judge Analysis":
             competition_ids,
             discipline_ids,
             competition_scope=individual_competition_scope,
+            event_start_date=event_start_date if use_event_dates else None,
+            event_end_date=event_end_date if use_event_dates else None,
         )
 
     comp_pairs = _individual_judge_protocol_competition_pairs(
@@ -1045,7 +1262,8 @@ if page == "Individual Judge Analysis":
     if pcs_df.empty and element_df.empty:
         st.warning(
             "No PCS or element score data for this judge with the selected filters. "
-            "The protocol roles table below may still list competitions from segment_official."
+            "The protocol roles table below may still list protocol appearances in the "
+            "selected disciplines when segment_official data exists."
         )
 
     if comp_pairs:
@@ -1054,6 +1272,7 @@ if page == "Individual Judge Analysis":
             selected_judge_ids,
             comp_pairs,
             competition_scope=individual_competition_scope,
+            discipline_type_ids=discipline_ids,
         )
         if roles_cap:
             st.caption(roles_cap)
@@ -1073,8 +1292,9 @@ if page == "Individual Judge Analysis":
         )
         st.caption(
             "Rows ordered by competition event date (start, else end), newest first; missing dates "
-            "last. Roles within a row are alphabetical. Includes competitions from score filters "
-            "plus protocol-only events in the competition filter."
+            "last. Roles within a row are alphabetical and limited to the selected discipline "
+            "types (same as PCS/element stats). Includes competitions from score filters plus "
+            "protocol-only events in the competition filter."
         )
 
     # Summary statistics
@@ -1165,10 +1385,20 @@ if page == "Individual Judge Analysis":
                 'Rule Error Rate (%)'
         ]:
             display_summary[col] = display_summary[col].round(1)
-        st.dataframe(display_summary, width="stretch")
+        st.dataframe(
+            display_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Element Type": st.column_config.TextColumn(
+                    "Element Type",
+                    pinned=True,
+                ),
+            },
+        )
 
         # Detailed element scores with issues
-        st.subheader("Element Scores with Issues")
+        st.subheader("Element Score Details")
 
         # Issue type filters
         col1, col2, col3 = st.columns(3)
@@ -1215,9 +1445,32 @@ if page == "Individual Judge Analysis":
                 'element_type_name', 'judge_score', 'panel_average',
                 'deviation', 'issue_type'
             ]].copy()
+            display_df = display_df.drop(columns=['competition_url']).rename(
+                columns={
+                    'competition_name': 'Competition',
+                    'year': 'Year',
+                    'segment_name': 'Segment',
+                    'skater_name': 'Skater',
+                    'element_name': 'Element Name',
+                    'element_type_name': 'Element Type',
+                    'judge_score': 'Judge Score',
+                    'panel_average': 'Panel Average',
+                    'deviation': 'Deviation',
+                    'issue_type': 'Issue Type',
+                }
+            )
 
-            st.dataframe(display_df.drop('competition_url', axis=1),
-                         width="stretch")
+            st.dataframe(
+                display_df,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Element Type": st.column_config.TextColumn(
+                        "Element Type",
+                        pinned=True,
+                    ),
+                },
+            )
 
             # Show competition links separately
             if 'competition_url' in problem_elements.columns and not problem_elements['competition_url'].isna().all():
@@ -1292,10 +1545,20 @@ if page == "Individual Judge Analysis":
                 'Rule Error Rate (%)'
         ]:
             display_summary[col] = display_summary[col].round(1)
-        st.dataframe(display_summary, width="stretch")
+        st.dataframe(
+            display_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "PCS Component": st.column_config.TextColumn(
+                    "PCS Component",
+                    pinned=True,
+                ),
+            },
+        )
 
         # Detailed PCS scores with issues
-        st.subheader("PCS Scores with Issues")
+        st.subheader("PCS Score Details")
 
         # Issue type filters
         col1, col2, col3 = st.columns(3)
@@ -1342,9 +1605,31 @@ if page == "Individual Judge Analysis":
                 'segment_name', 'skater_name', 'pcs_type_name',
                 'judge_score', 'panel_average', 'deviation', 'issue_type'
             ]].copy()
+            display_df_pcs = display_df_pcs.drop(columns=['competition_url']).rename(
+                columns={
+                    'competition_name': 'Competition',
+                    'year': 'Year',
+                    'segment_name': 'Segment',
+                    'skater_name': 'Skater',
+                    'pcs_type_name': 'PCS Component',
+                    'judge_score': 'Judge Score',
+                    'panel_average': 'Panel Average',
+                    'deviation': 'Deviation',
+                    'issue_type': 'Issue Type',
+                }
+            )
 
-            st.dataframe(display_df_pcs.drop('competition_url', axis=1),
-                         width="stretch")
+            st.dataframe(
+                display_df_pcs,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "PCS Component": st.column_config.TextColumn(
+                        "PCS Component",
+                        pinned=True,
+                    ),
+                },
+            )
 
             # Show competition links separately
             if 'competition_url' in problem_pcs.columns and not problem_pcs['competition_url'].isna().all():
@@ -1445,9 +1730,13 @@ if page == "Individual Judge Analysis":
         scope_summary_line = f"Competition scope: {individual_scope_label}"
         report_filter_lines = [scope_summary_line]
         if year_filter is not None:
-            report_filter_lines.append(f"Year: {year_filter}")
+            report_filter_lines.append(f"Season year: {year_filter}")
         else:
-            report_filter_lines.append("Year: All years")
+            report_filter_lines.append("Season year: All years")
+        if use_event_dates and event_start_date and event_end_date:
+            report_filter_lines.append(
+                f"Event dates: {event_start_date.isoformat()} – {event_end_date.isoformat()}"
+            )
         if selected_competitions:
             report_filter_lines.append(
                 "Competitions: " + ", ".join(selected_competitions)
@@ -1631,12 +1920,14 @@ elif page == "Competition Analysis":
         for comp_id, name, year in competitions
     }
     selected_competition = st.selectbox(
-        "Select Competition", 
-        list(competition_options.keys())
+        "Select Competition",
+        list(competition_options.keys()),
+        key="competition_analysis_select",
     )
 
     if selected_competition:
         competition_id = competition_options[selected_competition]
+        st.session_state["competition_analysis_id"] = competition_id
 
         st.subheader("Competition officials")
         st.caption(
@@ -2163,8 +2454,8 @@ elif page == "Cross-Judge Benchmarking":
 elif page == "Temporal Trend Analysis":
     temporal_trend_analysis()
 
-elif page == "Panel benchmarks":
-    st.header("Panel benchmarks")
+elif page == "Panel size benchmarks":
+    st.header("Panel size benchmarks")
     st.caption(
         "Rates by **discipline** (segment ``discipline_type``) and **panel size** "
         "(number of judges on that element or PCS line). Competitions are filtered by **linked "
@@ -2177,6 +2468,7 @@ elif page == "Panel benchmarks":
         "Competition scope",
         options=list(_COMPETITION_SCOPE_LABELS),
         index=1,
+        key="panel_benchmarks_scope",
         help=(
             "Same as Cross-Judge benchmarks: filters "
             "`public.competition` via linked `officials_analysis_competition_type_id`."
@@ -2232,7 +2524,7 @@ elif page == "Panel benchmarks":
             st.download_button(
                 "Download CSV",
                 data=df_bm.to_csv(index=False).encode("utf-8"),
-                file_name="panel_benchmarks.csv",
+                file_name="panel_size_benchmarks.csv",
                 mime="text/csv",
             )
             st.subheader("Charts")
@@ -2449,6 +2741,31 @@ elif page == "Load Competition":
 
 else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")
+
+render_query_help([
+    "**Navigation:** `?page=` — `individual`, `cross-judge`, `temporal`, "
+    "`panel-size-benchmarks`, `rule-errors`, `competition`, `load-competition`",
+    "",
+    "**Scope (most pages):** `?competition_scope=` — `all`, `qualifying`, `nqs`, "
+    "`sectionals`, `championships`",
+    "",
+    "**Individual judge:** `?judge=` (identity label), `?year=` (season; omit for all years), "
+    "`?disciplines=` (comma-separated names), `?start_date=` / `?end_date=` "
+    "(ISO `YYYY-MM-DD`, with event-date filter enabled)",
+    "",
+    "**Cross-judge:** `?view=`, `?metric=`, `?score_type=`, `?year=`, `?disciplines=`, "
+    "`?start_date=` / `?end_date=` (ISO dates, with event-date filter enabled)",
+    "",
+    "**Temporal:** `?analysis_type=`, `?metric=`, `?score_type=`, `?judge=`",
+    "",
+    "**Rule errors:** `?year=`, `?competitions=` (comma-separated labels), "
+    "`?judges=` (comma-separated identity labels)",
+    "",
+    "**Competition:** `?competition_id=` (numeric id)",
+])
+
+sync_analysis_app_query_params(page)
+mark_query_params_applied()
 
 # Sidebar information
 st.sidebar.markdown("---")

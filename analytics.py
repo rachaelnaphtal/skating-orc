@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Optional
 
 import pandas as pd
@@ -428,6 +429,95 @@ class JudgeAnalytics:
             out[int(cid)] = sd or ed
         return out
 
+    def _competition_event_date_expr(self):
+        """Calendar date used for event ordering and date-range filters."""
+        return func.coalesce(Competition.start_date, Competition.end_date)
+
+    def _apply_competition_event_date_range(
+        self,
+        query,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
+    ):
+        """Restrict an ORM query that already joins ``Competition``."""
+        if event_start_date is None and event_end_date is None:
+            return query
+        ev = self._competition_event_date_expr()
+        query = query.filter(ev.isnot(None))
+        if event_start_date is not None:
+            query = query.filter(ev >= event_start_date)
+        if event_end_date is not None:
+            query = query.filter(ev <= event_end_date)
+        return query
+
+    def _filter_competition_rows_by_event_dates(
+        self,
+        rows: list,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
+    ) -> list:
+        """``rows`` are ``(competition_id, name, year)`` tuples."""
+        if event_start_date is None and event_end_date is None:
+            return rows
+        date_map = self._event_dates_for_competition_ids([r[0] for r in rows])
+        kept = []
+        for row in rows:
+            ev = date_map.get(int(row[0]))
+            if ev is None:
+                continue
+            if event_start_date is not None and ev < event_start_date:
+                continue
+            if event_end_date is not None and ev > event_end_date:
+                continue
+            kept.append(row)
+        return kept
+
+    def get_competition_event_date_bounds(
+        self,
+        judge_ids=None,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+        discipline_type_ids=None,
+    ) -> tuple[date, date]:
+        """
+        Min/max event dates (start_date, else end_date) for date pickers.
+
+        When ``judge_ids`` is set, only competitions that judge appears in
+        (scores or protocol) are considered.
+        """
+        if judge_ids:
+            rows = self.get_judge_competitions(
+                judge_ids,
+                competition_scope=competition_scope,
+                discipline_type_ids=discipline_type_ids,
+            )
+            cids = [int(r[0]) for r in rows]
+        else:
+            cids = [
+                int(r[0])
+                for r in self.session.query(Competition.id).all()
+            ]
+        date_map = self._event_dates_for_competition_ids(cids)
+        dates = [d for d in date_map.values() if d is not None]
+        if not dates:
+            today = date.today()
+            return today, today
+        return min(dates), max(dates)
+
+    def get_judge_years(
+        self,
+        judge_ids,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+        discipline_type_ids=None,
+    ) -> list[str]:
+        """Distinct ``Competition.year`` values for this judge's competitions (newest first)."""
+        rows = self.get_judge_competitions(
+            judge_ids,
+            competition_scope=competition_scope,
+            discipline_type_ids=discipline_type_ids,
+        )
+        years = sorted({str(y) for _, _, y in rows}, reverse=True)
+        return years
+
     _QUALIFYING_SCOPE_DISCIPLINE_NAMES = frozenset(
         {"singles", "pairs", "ice dance", "synchronized"}
     )
@@ -478,19 +568,30 @@ class JudgeAnalytics:
         judges = self.session.query(Judge).order_by(Judge.name).all()
         return [(judge.id, judge.name, judge.location) for judge in judges]
 
-    def get_competitions(self, competition_scope: str = COMPETITION_SCOPE_ALL):
+    def get_competitions(
+        self,
+        competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
+    ):
         """Competitions optionally scoped by linked ``officials_analysis`` competition type."""
         q = self.session.query(Competition).order_by(
             Competition.year.desc(), Competition.name
         )
         q = self._filter_orm_competition_scope(q, competition_scope)
         competitions = q.all()
-        return [(comp.id, comp.name, comp.year) for comp in competitions]
+        rows = [(comp.id, comp.name, comp.year) for comp in competitions]
+        return self._filter_competition_rows_by_event_dates(
+            rows, event_start_date, event_end_date
+        )
 
     def get_judge_competitions(
         self,
         judge_ids,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        discipline_type_ids=None,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """Competitions for these judge record(s): scored segments plus protocol panel rows.
 
@@ -504,9 +605,23 @@ class JudgeAnalytics:
 
         When ``competition_scope`` is not *all*, only competitions whose linked officials
         type matches that scope are included (same semantics as other analytics filters).
+
+        When ``discipline_type_ids`` is set (or implied by scoped core disciplines), only
+        segments in those discipline types count toward scores and protocol appearances.
         """
         ids = self.normalize_judge_ids(judge_ids)
-        pcs_competitions = self.session.query(Competition).join(
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
+
+        def _segment_discipline_clause(query):
+            if seg_discipline_ids is None:
+                return query
+            return query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+
+        pcs_competitions = _segment_discipline_clause(
+            self.session.query(Competition).join(
             Segment, Segment.competition_id == Competition.id
         ).join(
             SkaterSegment, SkaterSegment.segment_id == Segment.id
@@ -514,9 +629,10 @@ class JudgeAnalytics:
             PcsScorePerJudge, PcsScorePerJudge.skater_segment_id == SkaterSegment.id
         ).filter(
             PcsScorePerJudge.judge_id.in_(ids)
-        ).distinct()
+        )).distinct()
 
-        element_competitions = self.session.query(Competition).join(
+        element_competitions = _segment_discipline_clause(
+            self.session.query(Competition).join(
             Segment, Segment.competition_id == Competition.id
         ).join(
             SkaterSegment, SkaterSegment.segment_id == Segment.id
@@ -526,7 +642,7 @@ class JudgeAnalytics:
             ElementScorePerJudge, ElementScorePerJudge.element_id == Element.id
         ).filter(
             ElementScorePerJudge.judge_id.in_(ids)
-        ).distinct()
+        )).distinct()
 
         all_competitions = set()
         for comp in pcs_competitions:
@@ -545,13 +661,12 @@ class JudgeAnalytics:
             if oid is not None
         ]
         if linked_official_ids:
-            protocol_competitions = (
+            protocol_competitions = _segment_discipline_clause(
                 self.session.query(Competition)
                 .join(Segment, Segment.competition_id == Competition.id)
                 .join(SegmentOfficial, SegmentOfficial.segment_id == Segment.id)
                 .filter(SegmentOfficial.official_id.in_(linked_official_ids))
-                .distinct()
-            )
+            ).distinct()
             for comp in protocol_competitions:
                 all_competitions.add((comp.id, comp.name, comp.year))
 
@@ -578,7 +693,9 @@ class JudgeAnalytics:
             ).all()
             allowed = {int(r[0]) for r in scoped}
             rows = [r for r in rows if int(r[0]) in allowed]
-        return rows
+        return self._filter_competition_rows_by_event_dates(
+            rows, event_start_date, event_end_date
+        )
 
     def get_judge_segment_stats(
         self,
@@ -587,6 +704,8 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """Segment statistics for one judge or merged identities (multiple judge ids)."""
         ids = self.normalize_judge_ids(judge_ids)
@@ -612,6 +731,9 @@ class JudgeAnalytics:
             )
         segment_query = self._filter_orm_competition_scope(
             segment_query, competition_scope
+        )
+        segment_query = self._apply_competition_event_date_range(
+            segment_query, event_start_date, event_end_date
         )
 
         # Get segments where this judge has PCS scores
@@ -1355,6 +1477,8 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """PCS statistics for one judge id or merged identities (multiple ids)."""
         ids = self.normalize_judge_ids(judge_ids)
@@ -1392,6 +1516,9 @@ class JudgeAnalytics:
         if seg_discipline_ids is not None:
             query = query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
         query = self._filter_orm_competition_scope(query, competition_scope)
+        query = self._apply_competition_event_date_range(
+            query, event_start_date, event_end_date
+        )
 
         results = query.all()
 
@@ -1423,6 +1550,8 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """Element statistics for one judge id or merged identities."""
         ids = self.normalize_judge_ids(judge_ids)
@@ -1463,6 +1592,9 @@ class JudgeAnalytics:
         if seg_discipline_ids is not None:
             query = query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
         query = self._filter_orm_competition_scope(query, competition_scope)
+        query = self._apply_competition_event_date_range(
+            query, event_start_date, event_end_date
+        )
 
         results = query.all()
 
@@ -1634,6 +1766,8 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """Get data for judge performance heatmap"""
 
@@ -1667,6 +1801,9 @@ class JudgeAnalytics:
             )
         pcs_query = self._filter_select_competition_scope(
             pcs_query, competition_scope
+        )
+        pcs_query = self._apply_competition_event_date_range(
+            pcs_query, event_start_date, event_end_date
         )
 
         pcs_stats = self.session.execute(pcs_query.group_by(PcsScorePerJudge.judge_id)).all()
@@ -1707,6 +1844,9 @@ class JudgeAnalytics:
         elem_query = self._filter_select_competition_scope(
             elem_query, competition_scope
         )
+        elem_query = self._apply_competition_event_date_range(
+            elem_query, event_start_date, event_end_date
+        )
 
         elem_stats = self.session.execute(elem_query.group_by(ElementScorePerJudge.judge_id)).all()
         elem_dict_raw = {
@@ -1736,6 +1876,8 @@ class JudgeAnalytics:
                 score_type=score_type,
                 by_competition=False,
                 competition_scope=competition_scope,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
             )
             excess_anomalies = self._merge_excess_map_by_identity(
                 excess_raw, judge_id_to_label, by_competition=False
@@ -1826,6 +1968,8 @@ class JudgeAnalytics:
         discipline_type_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
         include_excess: bool = True,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """
         Aggregate all judge scores matching the same filters as cross-judge benchmarking.
@@ -1844,6 +1988,9 @@ class JudgeAnalytics:
             if seg_discipline_ids is not None:
                 q = q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
             q = self._filter_select_competition_scope(q, competition_scope)
+            q = self._apply_competition_event_date_range(
+                q, event_start_date, event_end_date
+            )
             return q
 
         pcs_sel = (
@@ -1948,6 +2095,8 @@ class JudgeAnalytics:
                 score_type=score_type,
                 by_competition=False,
                 competition_scope=competition_scope,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
             )
             id_to_label = self.get_judge_id_to_identity_label()
             excess_map = self._merge_excess_map_by_identity(
@@ -1991,6 +2140,7 @@ class JudgeAnalytics:
         judge_ids,
         competition_pairs: list,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        discipline_type_ids=None,
     ):
         """
         For competitions in ``competition_pairs``, list distinct protocol roles from
@@ -2003,18 +2153,25 @@ class JudgeAnalytics:
         competition_pairs: [(competition_name, year_str), ...]; row order is re-sorted by
         competition event date (``start_date``, else ``end_date``) descending, then label.
 
-        ``competition_scope`` should match the scope used to build ``competition_pairs`` so
-        label→competition id resolution agrees with the individual-judge competition picker.
+        ``competition_scope`` and ``discipline_type_ids`` should match the filters used to
+        build ``competition_pairs`` so label→competition id resolution and roles agree with
+        the individual-judge pickers.
 
         Returns (DataFrame, optional caption when roles unavailable).
         """
         caption = ""
         roles_by_comp_id = defaultdict(set)
         ids = self.normalize_judge_ids(judge_ids)
+        core_disc = self._qualifying_core_disciplines_active(competition_scope)
+        seg_discipline_ids = self._merged_segment_discipline_ids(
+            core_disc, discipline_type_ids
+        )
 
         id_by_label = {
             (str(nm), str(yr)): int(cid)
-            for cid, nm, yr in self.get_judge_competitions(ids, competition_scope)
+            for cid, nm, yr in self.get_judge_competitions(
+                ids, competition_scope, discipline_type_ids=discipline_type_ids
+            )
         }
         relevant_cids = set(id_by_label.values())
 
@@ -2049,6 +2206,8 @@ class JudgeAnalytics:
                 )
                 .where(Competition.id.in_(relevant_cids))
             )
+            if seg_discipline_ids is not None:
+                base = base.where(Segment.discipline_type_id.in_(seg_discipline_ids))
             if official_id is not None:
                 stmt = base.where(SegmentOfficial.official_id == official_id)
                 for cid, lbl in self.session.execute(stmt):
@@ -2075,6 +2234,10 @@ class JudgeAnalytics:
                         SegmentOfficial.official_name.isnot(None),
                     )
                 )
+                if seg_discipline_ids is not None:
+                    stmt = stmt.where(
+                        Segment.discipline_type_id.in_(seg_discipline_ids)
+                    )
                 for cid, oname, lbl in self.session.execute(stmt):
                     if not oname or not str(oname).strip():
                         continue
@@ -2141,6 +2304,8 @@ class JudgeAnalytics:
         metric='throwout_rate',
         score_type='both',
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """Fast version: judge vs competition heatmap with batch queries"""
 
@@ -2149,7 +2314,11 @@ class JudgeAnalytics:
 
         comp_q = self.session.query(Competition.id, Competition.name, Competition.year)
         comp_q = self._filter_orm_competition_scope(comp_q, competition_scope)
-        competitions = comp_q.all()
+        competitions = self._filter_competition_rows_by_event_dates(
+            [(c.id, c.name, c.year) for c in comp_q.all()],
+            event_start_date,
+            event_end_date,
+        )
         judge_id_to_label = self.get_judge_id_to_identity_label()
         identity_labels = sorted(set(judge_id_to_label.values()), key=str.lower)
 
@@ -2172,6 +2341,9 @@ class JudgeAnalytics:
         pcs_q = self._filter_select_competition_scope(pcs_q, competition_scope)
         if seg_discipline_ids is not None:
             pcs_q = pcs_q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        pcs_q = self._apply_competition_event_date_range(
+            pcs_q, event_start_date, event_end_date
+        )
         pcs_stats = self.session.execute(
             pcs_q.group_by(Competition.id, PcsScorePerJudge.judge_id)
         ).all()
@@ -2207,6 +2379,9 @@ class JudgeAnalytics:
         elem_q = self._filter_select_competition_scope(elem_q, competition_scope)
         if seg_discipline_ids is not None:
             elem_q = elem_q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+        elem_q = self._apply_competition_event_date_range(
+            elem_q, event_start_date, event_end_date
+        )
         elem_stats = self.session.execute(
             elem_q.group_by(Competition.id, ElementScorePerJudge.judge_id)
         ).all()
@@ -2238,6 +2413,8 @@ class JudgeAnalytics:
                 score_type=score_type,
                 by_competition=True,
                 competition_scope=competition_scope,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
             )
             excess_anomalies = self._merge_excess_map_by_identity(
                 excess_raw, judge_id_to_label, by_competition=True
@@ -2327,6 +2504,8 @@ class JudgeAnalytics:
         competition_ids=None,
         discipline_ids=None,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ) -> list[int]:
         """Segment ids matching cross-judge excess filters (ids only, no ORM load)."""
         q = (
@@ -2343,6 +2522,9 @@ class JudgeAnalytics:
         clause = self._competition_scope_clause(competition_scope)
         if clause is not None:
             q = q.filter(clause)
+        q = self._apply_competition_event_date_range(
+            q, event_start_date, event_end_date
+        )
         return [int(r) for r in self.session.execute(q).scalars().all()]
 
     def _calculate_all_judge_excess_anomalies(
@@ -2353,6 +2535,8 @@ class JudgeAnalytics:
         score_type='both',
         by_competition=False,
         competition_scope: str = COMPETITION_SCOPE_ALL,
+        event_start_date: date | None = None,
+        event_end_date: date | None = None,
     ):
         """
         Calculate excess anomalies for judges via ``judge_excess_anomalies_cache``.
@@ -2364,6 +2548,8 @@ class JudgeAnalytics:
             competition_ids=competition_ids,
             discipline_ids=discipline_ids,
             competition_scope=competition_scope,
+            event_start_date=event_start_date,
+            event_end_date=event_end_date,
         )
         if not segment_ids:
             return {}
