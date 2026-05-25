@@ -86,8 +86,12 @@ def categorizeElement(element):
         "PStW": "Step Sequence",
         "OFTW": "Step Sequence",
         "SoOFT": "Step Sequence",
-        "SqTwW": "Twizzle",
+        "SqTw": "Twizzle",
+        "pSoTw": "Twizzle",
         "ChTw": "Twizzle",
+        "SoSqTw": "Twizzle",
+        "SoTw": "Twizzle",
+        "SqTw": "Twizzle",
         "PiF": "Pivot Figure",
         "DiSt": "Step Sequence",
         "NtCiSt": "Step Sequence",
@@ -107,12 +111,18 @@ def categorizeElement(element):
         "SoOFSt": "Step Sequence",
         "1MB": "Pattern dance",
         "1M": "Pattern dance",
+        "1AT":"Pattern dance",
+        "2AT":"Pattern dance",
     }
 
     if element in ["FiDs", "FoDs", "BiDs", "BoDs"]:
         return "Death Spiral"
     elif element in element_dict:
         return element_dict[element]
+    elif "+kp" in element:
+        if element.startswith("StSq"):
+            return "Step Sequence"
+        return "Pattern dance"
     elif element.endswith("Tw"):
         return "Twist"
     elif element in ["PSp", "PCoSp"]:
@@ -133,10 +143,6 @@ def categorizeElement(element):
         return "Intersection"
     elif element.startswith("NHE"):
         return "No Hold Element"
-    elif "+kp" in element:
-        if element.startswith("StSq"):
-            return "Step Sequence"
-        return "Pattern dance"
     elif re.search(r'\dSq$', element):
         return "Pattern dance"
     elif re.search(r'\dSq\dSe$', element):

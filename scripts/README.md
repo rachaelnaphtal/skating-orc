@@ -14,6 +14,55 @@ One-off loads from the **Load Competition** page in `analysis_app.py` are unchan
 
 ---
 
+## Element judge calibration (SQL)
+
+**File:** `element_judge_calibration.sql`
+
+Ranks judges on element GOE marking vs global expectations by **discipline**, **element type**, **GOE given**, and **panel spread** (with coarser benchmark fallbacks). Merges directory-linked judge aliases like the analytics app.
+
+1. Edit the params block at the top (`discipline_filter`, `competition_scope`, optional date filters, min sample sizes).
+2. Optionally `INSERT` into `_calibration_seasons` for one or more `competition.year` values (e.g. `2425`, `2526`). Leave that table empty to use all seasons.
+3. Run the **entire** script in one session (DBeaver/pgAdmin) or:
+
+```bash
+psql "$DATABASE_URL" -f scripts/element_judge_calibration.sql
+```
+
+Result sets: sample benchmarks, coverage summary, then **judge_ranks** (`mean_abs_z` lower = closer to population norms in comparable scenarios). Temp tables `_element_scenario_benchmarks` and `_element_mark_scored` remain for ad-hoc queries until you disconnect.
+
+**Season examples** (uncomment `INSERT` in the SQL file):
+
+```sql
+INSERT INTO _calibration_seasons (season_year) VALUES ('2425'), ('2526');
+```
+
+**Date range example** (in `_calibration_params`; uses `COALESCE(start_date, end_date)` on each competition):
+
+```sql
+DATE '2024-07-01' AS start_date_filter,
+DATE '2025-06-30' AS end_date_filter,
+```
+
+You can combine seasons and dates. Competitions missing both `start_date` and `end_date` are dropped when either date filter is set.
+
+**Sectionals + nationals** (same as Cross-Judge “Sectionals & championships”):
+
+```sql
+'sectionals_and_championships'::text AS competition_scope,
+```
+
+Includes officials types **1–9** (SPD/SYS sectionals, US Championships, US Synchro Championships). Excludes NQS (10), nonqualifying (11), and adult/collegiate (12–14). Competitions must have `officials_analysis_competition_type_id` linked at load time.
+
+**Nationals only:**
+
+```sql
+'championships_only'::text AS competition_scope,
+```
+
+Types **4** and **8** only.
+
+---
+
 ## 1. Discover competitions
 
 **Script:** `discover_usfs_ijs_competitions.py`

@@ -27,6 +27,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from gcp_interactions_helper import read_file_from_gcp
+from rule_errors_policy import should_flag_rule_errors
 
 USING_ISU_COMPONENT_METHOD = False
 
@@ -809,6 +810,8 @@ def extract_judge_scores(
     isFSM=False,
     write_excel=True,
     http_session=None,
+    competition_start_date=None,
+    competition_end_date=None,
 ):
     if isFSM:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
@@ -833,18 +836,23 @@ def extract_judge_scores(
     element_errors = []
     element_deviations = []
     pcs_errors = []
-    if (
-        "Women" in event_name
-        or "Men" in event_name
-        or "Boys" in event_name
-        or "Girls" in event_name
-    ):
-        element_errors = findSinglesElementErrors(
-            elements_per_skater, judges, event_name, judge_filter=judge_filter
-        )
-    elif "Pairs" in event_name:
-        element_errors = findPairsElementErrors(
-            elements_per_skater, judges, event_name, judge_filter=judge_filter)
+    flag_rule_errors = should_flag_rule_errors(
+        competition_start_date, competition_end_date
+    )
+    if flag_rule_errors:
+        if (
+            "Women" in event_name
+            or "Men" in event_name
+            or "Boys" in event_name
+            or "Girls" in event_name
+        ):
+            element_errors = findSinglesElementErrors(
+                elements_per_skater, judges, event_name, judge_filter=judge_filter
+            )
+        elif "Pairs" in event_name:
+            element_errors = findPairsElementErrors(
+                elements_per_skater, judges, event_name, judge_filter=judge_filter
+            )
 
     if not only_rule_errors:
         element_deviations = findElementDeviations(

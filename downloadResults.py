@@ -118,6 +118,8 @@ def processEvent(
     pdf_loop=None,
     http_session=None,
     write_excel=True,
+    competition_start_date=None,
+    competition_end_date=None,
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     if isFSM:
@@ -138,6 +140,8 @@ def processEvent(
             isFSM=True,
             write_excel=write_excel,
             http_session=http_session,
+            competition_start_date=competition_start_date,
+            competition_end_date=competition_end_date,
         )
     if use_html:
         return judgingParsing.extract_judge_scores(
@@ -155,6 +159,8 @@ def processEvent(
             use_html=use_html,
             write_excel=write_excel,
             http_session=http_session,
+            competition_start_date=competition_start_date,
+            competition_end_date=competition_end_date,
         )
     if pdf_browser is not None and pdf_loop is not None:
         pdf_loop.run_until_complete(
@@ -176,6 +182,8 @@ def processEvent(
         use_html=False,
         write_excel=write_excel,
         http_session=http_session,
+        competition_start_date=competition_start_date,
+        competition_end_date=competition_end_date,
     )
 
 
@@ -877,6 +885,8 @@ def scrape(
 
         competition_id = 0
         proccessed_segments = []
+        competition_start_date = None
+        competition_end_date = None
         if write_to_database:
             competition_id = database_obj.insert_competition(
                 report_name.replace("_", " "),
@@ -902,6 +912,8 @@ def scrape(
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
                 update_officials_competition_type=update_officials_competition_type,
             )
+            competition_start_date = start_date
+            competition_end_date = end_date
 
         if page_contents:
             judge_errors = {}
@@ -943,6 +955,8 @@ def scrape(
                         pdf_loop=pdf_loop,
                         http_session=http_session,
                         write_excel=write_excel,
+                        competition_start_date=competition_start_date,
+                        competition_end_date=competition_end_date,
                     )
                     segment_official_rows = None
                     if write_to_database:
@@ -1023,6 +1037,8 @@ def scrape(
                         pdf_loop=pdf_loop,
                         http_session=http_session,
                         write_excel=write_excel,
+                        competition_start_date=competition_start_date,
+                        competition_end_date=competition_end_date,
                     )
                     segment_official_rows = None
                     segment_db_key = None

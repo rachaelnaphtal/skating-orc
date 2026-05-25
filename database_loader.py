@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import decimal
 import re
 from sqlalchemy import select, tuple_, update
@@ -9,6 +10,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from models import Judge, Competition, Segment, Skater, SkaterSegment, Element, ElementScorePerJudge, PcsScorePerJudge, PcsType, ElementType, DisciplineType, SegmentOfficial
 from database import get_db_session, test_connection
+from rule_errors_policy import should_flag_rule_errors
 
 try:
     from judge_official_link_core import normalize_name, suggest_matches
@@ -531,9 +533,9 @@ class DatabaseLoader:
         elif "elite" in segment_name.lower():
             type="Synchronized"
         elif "choreographic" in segment_name.lower():
-            type="Theatre on Ice"
+            type="Theatre On Ice"
         elif "theatre" in segment_name.lower():
-            type="Theatre on Ice"
+            type="Theatre On Ice"
         elif "spin" in segment_name.lower():
             type="Athlete Development"
         elif "jump" in segment_name.lower():
@@ -759,13 +761,30 @@ class DatabaseLoader:
             "element_score_per_judge_unique",
         )
 
-        self._apply_rule_errors_bulk(
-            rule_errors,
-            skater_dict,
-            ss_map,
-            elem_id_by_pair,
-            judge_dict,
-        )
+        if self._should_apply_rule_errors_for_segment(segment_id):
+            self._apply_rule_errors_bulk(
+                rule_errors,
+                skater_dict,
+                ss_map,
+                elem_id_by_pair,
+                judge_dict,
+            )
+
+    def _competition_dates_for_segment(
+        self, segment_id: int
+    ) -> tuple[datetime.date | None, datetime.date | None]:
+        row = self.session.execute(
+            select(Competition.start_date, Competition.end_date)
+            .join(Segment, Segment.competition_id == Competition.id)
+            .where(Segment.id == segment_id)
+        ).first()
+        if not row:
+            return None, None
+        return row[0], row[1]
+
+    def _should_apply_rule_errors_for_segment(self, segment_id: int) -> bool:
+        start, end = self._competition_dates_for_segment(segment_id)
+        return should_flag_rule_errors(start, end)
 
     def _apply_rule_errors_bulk(
         self,
@@ -802,7 +821,7 @@ class DatabaseLoader:
 
     def insert_rule_errors(self, rule_errors, segment_id):
         """Legacy per-row path; prefer rule errors applied in insert_element_scores."""
-        if not rule_errors:
+        if not rule_errors or not self._should_apply_rule_errors_for_segment(segment_id):
             return
         for rule_error in rule_errors:
             skater_id = (
