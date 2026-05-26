@@ -57,10 +57,6 @@ SHARD_MARK_COLUMNS = (
     "discipline_type_id",
     "element_type_id",
 )
-# Heroku / low-memory hosts: cap season span (each season is a full DB pass).
-ELEMENT_RANKING_MAX_SEASON_SPAN = 3
-
-
 def memory_efficient_mode() -> bool:
     """Heroku / low-RAM: slimmer pipeline (on-demand judge detail, sidecar pickles)."""
     if os.environ.get("DYNO"):
@@ -250,38 +246,6 @@ def filter_element_ranking_season_years(years: Iterable[str]) -> list[str]:
     )
 
 
-def element_ranking_season_window_options(years: list[str]) -> list[dict[str, str]]:
-    """Preset season ranges (newest seasons first)."""
-    ys = filter_element_ranking_season_years(years)
-    if not ys:
-        return []
-    options: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for y in ys:
-        key = (y, y)
-        if key not in seen:
-            seen.add(key)
-            options.append(
-                {"label": f"Season {y} only", "start": y, "end": y}
-            )
-    for span in range(2, ELEMENT_RANKING_MAX_SEASON_SPAN + 1):
-        for i in range(0, len(ys) - span + 1):
-            window = ys[i : i + span]
-            start_y, end_y = window[-1], window[0]
-            key = (start_y, end_y)
-            if key in seen:
-                continue
-            seen.add(key)
-            options.append(
-                {
-                    "label": f"Seasons {end_y} through {start_y} ({span} seasons)",
-                    "start": start_y,
-                    "end": end_y,
-                }
-            )
-    return options
-
-
 def _season_index(years_sorted: list[str], season: str) -> int | None:
     try:
         return years_sorted.index(season)
@@ -294,29 +258,15 @@ def validate_element_ranking_scope(
     end_season_year: Optional[str],
     *,
     available_years: Optional[list[str]] = None,
-    restrict_host: bool | None = None,
 ) -> str | None:
-    """Return an error message when filters are too broad for a memory-limited host."""
-    restrict = memory_efficient_mode() if restrict_host is None else restrict_host
-    if not restrict:
+    """Return an error message when a selected season year is not in the database."""
+    if not available_years:
         return None
-    if not start_season_year or not end_season_year:
-        return (
-            "Choose a **Season window** preset (required on Heroku). "
-            "Open-ended “Any” season is not supported there."
-        )
-    if available_years:
-        ys = sorted({str(y).strip() for y in available_years if y}, reverse=True)
-        i0 = _season_index(ys, str(start_season_year))
-        i1 = _season_index(ys, str(end_season_year))
-        if i0 is None or i1 is None:
-            return "Selected season year is not available in the database."
-        lo, hi = sorted((i0, i1))
-        if hi - lo + 1 > ELEMENT_RANKING_MAX_SEASON_SPAN:
-            return (
-                f"Season window is too wide (max {ELEMENT_RANKING_MAX_SEASON_SPAN} "
-                "season years per run on Heroku). Pick a shorter preset."
-            )
+    ys = sorted({str(y).strip() for y in available_years if y}, reverse=True)
+    if start_season_year and _season_index(ys, str(start_season_year)) is None:
+        return "Selected start season year is not available in the database."
+    if end_season_year and _season_index(ys, str(end_season_year)) is None:
+        return "Selected end season year is not available in the database."
     return None
 
 
@@ -765,13 +715,11 @@ def run_params_same_sigma_and_ranking_scope(a: tuple, b: tuple) -> bool:
 
 
 def widest_benchmark_season_window(years: list[str]) -> tuple[str | None, str | None]:
-    """Largest allowed span (newest ``ELEMENT_RANKING_MAX_SEASON_SPAN`` seasons)."""
+    """Full element-ranking season span (oldest through newest)."""
     ys = filter_element_ranking_season_years(years)
     if not ys:
         return None, None
-    span = min(ELEMENT_RANKING_MAX_SEASON_SPAN, len(ys))
-    window = ys[:span]
-    return window[-1], window[0]
+    return ys[-1], ys[0]
 
 
 def ranking_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:

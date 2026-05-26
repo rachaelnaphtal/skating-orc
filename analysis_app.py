@@ -51,7 +51,6 @@ from element_deviation_ranking import (
     apply_min_marks_to_ranking_result,
     compute_judge_detail_for_identity,
     element_ranking_discipline_types,
-    element_ranking_season_window_options,
     filter_element_ranking_season_years,
     memory_efficient_mode,
     benchmark_competition_scope,
@@ -1133,57 +1132,33 @@ PCS scores and throwouts are not part of this model.
     scope_key = _competition_scope_key(scope_label)
 
     years = filter_element_ranking_season_years(analytics.get_years())
-    _host_limited = memory_efficient_mode()
+    if not years:
+        st.error("No competition seasons found in the database.")
+        return
     start_season_year = None
     end_season_year = None
     event_start_iso = None
     event_end_iso = None
 
-    if _host_limited:
-        windows = element_ranking_season_window_options(years)
-        if not windows:
-            st.error("No competition seasons found in the database.")
-            return
-        window_labels = [w["label"] for w in windows]
-        default_ix = 0
-        pick_label = st.selectbox(
-            "Season window",
-            window_labels,
-            index=default_ix,
-            key="element_ranking_season_window",
-            help=(
-                "Heroku allows at most a few season years per run. "
-                "Precomputed caches (if present) load instantly."
-            ),
+    col_y1, col_y2 = st.columns(2)
+    with col_y1:
+        start_season = st.selectbox(
+            "Season year from",
+            ["Any"] + years,
+            key="element_ranking_start_season",
         )
-        win = windows[window_labels.index(pick_label)]
-        start_season_year = win["start"]
-        end_season_year = win["end"]
-    else:
-        col_y1, col_y2 = st.columns(2)
-        with col_y1:
-            start_season = st.selectbox(
-                "Season year from",
-                ["Any"] + years,
-                key="element_ranking_start_season",
-            )
-            start_season_year = None if start_season == "Any" else start_season
-        with col_y2:
-            end_season = st.selectbox(
-                "Season year to",
-                ["Any"] + years,
-                key="element_ranking_end_season",
-            )
-            end_season_year = None if end_season == "Any" else end_season
+        start_season_year = None if start_season == "Any" else start_season
+    with col_y2:
+        end_season = st.selectbox(
+            "Season year to",
+            ["Any"] + years,
+            key="element_ranking_end_season",
+        )
+        end_season_year = None if end_season == "Any" else end_season
 
     st.caption(
         f"Element marks are limited to competitions on or after "
         f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale)."
-        + (
-            " This host limits how many season years you can select per run."
-            if _host_limited
-            else ""
-        )
     )
     use_event_dates = st.checkbox(
         "Narrow by competition event dates",
