@@ -49,7 +49,9 @@ from element_deviation_ranking import (
     MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
     MIN_ELEMENT_MARKING_EVENT_DATE,
     apply_min_marks_to_ranking_result,
+    attach_judge_identities,
     compute_judge_detail_for_identity,
+    control_scores_by_element,
     element_ranking_discipline_types,
     filter_element_ranking_season_years,
     memory_efficient_mode,
@@ -61,6 +63,7 @@ from element_deviation_ranking import (
     validate_element_ranking_scope,
 )
 from element_ranking_cache import (
+    collect_marks_for_run,
     element_ranking_filter_kwargs,
     load_cached_rankings,
     try_save_element_ranking_cache,
@@ -1010,9 +1013,40 @@ def _element_ranking_sigma_bins_column_config() -> dict:
     }
 
 
+def _element_ranking_control_table(
+    result: dict,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+) -> pd.DataFrame:
+    """Panel median GOE per element (sidecar, embedded, or rebuilt from ranking-scope marks)."""
+    ctrl = load_control_by_element(result)
+    if not ctrl.empty:
+        return ctrl
+
+    cache_key = ("element_ranking_control", run_params_compute_key(run_params))
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, pd.DataFrame) and not cached.empty:
+        return cached
+
+    marks = collect_marks_for_run(
+        analytics,
+        **element_ranking_filter_kwargs(run_params),
+        cache_only=False,
+        persist_shards=False,
+    )
+    if marks.empty:
+        return pd.DataFrame()
+    if "judge_name" not in marks.columns:
+        marks = attach_judge_identities(marks, analytics)
+    ctrl = control_scores_by_element(marks)
+    if not ctrl.empty:
+        st.session_state[cache_key] = ctrl
+    return ctrl
+
+
 def _element_ranking_load_judge_breakdown(
     result: dict,
-    stored_params: tuple,
+    run_params: tuple,
     pick_judge: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Embedded tables, on-demand load from sidecars, or compute for one judge."""
@@ -1030,26 +1064,37 @@ def _element_ranking_load_judge_breakdown(
     if not jd.empty or not je.empty:
         return jd, je
 
-    control_tbl = load_control_by_element(result)
+    analytics = get_analytics_safe()
+    control_tbl = _element_ranking_control_table(result, analytics, run_params)
     params = load_ranking_params(result)
-    if control_tbl.empty:
+    if control_tbl.empty or not params:
         return pd.DataFrame(), pd.DataFrame()
 
     detail_key = (
         "element_ranking_judge_detail",
-        run_params_compute_key(stored_params),
+        run_params_compute_key(run_params),
         pick_judge,
     )
-    if detail_key not in st.session_state:
-        with st.spinner(f"Loading breakdown for {pick_judge}…"):
-            st.session_state[detail_key] = compute_judge_detail_for_identity(
-                get_analytics_safe(),
-                pick_judge,
-                control_tbl,
-                params,
-                **element_ranking_filter_kwargs(stored_params),
-            )
-    return st.session_state[detail_key]
+    cached = st.session_state.get(detail_key)
+    if isinstance(cached, tuple) and len(cached) == 2:
+        jd_c, je_c = cached
+        if (isinstance(jd_c, pd.DataFrame) and not jd_c.empty) or (
+            isinstance(je_c, pd.DataFrame) and not je_c.empty
+        ):
+            return jd_c, je_c
+
+    with st.spinner(f"Loading breakdown for {pick_judge}…"):
+        detail = compute_judge_detail_for_identity(
+            analytics,
+            pick_judge,
+            control_tbl,
+            params,
+            **element_ranking_filter_kwargs(run_params),
+        )
+    if detail[0].empty and detail[1].empty:
+        return detail
+    st.session_state[detail_key] = detail
+    return detail
 
 
 def _element_ranking_judge_detail_column_config() -> dict:
@@ -1355,7 +1400,10 @@ PCS scores and throwouts are not part of this model.
         st.session_state.pop("element_ranking_cache_saved", None)
         st.session_state.pop("element_ranking_cache_error", None)
         for _k in list(st.session_state.keys()):
-            if isinstance(_k, tuple) and _k[:1] == ("element_ranking_judge_detail",):
+            if isinstance(_k, tuple) and _k[:1] in (
+                "element_ranking_judge_detail",
+                "element_ranking_control",
+            ):
                 del st.session_state[_k]
         if use_precomputed_cache:
             cached = load_cached_rankings(
@@ -1621,13 +1669,13 @@ PCS scores and throwouts are not part of this model.
             )
         _detail_col_config = _element_ranking_judge_detail_column_config()
         jd, je = _element_ranking_load_judge_breakdown(
-            result, stored_params, pick_judge
+            result, run_params, pick_judge
         )
         if jd.empty and je.empty:
             st.info(
-                "No discipline / element-type breakdown for this judge. "
-                "If you just deployed, re-run analysis or precompute cache with "
-                "``--with-judge-detail`` for single-season windows."
+                "No discipline / element-type breakdown for this judge under the "
+                "current filters (no element marks, or identity not found). "
+                "Click **Run analysis** after changing season, scope, or model parameters."
             )
         if not jd.empty:
             jd_one = jd.sort_values("Partial marking score")
