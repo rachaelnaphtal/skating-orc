@@ -56,6 +56,7 @@ from element_deviation_ranking import (
     memory_efficient_mode,
     benchmark_competition_scope,
     benchmark_season_bounds,
+    run_params_compute_key,
     run_params_same_sigma_and_ranking_scope,
     uses_separate_benchmark_pool,
     validate_element_ranking_scope,
@@ -1158,12 +1159,6 @@ PCS scores and throwouts are not part of this model.
         win = windows[window_labels.index(pick_label)]
         start_season_year = win["start"]
         end_season_year = win["end"]
-        st.caption(
-            f"GOE scale from **{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}**. "
-            "Custom event-date narrowing is disabled on this host; use a shorter window "
-            "or run ``python scripts/precompute_element_ranking_cache.py`` to store results "
-            "in the database."
-        )
     else:
         col_y1, col_y2 = st.columns(2)
         with col_y1:
@@ -1180,46 +1175,52 @@ PCS scores and throwouts are not part of this model.
                 key="element_ranking_end_season",
             )
             end_season_year = None if end_season == "Any" else end_season
-        st.caption(
-            f"Element marks are limited to competitions on or after "
-            f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale)."
+
+    st.caption(
+        f"Element marks are limited to competitions on or after "
+        f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale)."
+        + (
+            " This host limits how many season years you can select per run."
+            if _host_limited
+            else ""
         )
-        use_event_dates = st.checkbox(
-            "Narrow by competition event dates",
-            key="element_ranking_use_event_dates",
-            help=(
-                "Further restrict the date window above the 2018-07-01 minimum. "
-                "Events with neither date are excluded."
-            ),
+    )
+    use_event_dates = st.checkbox(
+        "Narrow by competition event dates",
+        key="element_ranking_use_event_dates",
+        help=(
+            "Further restrict rankings by event date (not applied to the σ̂ benchmark pool). "
+            "Events with neither date are excluded."
+        ),
+    )
+    if use_event_dates:
+        date_min, date_max = analytics.get_competition_event_date_bounds(
+            competition_scope=scope_key,
         )
-        if use_event_dates:
-            date_min, date_max = analytics.get_competition_event_date_bounds(
-                competition_scope=scope_key,
+        date_min = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+        date_max = max(date_max, date_min)
+        default_start = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            event_start = st.date_input(
+                "Event on or after",
+                value=default_start,
+                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                max_value=date_max,
+                key="element_ranking_start_date",
             )
-            date_min = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
-            date_max = max(date_max, date_min)
-            default_start = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
-            dc1, dc2 = st.columns(2)
-            with dc1:
-                event_start = st.date_input(
-                    "Event on or after",
-                    value=default_start,
-                    min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
-                    max_value=date_max,
-                    key="element_ranking_start_date",
-                )
-            with dc2:
-                event_end = st.date_input(
-                    "Event on or before",
-                    value=date_max,
-                    min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
-                    max_value=date_max,
-                    key="element_ranking_end_date",
-                )
-            if event_start > event_end:
-                st.warning("Start date is after end date; results may be empty.")
-            event_start_iso = event_start.isoformat()
-            event_end_iso = event_end.isoformat()
+        with dc2:
+            event_end = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                max_value=date_max,
+                key="element_ranking_end_date",
+            )
+        if event_start > event_end:
+            st.warning("Start date is after end date; results may be empty.")
+        event_start_iso = event_start.isoformat()
+        event_end_iso = event_end.isoformat()
 
     benchmark_start_season_year = None
     benchmark_end_season_year = None

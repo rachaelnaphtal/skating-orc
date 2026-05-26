@@ -25,6 +25,15 @@ COMPETITION_SCOPE_NQS = "nqs"
 COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS = "sectionals_and_championships"
 COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY = "championships_only"
 
+# Every analytics scope key (matches Streamlit competition-scope filters).
+ALL_COMPETITION_SCOPES: tuple[str, ...] = (
+    COMPETITION_SCOPE_ALL,
+    COMPETITION_SCOPE_QUALIFYING,
+    COMPETITION_SCOPE_NQS,
+    COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
+    COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+)
+
 # Types 1–3 SPD sectionals, 4 US Champs, 5–7,9 SYS sectionals, 8 US Synchro Champs.
 # Adult / Collegiate (12–14) are **not** in this bucket — use "Qualifying only" to include them.
 # Excludes 10 NQS, 11 nonqualifying.
