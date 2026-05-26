@@ -3,6 +3,11 @@ import tempfile
 import time
 
 import streamlit as st
+
+from database import ensure_database_for_streamlit, get_database_url
+
+ensure_database_for_streamlit()
+
 import pandas as pd
 import traceback
 import plotly.express as px
@@ -43,9 +48,22 @@ from element_deviation_ranking import (
     FLOOR_SIGMA as _ELEM_RANK_FLOOR_SIGMA,
     MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
     MIN_ELEMENT_MARKING_EVENT_DATE,
-    compute_element_deviation_rankings,
+    apply_min_marks_to_ranking_result,
     compute_judge_detail_for_identity,
+    element_ranking_discipline_types,
+    element_ranking_season_window_options,
+    filter_element_ranking_season_years,
     memory_efficient_mode,
+    benchmark_competition_scope,
+    benchmark_season_bounds,
+    run_params_same_sigma_and_ranking_scope,
+    uses_separate_benchmark_pool,
+    validate_element_ranking_scope,
+)
+from element_ranking_cache import (
+    element_ranking_filter_kwargs,
+    load_cached_rankings,
+    try_save_element_ranking_cache,
 )
 from element_deviation_ranking_job import (
     cleanup_ranking_artifacts,
@@ -808,6 +826,19 @@ def _finalize_element_ranking_job() -> None:
         st.session_state.element_ranking_result = load_ranking_result(pickle_path)
         st.session_state.element_ranking_status = "done"
         st.session_state.pop("element_ranking_error_msg", None)
+        rp = st.session_state.get("element_ranking_run_params")
+        if rp is not None:
+            analytics = get_analytics_safe()
+            ok, err = try_save_element_ranking_cache(
+                analytics.session,
+                analytics,
+                rp,
+                st.session_state.element_ranking_result,
+            )
+            if ok:
+                st.session_state.element_ranking_cache_saved = True
+            elif err:
+                st.session_state.element_ranking_cache_error = err
     elif exitcode is not None and exitcode < 0:
         st.session_state.element_ranking_status = "cancelled"
         st.session_state.pop("element_ranking_result", None)
@@ -860,41 +891,12 @@ def _element_ranking_use_subprocess() -> bool:
     return True
 
 
-def _element_ranking_filter_kwargs(run_params: tuple) -> dict:
-    from datetime import date as _date
-
-    (
-        start_season_year,
-        end_season_year,
-        discipline_ids_tuple,
-        competition_scope,
-        event_start_iso,
-        event_end_iso,
-        _min_marks,
-        floor_sigma,
-        _min_bin_count,
-    ) = run_params
-    return {
-        "start_season_year": start_season_year,
-        "end_season_year": end_season_year,
-        "event_start_date": _date.fromisoformat(event_start_iso)
-        if event_start_iso
-        else None,
-        "event_end_date": _date.fromisoformat(event_end_iso) if event_end_iso else None,
-        "discipline_type_ids": list(discipline_ids_tuple)
-        if discipline_ids_tuple
-        else None,
-        "competition_scope": competition_scope,
-        "floor_sigma": floor_sigma,
-    }
-
-
 def _run_element_ranking_compute(run_params: tuple, *, package: bool = True) -> dict:
     """Run rankings in-process; skip ``st.cache_data`` on memory-limited hosts."""
     if memory_efficient_mode():
         result = execute_element_deviation_rankings(run_params)
     else:
-        result = _cached_element_deviation_rankings(*run_params)
+        result = _cached_element_deviation_rankings(run_params)
     if package:
         base = st.session_state.get("element_ranking_pickle_path")
         if not base:
@@ -906,34 +908,11 @@ def _run_element_ranking_compute(run_params: tuple, *, package: bool = True) -> 
 
 
 @st.cache_data(ttl=300)
-def _cached_element_deviation_rankings(
-    start_season_year: str | None,
-    end_season_year: str | None,
-    discipline_ids_tuple: tuple[int, ...] | None,
-    competition_scope: str,
-    event_start_iso: str | None,
-    event_end_iso: str | None,
-    min_marks: int,
-    floor_sigma: float,
-    min_bin_count: int,
-):
-    from datetime import date as _date
+def _cached_element_deviation_rankings(run_params: tuple):
+    from element_deviation_ranking import compute_element_deviation_rankings_from_run_params
 
     analytics = get_analytics_safe()
-    event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
-    event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
-    return compute_element_deviation_rankings(
-        analytics,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        event_start_date=event_start,
-        event_end_date=event_end,
-        discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
-        competition_scope=competition_scope,
-        min_marks=min_marks,
-        floor_sigma=floor_sigma,
-        min_bin_count=min_bin_count,
-    )
+    return compute_element_deviation_rankings_from_run_params(analytics, run_params)
 
 
 def _element_ranking_rankings_column_config() -> dict:
@@ -1031,6 +1010,48 @@ def _element_ranking_sigma_bins_column_config() -> dict:
     }
 
 
+def _element_ranking_load_judge_breakdown(
+    result: dict,
+    stored_params: tuple,
+    pick_judge: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Embedded tables, on-demand load from sidecars, or compute for one judge."""
+    jd = result.get("judge_discipline_detail", pd.DataFrame())
+    je = result.get("judge_element_detail", pd.DataFrame())
+    if isinstance(jd, pd.DataFrame) and not jd.empty:
+        jd = jd.loc[jd["Judge"] == pick_judge]
+    else:
+        jd = pd.DataFrame()
+    if isinstance(je, pd.DataFrame) and not je.empty:
+        je = je.loc[je["Judge"] == pick_judge]
+    else:
+        je = pd.DataFrame()
+
+    if not jd.empty or not je.empty:
+        return jd, je
+
+    control_tbl = load_control_by_element(result)
+    params = load_ranking_params(result)
+    if control_tbl.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    detail_key = (
+        "element_ranking_judge_detail",
+        run_params_compute_key(stored_params),
+        pick_judge,
+    )
+    if detail_key not in st.session_state:
+        with st.spinner(f"Loading breakdown for {pick_judge}…"):
+            st.session_state[detail_key] = compute_judge_detail_for_identity(
+                get_analytics_safe(),
+                pick_judge,
+                control_tbl,
+                params,
+                **element_ranking_filter_kwargs(stored_params),
+            )
+    return st.session_state[detail_key]
+
+
 def _element_ranking_judge_detail_column_config() -> dict:
     return {
         "Element marks": st.column_config.NumberColumn(
@@ -1110,28 +1131,137 @@ PCS scores and throwouts are not part of this model.
     )
     scope_key = _competition_scope_key(scope_label)
 
-    years = analytics.get_years()
-    col_y1, col_y2, col_d = st.columns(3)
-    with col_y1:
-        start_season = st.selectbox(
-            "Season year from",
-            ["Any"] + years,
-            key="element_ranking_start_season",
+    years = filter_element_ranking_season_years(analytics.get_years())
+    _host_limited = memory_efficient_mode()
+    start_season_year = None
+    end_season_year = None
+    event_start_iso = None
+    event_end_iso = None
+
+    if _host_limited:
+        windows = element_ranking_season_window_options(years)
+        if not windows:
+            st.error("No competition seasons found in the database.")
+            return
+        window_labels = [w["label"] for w in windows]
+        default_ix = 0
+        pick_label = st.selectbox(
+            "Season window",
+            window_labels,
+            index=default_ix,
+            key="element_ranking_season_window",
+            help=(
+                "Heroku allows at most a few season years per run. "
+                "Precomputed caches (if present) load instantly."
+            ),
         )
-        start_season_year = None if start_season == "Any" else start_season
-    with col_y2:
-        end_season = st.selectbox(
-            "Season year to",
-            ["Any"] + years,
-            key="element_ranking_end_season",
+        win = windows[window_labels.index(pick_label)]
+        start_season_year = win["start"]
+        end_season_year = win["end"]
+        st.caption(
+            f"GOE scale from **{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}**. "
+            "Custom event-date narrowing is disabled on this host; use a shorter window "
+            "or run ``python scripts/precompute_element_ranking_cache.py`` to store results "
+            "in the database."
         )
-        end_season_year = None if end_season == "Any" else end_season
+    else:
+        col_y1, col_y2 = st.columns(2)
+        with col_y1:
+            start_season = st.selectbox(
+                "Season year from",
+                ["Any"] + years,
+                key="element_ranking_start_season",
+            )
+            start_season_year = None if start_season == "Any" else start_season
+        with col_y2:
+            end_season = st.selectbox(
+                "Season year to",
+                ["Any"] + years,
+                key="element_ranking_end_season",
+            )
+            end_season_year = None if end_season == "Any" else end_season
+        st.caption(
+            f"Element marks are limited to competitions on or after "
+            f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale)."
+        )
+        use_event_dates = st.checkbox(
+            "Narrow by competition event dates",
+            key="element_ranking_use_event_dates",
+            help=(
+                "Further restrict the date window above the 2018-07-01 minimum. "
+                "Events with neither date are excluded."
+            ),
+        )
+        if use_event_dates:
+            date_min, date_max = analytics.get_competition_event_date_bounds(
+                competition_scope=scope_key,
+            )
+            date_min = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+            date_max = max(date_max, date_min)
+            default_start = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                event_start = st.date_input(
+                    "Event on or after",
+                    value=default_start,
+                    min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                    max_value=date_max,
+                    key="element_ranking_start_date",
+                )
+            with dc2:
+                event_end = st.date_input(
+                    "Event on or before",
+                    value=date_max,
+                    min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
+                    max_value=date_max,
+                    key="element_ranking_end_date",
+                )
+            if event_start > event_end:
+                st.warning("Start date is after end date; results may be empty.")
+            event_start_iso = event_start.isoformat()
+            event_end_iso = event_end.isoformat()
+
+    benchmark_start_season_year = None
+    benchmark_end_season_year = None
+    benchmark_scope_key = COMPETITION_SCOPE_ALL
+    with st.expander("σ̂ benchmark pool", expanded=False):
+        st.caption(
+            "Seasons and competition scope used only to fit intrinsic spread (σ̂). "
+            "Event dates above apply to rankings, not to this pool."
+        )
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            bench_start_pick = st.selectbox(
+                "Season year from",
+                ["Any"] + years,
+                index=0,
+                key="element_ranking_benchmark_start_season",
+            )
+            benchmark_start_season_year = (
+                None if bench_start_pick == "Any" else bench_start_pick
+            )
+        with bc2:
+            bench_end_pick = st.selectbox(
+                "Season year to",
+                ["Any"] + years,
+                index=0,
+                key="element_ranking_benchmark_end_season",
+            )
+            benchmark_end_season_year = (
+                None if bench_end_pick == "Any" else bench_end_pick
+            )
+        bench_scope_label = st.selectbox(
+            "Competition scope",
+            list(_COMPETITION_SCOPE_LABELS),
+            index=0,
+            key="element_ranking_benchmark_competition_scope",
+            help="Officials competition-type filter for σ̂ fitting only.",
+        )
+        benchmark_scope_key = _competition_scope_key(bench_scope_label)
+
+    col_d, col_cache = st.columns([2, 1])
     with col_d:
-        discipline_types = (
-            analytics.qualifying_event_segment_discipline_types()
-            if scope_key != COMPETITION_SCOPE_ALL
-            else analytics.get_discipline_types()
-        )
+        discipline_types = element_ranking_discipline_types(analytics, scope_key)
         discipline_names = [name for _id, name in discipline_types]
         selected_disciplines = st.multiselect(
             "Discipline types",
@@ -1141,51 +1271,16 @@ PCS scores and throwouts are not part of this model.
         discipline_ids = [
             dt_id for dt_id, name in discipline_types if name in selected_disciplines
         ] if selected_disciplines else None
-
-    st.caption(
-        f"Element marks are limited to competitions on or after "
-        f"**{MIN_ELEMENT_MARKING_EVENT_DATE.isoformat()}** (current GOE scale). "
-        "Earlier events are excluded even when season years are wider."
-    )
-    use_event_dates = st.checkbox(
-        "Narrow by competition event dates",
-        key="element_ranking_use_event_dates",
-        help=(
-            "Further restrict the date window above the 2018-07-01 minimum. "
-            "Uses start date when set, else end date. Events with neither date are excluded."
-        ),
-    )
-    event_start_iso = None
-    event_end_iso = None
-    if use_event_dates:
-        date_min, date_max = analytics.get_competition_event_date_bounds(
-            competition_scope=scope_key,
-            discipline_type_ids=discipline_ids,
+        
+    with col_cache:
+        use_precomputed_cache = st.checkbox(
+            "Use precomputed cache",
+            value=True,
+            key="element_ranking_use_cache",
+            help=(
+                "Load cached season×discipline shards and assemble (missing shards are computed)."
+            ),
         )
-        date_min = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
-        date_max = max(date_max, date_min)
-        default_start = max(date_min, MIN_ELEMENT_MARKING_EVENT_DATE)
-        dc1, dc2 = st.columns(2)
-        with dc1:
-            event_start = st.date_input(
-                "Event on or after",
-                value=default_start,
-                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
-                max_value=date_max,
-                key="element_ranking_start_date",
-            )
-        with dc2:
-            event_end = st.date_input(
-                "Event on or before",
-                value=date_max,
-                min_value=MIN_ELEMENT_MARKING_EVENT_DATE,
-                max_value=date_max,
-                key="element_ranking_end_date",
-            )
-        if event_start > event_end:
-            st.warning("Start date is after end date; results may be empty.")
-        event_start_iso = event_start.isoformat()
-        event_end_iso = event_end.isoformat()
 
     st.subheader("Model parameters")
     p1, p2, p3 = st.columns(3)
@@ -1196,7 +1291,10 @@ PCS scores and throwouts are not part of this model.
             value=0,
             step=50,
             key="element_ranking_min_marks",
-            help="Exclude identities with fewer marks after filters.",
+            help=(
+                "Exclude identities with fewer marks after filters. "
+                "Changing only this reuses the last computation (no full re-run)."
+            ),
         )
     with p2:
         floor_sigma = st.number_input(
@@ -1236,6 +1334,9 @@ PCS scores and throwouts are not part of this model.
         int(min_marks),
         float(floor_sigma),
         int(min_bin_count),
+        benchmark_start_season_year,
+        benchmark_end_season_year,
+        benchmark_scope_key,
     )
     _finalize_element_ranking_job()
     job_status = st.session_state.get("element_ranking_status", "idle")
@@ -1262,19 +1363,40 @@ PCS scores and throwouts are not part of this model.
         _cancel_element_ranking_job()
         st.rerun()
 
-    if run_clicked and not job_running:
+    scope_err = validate_element_ranking_scope(
+        start_season_year,
+        end_season_year,
+        available_years=years,
+    )
+    if scope_err:
+        st.error(scope_err)
+
+    if run_clicked and not job_running and not scope_err:
         _stop_element_ranking_process()
         st.session_state.element_ranking_run_params = run_params
         st.session_state.pop("element_ranking_result", None)
         st.session_state.pop("element_ranking_error_msg", None)
+        st.session_state.pop("element_ranking_cache_saved", None)
+        st.session_state.pop("element_ranking_cache_error", None)
         for _k in list(st.session_state.keys()):
             if isinstance(_k, tuple) and _k[:1] == ("element_ranking_judge_detail",):
                 del st.session_state[_k]
+        if use_precomputed_cache:
+            cached = load_cached_rankings(
+                analytics.session, analytics, run_params
+            )
+            if cached is not None:
+                st.session_state.element_ranking_result = cached
+                st.session_state.element_ranking_status = "done"
+                st.success("Loaded precomputed cache for this filter set.")
+                st.rerun()
         if _element_ranking_use_subprocess():
             fd, pickle_path = tempfile.mkstemp(prefix="elem_rank_", suffix=".pkl")
             os.close(fd)
             st.session_state.element_ranking_pickle_path = pickle_path
-            proc = start_ranking_subprocess(run_params, pickle_path)
+            proc = start_ranking_subprocess(
+                run_params, pickle_path, database_url=get_database_url()
+            )
             st.session_state.element_ranking_proc = proc
             st.session_state.element_ranking_status = "running"
             st.rerun()
@@ -1287,6 +1409,17 @@ PCS scores and throwouts are not part of this model.
                     run_params
                 )
             st.session_state.element_ranking_status = "done"
+            ok, err = try_save_element_ranking_cache(
+                analytics.session,
+                analytics,
+                run_params,
+                st.session_state.element_ranking_result,
+            )
+            if ok:
+                st.session_state.element_ranking_cache_saved = True
+                st.session_state.pop("element_ranking_cache_error", None)
+            elif err:
+                st.session_state.element_ranking_cache_error = err
             st.rerun()
 
     if job_running:
@@ -1310,23 +1443,47 @@ PCS scores and throwouts are not part of this model.
         return
 
     stored_params = st.session_state.get("element_ranking_run_params")
-    result = st.session_state.get("element_ranking_result")
-    if result is None:
+    base_result = st.session_state.get("element_ranking_result")
+    if base_result is None:
         st.info(
             "Set filters and click **Run analysis**. "
             "Rankings are not computed automatically so navigation stays responsive."
         )
         return
-    if stored_params != run_params:
+
+    compute_match = (
+        stored_params is not None
+        and run_params_same_sigma_and_ranking_scope(stored_params, run_params)
+    )
+    if not compute_match:
         st.warning(
             "Filters or model parameters changed since the last run. "
             "Click **Run analysis** to refresh results."
         )
         return
 
+    result = apply_min_marks_to_ranking_result(base_result, int(min_marks))
+    if (
+        stored_params is not None
+        and run_params_same_sigma_and_ranking_scope(stored_params, run_params)
+        and int(stored_params[6] or 0) != int(min_marks)
+    ):
+        st.caption(
+            "Minimum marks filter updated — reusing the last σ̂ fit and panel medians."
+        )
+
     if result["error"]:
         st.warning(result["error"])
         return
+
+    cache_err = st.session_state.get("element_ranking_cache_error")
+    if cache_err:
+        st.warning(
+            "Rankings completed but could not be saved for reuse: "
+            f"{cache_err}"
+        )
+    elif st.session_state.get("element_ranking_cache_saved"):
+        st.caption("Results saved for this filter set (will load faster next time).")
 
     st.subheader("Run summary")
     m1, m2, m3, m4 = st.columns(4)
@@ -1353,6 +1510,25 @@ PCS scores and throwouts are not part of this model.
         f"{floor_sigma:.2f}",
         help="Minimum σ̂ used when normalizing marks (see Model parameters).",
     )
+    if uses_separate_benchmark_pool(run_params):
+        bench_start, bench_end = benchmark_season_bounds(run_params)
+        bench_scope = benchmark_competition_scope(run_params)
+        rank_start, rank_end = start_season_year, end_season_year
+        scope_labels = {v: k for k, v in _COMPETITION_SCOPE_LABEL_TO_KEY.items()}
+        bench_scope_label = scope_labels.get(bench_scope, bench_scope)
+        rank_scope_label = scope_labels.get(scope_key, scope_key)
+        st.caption(
+            f"σ̂ benchmark pool: seasons **{bench_start or 'Any'}**–**{bench_end or 'Any'}**, "
+            f"scope **{bench_scope_label}**. "
+            f"Rankings: seasons **{rank_start or 'Any'}**–**{rank_end or 'Any'}**, "
+            f"scope **{rank_scope_label}**"
+            + (
+                f", events **{event_start_iso}**–**{event_end_iso}**"
+                if event_start_iso and event_end_iso
+                else ""
+            )
+            + " (cached shards and σ̂ reused when available)."
+        )
     if result.get("low_memory"):
         st.caption(
             "Memory-saving mode (typical on Heroku): rankings run in a worker process; "
@@ -1468,25 +1644,15 @@ PCS scores and throwouts are not part of this model.
                 f"({bias:+.3f} GOE vs panel median per element mark)."
             )
         _detail_col_config = _element_ranking_judge_detail_column_config()
-        if result.get("low_memory"):
-            control_tbl = load_control_by_element(result)
-            params = load_ranking_params(result)
-            detail_key = ("element_ranking_judge_detail", stored_params, pick_judge)
-            if detail_key not in st.session_state:
-                with st.spinner(f"Loading breakdown for {pick_judge}…"):
-                    st.session_state[detail_key] = compute_judge_detail_for_identity(
-                        get_analytics_safe(),
-                        pick_judge,
-                        control_tbl,
-                        params,
-                        **_element_ranking_filter_kwargs(stored_params),
-                    )
-            jd, je = st.session_state[detail_key]
-        else:
-            jd = result.get("judge_discipline_detail", pd.DataFrame())
-            je = result.get("judge_element_detail", pd.DataFrame())
-            jd = jd.loc[jd["Judge"] == pick_judge] if not jd.empty else jd
-            je = je.loc[je["Judge"] == pick_judge] if not je.empty else je
+        jd, je = _element_ranking_load_judge_breakdown(
+            result, stored_params, pick_judge
+        )
+        if jd.empty and je.empty:
+            st.info(
+                "No discipline / element-type breakdown for this judge. "
+                "If you just deployed, re-run analysis or precompute cache with "
+                "``--with-judge-detail`` for single-season windows."
+            )
         if not jd.empty:
             jd_one = jd.sort_values("Partial marking score")
             st.markdown("**By discipline** (partial score = √(mean(m²)) within that discipline)")

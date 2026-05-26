@@ -425,10 +425,15 @@ def apply_analysis_filters_for_page(
         scope_label = st.session_state.get(
             "element_ranking_competition_scope", "All competitions"
         )
+        from element_deviation_ranking import element_ranking_discipline_names_for_scope
+
+        scope_key = COMPETITION_SCOPE_LABEL_TO_KEY.get(
+            scope_label, COMPETITION_SCOPE_ALL
+        )
         apply_multiselect_param(
             "disciplines",
             "element_ranking_disciplines",
-            _discipline_names_for_scope(analytics, scope_label),
+            element_ranking_discipline_names_for_scope(analytics, scope_key),
         )
         if _apply_date_param("start_date", "element_ranking_start_date") or _apply_date_param(
             "end_date", "element_ranking_end_date"

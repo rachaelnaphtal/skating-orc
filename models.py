@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, ForeignKey, ForeignKeyConstraint, Identity, Index, Integer, Numeric, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Double, ForeignKey, ForeignKeyConstraint, Identity, Index, Integer, LargeBinary, Numeric, PrimaryKeyConstraint, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import OID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import datetime
@@ -131,6 +131,88 @@ class JudgeSummaryCache(Base):
     avg_deviation: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric(8, 4), server_default=text('0'))
     total_excess_anomalies: Mapped[Optional[int]] = mapped_column(Integer, server_default=text('0'))
     computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
+
+
+class ElementDeviationRankingShardCache(Base):
+    """Per-season, per-discipline element marks (assembled into full rankings on read)."""
+
+    __tablename__ = "element_deviation_ranking_shard_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint("shard_key", name="element_deviation_ranking_shard_cache_pkey"),
+        Index(
+            "idx_element_ranking_shard_season_disc",
+            "season_year",
+            "discipline_type_id",
+        ),
+    )
+
+    shard_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    season_year: Mapped[str] = mapped_column(String(8))
+    discipline_type_id: Mapped[int] = mapped_column(Integer)
+    competition_scope: Mapped[str] = mapped_column(String(32))
+    event_start_iso: Mapped[Optional[str]] = mapped_column(String(10))
+    event_end_iso: Mapped[Optional[str]] = mapped_column(String(10))
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    marks_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    n_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
+
+
+class ElementDeviationRankingSigmaCache(Base):
+    """Fitted σ̂ bin parameters for a benchmark mark pool (separate from ranking scope)."""
+
+    __tablename__ = "element_deviation_ranking_sigma_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint("sigma_key", name="element_deviation_ranking_sigma_cache_pkey"),
+        Index(
+            "idx_element_ranking_sigma_seasons",
+            "benchmark_start_season_year",
+            "benchmark_end_season_year",
+        ),
+    )
+
+    sigma_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    benchmark_start_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    benchmark_end_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    scope_json: Mapped[str] = mapped_column(Text)
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    params_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    floor_sigma: Mapped[Optional[float]] = mapped_column(Numeric(8, 4))
+    min_bin_count: Mapped[Optional[int]] = mapped_column(Integer)
+    n_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
+
+
+class ElementDeviationRankingCache(Base):
+    """Precomputed element deviation ranking payloads (pickled, keyed by filter tuple)."""
+
+    __tablename__ = "element_deviation_ranking_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint("cache_key", name="element_deviation_ranking_cache_pkey"),
+        Index(
+            "idx_element_ranking_cache_seasons",
+            "start_season_year",
+            "end_season_year",
+        ),
+    )
+
+    cache_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    start_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    end_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    run_params_json: Mapped[str] = mapped_column(Text)
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    result_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    ctrl_payload: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
+    params_payload: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
+    n_raw_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    n_judges: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
 
 
 t_officials = Table(

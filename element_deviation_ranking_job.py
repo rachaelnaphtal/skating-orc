@@ -24,7 +24,7 @@ import pandas as pd
 
 from analytics import JudgeAnalytics
 from database import get_db_session
-from element_deviation_ranking import compute_element_deviation_rankings
+from element_deviation_ranking import compute_element_deviation_rankings_from_run_params
 
 _REPO_ROOT = Path(__file__).resolve().parent
 
@@ -38,6 +38,9 @@ ElementRankingRunParams = tuple[
     int,
     float,
     int,
+    str | None,
+    str | None,
+    str | None,
 ]
 
 
@@ -59,41 +62,62 @@ class RankingJobHandle:
 
 def execute_element_deviation_rankings(run_params: ElementRankingRunParams) -> dict:
     """Run the full pipeline with a fresh DB session (no Streamlit)."""
-    (
-        start_season_year,
-        end_season_year,
-        discipline_ids_tuple,
-        competition_scope,
-        event_start_iso,
-        event_end_iso,
-        min_marks,
-        floor_sigma,
-        min_bin_count,
-    ) = run_params
-
-    event_start = date.fromisoformat(event_start_iso) if event_start_iso else None
-    event_end = date.fromisoformat(event_end_iso) if event_end_iso else None
-    discipline_type_ids = (
-        list(discipline_ids_tuple) if discipline_ids_tuple else None
-    )
-
     session = get_db_session()
     try:
         analytics = JudgeAnalytics(session)
-        return compute_element_deviation_rankings(
-            analytics,
-            start_season_year=start_season_year,
-            end_season_year=end_season_year,
-            event_start_date=event_start,
-            event_end_date=event_end,
-            discipline_type_ids=discipline_type_ids,
-            competition_scope=competition_scope,
-            min_marks=min_marks,
-            floor_sigma=floor_sigma,
-            min_bin_count=min_bin_count,
+        return compute_element_deviation_rankings_from_run_params(
+            analytics, run_params
         )
     finally:
         session.close()
+
+
+def split_ranking_result_for_storage(
+    result: dict,
+) -> tuple[dict, bytes | None, bytes | None]:
+    """Slim dict for main pickle plus optional sidecar blobs."""
+    out = dict(result)
+    ctrl_bytes = None
+    params_bytes = None
+    ctrl = out.pop("control_by_element", None)
+    if isinstance(ctrl, pd.DataFrame) and not ctrl.empty:
+        ctrl_bytes = pickle.dumps(ctrl, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        ctrl_path = out.pop("control_by_element_path", None) or result.get(
+            "control_by_element_path"
+        )
+        if ctrl_path and os.path.isfile(ctrl_path):
+            with open(ctrl_path, "rb") as f:
+                ctrl_bytes = f.read()
+
+    params = out.pop("params", None)
+    if params:
+        params_bytes = pickle.dumps(params, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        params_path = out.pop("params_path", None) or result.get("params_path")
+        if params_path and os.path.isfile(params_path):
+            with open(params_path, "rb") as f:
+                params_bytes = f.read()
+
+    out.pop("control_by_element_path", None)
+    out.pop("params_path", None)
+    return out, ctrl_bytes, params_bytes
+
+
+def merge_ranking_result_from_storage(
+    main: dict,
+    ctrl_bytes: bytes | None,
+    params_bytes: bytes | None,
+) -> dict:
+    """Restore full in-memory result from main dict + optional blobs."""
+    out = dict(main)
+    if ctrl_bytes:
+        loaded = pickle.loads(ctrl_bytes)
+        if isinstance(loaded, pd.DataFrame):
+            out["control_by_element"] = loaded
+    if params_bytes:
+        out["params"] = pickle.loads(params_bytes)
+    return out
 
 
 def package_element_ranking_result(result: dict, base_pickle_path: str) -> dict:
@@ -101,18 +125,16 @@ def package_element_ranking_result(result: dict, base_pickle_path: str) -> dict:
     Move large objects to sidecar pickles so the parent Streamlit process
     does not load panel medians / σ̂ params when reading the main result.
     """
-    out = dict(result)
-    ctrl = out.pop("control_by_element", None)
-    if isinstance(ctrl, pd.DataFrame) and not ctrl.empty:
+    out, ctrl_bytes, params_bytes = split_ranking_result_for_storage(result)
+    if ctrl_bytes:
         ctrl_path = base_pickle_path + ".ctrl.pkl"
         with open(ctrl_path, "wb") as f:
-            pickle.dump(ctrl, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.write(ctrl_bytes)
         out["control_by_element_path"] = ctrl_path
-    params = out.pop("params", None)
-    if params:
+    if params_bytes:
         params_path = base_pickle_path + ".params.pkl"
         with open(params_path, "wb") as f:
-            pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.write(params_bytes)
         out["params_path"] = params_path
     return out
 
@@ -155,7 +177,10 @@ def _worker_main(run_params: ElementRankingRunParams, out_pickle_path: str) -> N
 
 
 def start_ranking_subprocess(
-    run_params: ElementRankingRunParams, out_pickle_path: str
+    run_params: ElementRankingRunParams,
+    out_pickle_path: str,
+    *,
+    database_url: str | None = None,
 ) -> RankingJobHandle:
     """Start analysis in a child process (does not import the Streamlit app)."""
     import tempfile
@@ -174,10 +199,14 @@ def start_ranking_subprocess(
         "--params",
         params_path,
     ]
+    child_env = os.environ.copy()
+    if database_url:
+        child_env["DATABASE_URL"] = database_url
     popen = subprocess.Popen(
         cmd,
         cwd=str(_REPO_ROOT),
         stdin=subprocess.DEVNULL,
+        env=child_env,
     )
     return RankingJobHandle(
         popen=popen, params_path=params_path, result_path=out_pickle_path

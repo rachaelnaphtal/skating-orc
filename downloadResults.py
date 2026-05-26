@@ -1116,8 +1116,14 @@ def scrape(
             database_obj.commit()
         if write_to_database and competition_id:
             from judge_excess_cache import invalidate_judge_excess_cache_for_competition
+            from element_ranking_cache import (
+                invalidate_element_ranking_cache_for_competition,
+            )
 
             invalidate_judge_excess_cache_for_competition(
+                database_obj.session, competition_id
+            )
+            invalidate_element_ranking_cache_for_competition(
                 database_obj.session, competition_id
             )
             database_obj.commit()

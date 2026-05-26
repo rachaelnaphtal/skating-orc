@@ -8,9 +8,11 @@ Shared by ``scripts/load_judge_rankings.py`` and the Streamlit
 from __future__ import annotations
 
 import gc
+import hashlib
 import os
+from dataclasses import dataclass
 from datetime import date
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -31,9 +33,32 @@ from rule_errors_policy import MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
 
 # Current IJS element GOE scale; exclude earlier competitions from this model.
 MIN_ELEMENT_MARKING_EVENT_DATE = MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
+# Earliest season code offered in UI filters (1819 = 2018–19; matches GOE-scale cutoff).
+MIN_ELEMENT_RANKING_SEASON_YEAR = "1819"
+
+# Discipline types that do not use IJS element GOE marks (PCS-only or non-element formats).
+ELEMENT_RANKING_EXCLUDED_DISCIPLINE_NAMES = frozenset(
+    {
+        "showcase",
+        "theatre on ice",
+        "athlete development",
+        'uncategorized'
+    }
+)
 
 FLOOR_SIGMA = 0.05
 MIN_BIN_COUNT = 30
+# Columns stored per season×discipline shard cache row.
+SHARD_MARK_COLUMNS = (
+    "element_id",
+    "judge_id",
+    "judge_name",
+    "judge_score",
+    "discipline_type_id",
+    "element_type_id",
+)
+# Heroku / low-memory hosts: cap season span (each season is a full DB pass).
+ELEMENT_RANKING_MAX_SEASON_SPAN = 3
 
 
 def memory_efficient_mode() -> bool:
@@ -130,6 +155,51 @@ def load_element_marking_data(
     return df
 
 
+def compute_element_ranking_data_fingerprint(
+    session: Session,
+    analytics: JudgeAnalytics,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+    discipline_type_ids: Optional[Iterable[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+) -> str:
+    """
+    Lightweight scope checksum: changes when element marks are added/updated/deleted
+    in the filtered competition set (used to invalidate DB ranking caches).
+    """
+    where_clause = build_element_mark_filters(
+        start_season_year, end_season_year, discipline_type_ids
+    )
+    # Same join order as ``load_element_marking_data`` (no ``select_from`` — avoids
+    # SQLAlchemy adding a second ``competition`` alias when filtering on Competition).
+    stmt = (
+        select(
+            func.count(ElementScorePerJudge.id),
+            func.coalesce(func.max(ElementScorePerJudge.id), 0),
+            func.count(func.distinct(Competition.id)),
+        )
+        .join(Element, ElementScorePerJudge.element_id == Element.id)
+        .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+        .join(Segment, SkaterSegment.segment_id == Segment.id)
+        .join(Competition, Segment.competition_id == Competition.id)
+    )
+    if where_clause is not None:
+        stmt = stmt.where(where_clause)
+    stmt = analytics._filter_select_competition_scope(stmt, competition_scope)
+    effective_start = MIN_ELEMENT_MARKING_EVENT_DATE
+    if event_start_date is not None:
+        effective_start = max(event_start_date, MIN_ELEMENT_MARKING_EVENT_DATE)
+    stmt = analytics._apply_competition_event_date_range(
+        stmt, effective_start, event_end_date
+    )
+    mark_count, max_mark_id, comp_count = session.execute(stmt).one()
+    payload = f"{int(mark_count or 0)}:{int(max_mark_id or 0)}:{int(comp_count or 0)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def control_scores_by_element(df: pd.DataFrame) -> pd.DataFrame:
     """One row per element_id with panel median GOE (for low-memory judge drill-down)."""
     return (
@@ -154,9 +224,100 @@ def compute_control_scores(df: pd.DataFrame) -> pd.DataFrame:
 def apply_control_scores_from_table(
     df: pd.DataFrame, control_by_element: pd.DataFrame
 ) -> pd.DataFrame:
-    out = df.merge(control_by_element, on="element_id", how="left")
+    if control_by_element.empty or df.empty:
+        return pd.DataFrame()
+    ctrl = control_by_element[["element_id", "control_score"]].copy()
+    ctrl["element_id"] = ctrl["element_id"].astype("int64")
+    out = df.copy()
+    out["element_id"] = out["element_id"].astype("int64")
+    out = out.merge(ctrl, on="element_id", how="inner")
+    if out.empty:
+        return out
     out["error"] = out["judge_score"] - out["control_score"]
     return out
+
+
+def filter_element_ranking_season_years(years: Iterable[str]) -> list[str]:
+    """Season codes from ``MIN_ELEMENT_RANKING_SEASON_YEAR`` onward (newest first)."""
+    return sorted(
+        {
+            str(y).strip()
+            for y in years
+            if y
+            and str(y).strip() >= MIN_ELEMENT_RANKING_SEASON_YEAR
+        },
+        reverse=True,
+    )
+
+
+def element_ranking_season_window_options(years: list[str]) -> list[dict[str, str]]:
+    """Preset season ranges (newest seasons first)."""
+    ys = filter_element_ranking_season_years(years)
+    if not ys:
+        return []
+    options: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for y in ys:
+        key = (y, y)
+        if key not in seen:
+            seen.add(key)
+            options.append(
+                {"label": f"Season {y} only", "start": y, "end": y}
+            )
+    for span in range(2, ELEMENT_RANKING_MAX_SEASON_SPAN + 1):
+        for i in range(0, len(ys) - span + 1):
+            window = ys[i : i + span]
+            start_y, end_y = window[-1], window[0]
+            key = (start_y, end_y)
+            if key in seen:
+                continue
+            seen.add(key)
+            options.append(
+                {
+                    "label": f"Seasons {end_y} through {start_y} ({span} seasons)",
+                    "start": start_y,
+                    "end": end_y,
+                }
+            )
+    return options
+
+
+def _season_index(years_sorted: list[str], season: str) -> int | None:
+    try:
+        return years_sorted.index(season)
+    except ValueError:
+        return None
+
+
+def validate_element_ranking_scope(
+    start_season_year: Optional[str],
+    end_season_year: Optional[str],
+    *,
+    available_years: Optional[list[str]] = None,
+    restrict_host: bool | None = None,
+) -> str | None:
+    """Return an error message when filters are too broad for a memory-limited host."""
+    restrict = memory_efficient_mode() if restrict_host is None else restrict_host
+    if not restrict:
+        return None
+    if not start_season_year or not end_season_year:
+        return (
+            "Choose a **Season window** preset (required on Heroku). "
+            "Open-ended “Any” season is not supported there."
+        )
+    if available_years:
+        ys = sorted({str(y).strip() for y in available_years if y}, reverse=True)
+        i0 = _season_index(ys, str(start_season_year))
+        i1 = _season_index(ys, str(end_season_year))
+        if i0 is None or i1 is None:
+            return "Selected season year is not available in the database."
+        lo, hi = sorted((i0, i1))
+        if hi - lo + 1 > ELEMENT_RANKING_MAX_SEASON_SPAN:
+            return (
+                f"Season window is too wide (max {ELEMENT_RANKING_MAX_SEASON_SPAN} "
+                "season years per run on Heroku). Pick a shorter preset."
+            )
+    return None
 
 
 def load_judge_identity_map(analytics: JudgeAnalytics) -> pd.DataFrame:
@@ -180,7 +341,11 @@ def attach_judge_identities(df: pd.DataFrame, analytics: JudgeAnalytics) -> pd.D
     id_map = load_judge_identity_map(analytics)
     if id_map.empty:
         raise RuntimeError("No judges found for identity mapping.")
-    out = df.merge(id_map, on="judge_id", how="left")
+    id_map = id_map[["judge_id", "judge_name", "judge_ids"]].drop_duplicates("judge_id")
+    out = df.copy()
+    if "judge_name" in out.columns or "judge_ids" in out.columns:
+        out = out.drop(columns=["judge_name", "judge_ids"], errors="ignore")
+    out = out.merge(id_map, on="judge_id", how="left")
     missing = out["judge_name"].isna().sum()
     if missing:
         out["judge_name"] = out["judge_name"].fillna(
@@ -386,16 +551,23 @@ def compute_judge_discipline_breakdown(
     disc = (
         disc_base.groupby(["judge_name", "discipline"], sort=False)
         .agg(
-            **{
-                "Element marks": ("m_pj", "size"),
-                "Partial marking score": ("m_pj", _partial_marking_score),
-                "Mean GOE bias": ("error", "mean"),
-                "Mean |error|": ("error", lambda s: float(s.abs().mean())),
-                "Mean σ̂": ("sigma_hat", "mean"),
-            }
+            element_marks=("m_pj", "size"),
+            partial_marking_score=("m_pj", _partial_marking_score),
+            mean_goe_bias=("error", "mean"),
+            mean_abs_error=("error", lambda s: float(s.abs().mean())),
+            mean_sigma=("sigma_hat", "mean"),
         )
         .reset_index()
-        .rename(columns={"judge_name": "Judge"})
+        .rename(
+            columns={
+                "judge_name": "Judge",
+                "element_marks": "Element marks",
+                "partial_marking_score": "Partial marking score",
+                "mean_goe_bias": "Mean GOE bias",
+                "mean_abs_error": "Mean |error|",
+                "mean_sigma": "Mean σ̂",
+            }
+        )
     )
 
     elem_base = w.dropna(subset=["discipline", "element_type"])
@@ -404,15 +576,22 @@ def compute_judge_discipline_breakdown(
             ["judge_name", "discipline", "element_type"], sort=False
         )
         .agg(
-            **{
-                "Element marks": ("m_pj", "size"),
-                "Partial marking score": ("m_pj", _partial_marking_score),
-                "Mean GOE bias": ("error", "mean"),
-                "Mean |error|": ("error", lambda s: float(s.abs().mean())),
-            }
+            element_marks=("m_pj", "size"),
+            partial_marking_score=("m_pj", _partial_marking_score),
+            mean_goe_bias=("error", "mean"),
+            mean_abs_error=("error", lambda s: float(s.abs().mean())),
         )
         .reset_index()
-        .rename(columns={"judge_name": "Judge", "element_type": "Element type"})
+        .rename(
+            columns={
+                "judge_name": "Judge",
+                "element_type": "Element type",
+                "element_marks": "Element marks",
+                "partial_marking_score": "Partial marking score",
+                "mean_goe_bias": "Mean GOE bias",
+                "mean_abs_error": "Mean |error|",
+            }
+        )
     )
     return disc, elem.sort_values(
         ["Judge", "Partial marking score"], ascending=[True, False]
@@ -517,6 +696,171 @@ def apply_min_marks_filter(marking: pd.DataFrame, min_marks: int) -> pd.DataFram
     return kept
 
 
+def unpack_element_ranking_run_params(run_params: tuple) -> tuple:
+    """Normalize 9-, 11-, or 12-tuples to ``(…, bench_start, bench_end, bench_scope)``."""
+    if len(run_params) >= 12:
+        return run_params[:12]
+    if len(run_params) >= 11:
+        return (*run_params[:11], None)
+    base = run_params[:9] if len(run_params) >= 9 else run_params
+    return (*base, None, None, None)
+
+
+def benchmark_season_bounds(run_params: tuple) -> tuple[str | None, str | None]:
+    """Season window for σ̂ fitting (``None`` = any season)."""
+    rp = unpack_element_ranking_run_params(run_params)
+    return rp[9], rp[10]
+
+
+def benchmark_competition_scope(run_params: tuple) -> str:
+    """Competition scope for σ̂ fitting (defaults to all competitions)."""
+    rp = unpack_element_ranking_run_params(run_params)
+    if rp[11]:
+        return str(rp[11])
+    return COMPETITION_SCOPE_ALL
+
+
+def _mark_scope_identity(scope: dict[str, Any]) -> tuple:
+    disc = scope.get("discipline_type_ids")
+    return (
+        scope.get("start_season_year"),
+        scope.get("end_season_year"),
+        tuple(disc) if disc else None,
+        scope.get("competition_scope"),
+    )
+
+
+def uses_separate_benchmark_pool(run_params: tuple) -> bool:
+    rp = unpack_element_ranking_run_params(run_params)
+    if rp[4] or rp[5]:
+        return True
+    rank = ranking_scope_kwargs_from_run_params(run_params)
+    bench = benchmark_scope_kwargs_from_run_params(run_params)
+    return _mark_scope_identity(rank) != _mark_scope_identity(bench)
+
+
+def run_params_ranking_compute_key(run_params: tuple) -> tuple:
+    """Ranking mark scope (excludes minimum marks and benchmark seasons)."""
+    rp = unpack_element_ranking_run_params(run_params)
+    return (rp[0], rp[1], rp[2], rp[3], rp[4], rp[5], rp[7], rp[8])
+
+
+def run_params_benchmark_compute_key(run_params: tuple) -> tuple:
+    """σ̂ benchmark pool scope (no event dates; excludes minimum marks)."""
+    bs, be = benchmark_season_bounds(run_params)
+    rp = unpack_element_ranking_run_params(run_params)
+    return (bs, be, rp[2], benchmark_competition_scope(run_params), rp[7], rp[8])
+
+
+def run_params_compute_key(run_params: tuple) -> tuple:
+    """Backward-compatible alias for ranking scope identity."""
+    return run_params_ranking_compute_key(run_params)
+
+
+def run_params_same_sigma_and_ranking_scope(a: tuple, b: tuple) -> bool:
+    return (
+        run_params_ranking_compute_key(a) == run_params_ranking_compute_key(b)
+        and run_params_benchmark_compute_key(a) == run_params_benchmark_compute_key(b)
+    )
+
+
+def widest_benchmark_season_window(years: list[str]) -> tuple[str | None, str | None]:
+    """Largest allowed span (newest ``ELEMENT_RANKING_MAX_SEASON_SPAN`` seasons)."""
+    ys = filter_element_ranking_season_years(years)
+    if not ys:
+        return None, None
+    span = min(ELEMENT_RANKING_MAX_SEASON_SPAN, len(ys))
+    window = ys[:span]
+    return window[-1], window[0]
+
+
+def ranking_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:
+    rp = unpack_element_ranking_run_params(run_params)
+    return {
+        "start_season_year": rp[0],
+        "end_season_year": rp[1],
+        "event_start_date": date.fromisoformat(rp[4]) if rp[4] else None,
+        "event_end_date": date.fromisoformat(rp[5]) if rp[5] else None,
+        "discipline_type_ids": list(rp[2]) if rp[2] else None,
+        "competition_scope": rp[3],
+    }
+
+
+def benchmark_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:
+    bs, be = benchmark_season_bounds(run_params)
+    rp = unpack_element_ranking_run_params(run_params)
+    return {
+        "start_season_year": bs,
+        "end_season_year": be,
+        "event_start_date": None,
+        "event_end_date": None,
+        "discipline_type_ids": list(rp[2]) if rp[2] else None,
+        "competition_scope": benchmark_competition_scope(run_params),
+    }
+
+
+def fit_sigma_params_from_marks(
+    df: pd.DataFrame, *, min_bin_count: int = MIN_BIN_COUNT
+) -> dict:
+    if df.empty:
+        return {}
+    work = df.copy()
+    if "control_score" not in work.columns:
+        work = compute_control_scores(work)
+    return fit_sigma_discrete(work, min_bin_count=min_bin_count)
+
+
+def _filter_judge_detail_by_names(
+    jd: pd.DataFrame, je: pd.DataFrame, judge_names: set[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if jd is not None and not jd.empty and "Judge" in jd.columns:
+        jd = jd.loc[jd["Judge"].isin(judge_names)]
+    else:
+        jd = pd.DataFrame()
+    if je is not None and not je.empty and "Judge" in je.columns:
+        je = je.loc[je["Judge"].isin(judge_names)]
+    else:
+        je = pd.DataFrame()
+    return jd, je
+
+
+def apply_min_marks_to_ranking_result(
+    result: dict[str, Any], min_marks: int
+) -> dict[str, Any]:
+    """
+    Re-apply the per-judge minimum marks threshold without recomputing σ̂ or panel medians.
+
+    Requires ``judge_summary_all`` from a prior run (or legacy unfiltered tables).
+    """
+    judge_all = result.get("judge_summary_all")
+    if not isinstance(judge_all, pd.DataFrame) or judge_all.empty:
+        return result
+
+    min_marks = int(min_marks or 0)
+    judge_summary = apply_min_marks_filter(judge_all.copy(), min_marks)
+    kept_names = set(judge_summary["judge_name"])
+    out = dict(result)
+    out["marking"] = build_ranking_display_table(judge_summary)
+    out["summary"] = marking_score_summary(judge_summary)
+
+    jd_all = result.get("judge_discipline_detail_all")
+    je_all = result.get("judge_element_detail_all")
+    if isinstance(jd_all, pd.DataFrame) and not jd_all.empty:
+        out["judge_discipline_detail"], out["judge_element_detail"] = (
+            _filter_judge_detail_by_names(jd_all, je_all, kept_names)
+        )
+    elif min_marks > 0:
+        jd, je = result.get("judge_discipline_detail"), result.get("judge_element_detail")
+        out["judge_discipline_detail"], out["judge_element_detail"] = (
+            _filter_judge_detail_by_names(
+                jd if isinstance(jd, pd.DataFrame) else pd.DataFrame(),
+                je if isinstance(je, pd.DataFrame) else pd.DataFrame(),
+                kept_names,
+            )
+        )
+    return out
+
+
 def marking_score_summary(judge_summary: pd.DataFrame) -> pd.DataFrame:
     if judge_summary.empty:
         return pd.DataFrame()
@@ -527,6 +871,208 @@ def marking_score_summary(judge_summary: pd.DataFrame) -> pd.DataFrame:
             "Value": [round(float(v), 6) if pd.notna(v) else None for v in desc.values],
         }
     )
+
+
+@dataclass(frozen=True)
+class ElementRankingShard:
+    """One season × one discipline slice of element marks."""
+
+    season_year: str
+    discipline_type_id: int
+    competition_scope: str
+    event_start_iso: str | None = None
+    event_end_iso: str | None = None
+
+
+def season_years_in_run_range(
+    start_season_year: Optional[str],
+    end_season_year: Optional[str],
+    available_years: list[str],
+) -> list[str]:
+    ys = filter_element_ranking_season_years(available_years)
+    if not start_season_year and not end_season_year:
+        return ys
+    out: list[str] = []
+    for y in ys:
+        if start_season_year and y < str(start_season_year):
+            continue
+        if end_season_year and y > str(end_season_year):
+            continue
+        out.append(y)
+    return out
+
+
+def discipline_uses_element_scoring(discipline_name: str) -> bool:
+    return discipline_name.strip().lower() not in ELEMENT_RANKING_EXCLUDED_DISCIPLINE_NAMES
+
+
+def element_ranking_discipline_types(
+    analytics: JudgeAnalytics, competition_scope: str
+) -> list[tuple[int, str]]:
+    """Discipline types that participate in element GOE scoring (excludes Showcase, etc.)."""
+    if competition_scope != COMPETITION_SCOPE_ALL:
+        types = analytics.qualifying_event_segment_discipline_types()
+    else:
+        types = analytics.get_discipline_types()
+    return [
+        (int(dt_id), name)
+        for dt_id, name in types
+        if name and discipline_uses_element_scoring(name)
+    ]
+
+
+def element_ranking_discipline_names_for_scope(
+    analytics: JudgeAnalytics, competition_scope: str
+) -> list[str]:
+    return [name for _dt_id, name in element_ranking_discipline_types(analytics, competition_scope)]
+
+
+def discipline_ids_for_element_ranking(
+    analytics: JudgeAnalytics,
+    discipline_type_ids: Optional[list[int]],
+    competition_scope: str,
+) -> list[int]:
+    allowed = {
+        dt_id for dt_id, _ in element_ranking_discipline_types(analytics, competition_scope)
+    }
+    if discipline_type_ids:
+        return [int(d) for d in discipline_type_ids if int(d) in allowed]
+    return sorted(allowed)
+
+
+def iter_element_ranking_shards(
+    analytics: JudgeAnalytics,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    discipline_type_ids: Optional[list[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+) -> list[ElementRankingShard]:
+    years = season_years_in_run_range(
+        start_season_year,
+        end_season_year,
+        [str(y) for y in analytics.get_years()],
+    )
+    disc_ids = discipline_ids_for_element_ranking(
+        analytics, discipline_type_ids, competition_scope
+    )
+    event_start_iso = event_start_date.isoformat() if event_start_date else None
+    event_end_iso = event_end_date.isoformat() if event_end_date else None
+    return [
+        ElementRankingShard(
+            season_year=sy,
+            discipline_type_id=dt_id,
+            competition_scope=competition_scope,
+            event_start_iso=event_start_iso,
+            event_end_iso=event_end_iso,
+        )
+        for sy in years
+        for dt_id in disc_ids
+    ]
+
+
+def finish_element_deviation_rankings_from_marks(
+    analytics: JudgeAnalytics,
+    df: pd.DataFrame,
+    *,
+    min_marks: int = 0,
+    floor_sigma: float = FLOOR_SIGMA,
+    min_bin_count: int = MIN_BIN_COUNT,
+    include_judge_detail: bool | None = None,
+    params: dict | None = None,
+    sigma_reference_df: pd.DataFrame | None = None,
+    benchmark_start_season_year: str | None = None,
+    benchmark_end_season_year: str | None = None,
+    benchmark_competition_scope_key: str | None = None,
+) -> dict:
+    """Judge summaries and tables from ranking-scope marks; optional pre-fitted σ̂."""
+    disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
+    elem_map = {int(i): n for i, n in analytics.get_element_types()}
+
+    if df.empty:
+        return {
+            "marking": pd.DataFrame(),
+            "summary": pd.DataFrame(),
+            "sigma_bins": pd.DataFrame(),
+            "judge_discipline_detail": pd.DataFrame(),
+            "judge_element_detail": pd.DataFrame(),
+            "control_by_element": pd.DataFrame(),
+            "params": {},
+            "n_raw_marks": 0,
+            "n_sigma_buckets": 0,
+            "error": "No element score rows found for the selected filters.",
+            "low_memory": memory_efficient_mode(),
+        }
+
+    low_memory = (
+        include_judge_detail is False
+        if include_judge_detail is not None
+        else memory_efficient_mode()
+    )
+
+    n_raw = len(df)
+    if "judge_name" not in df.columns:
+        df = attach_judge_identities(df, analytics)
+    control_by_element = control_scores_by_element(df)
+    df = compute_control_scores(df)
+    if params is None:
+        params = fit_sigma_discrete(df, min_bin_count=min_bin_count)
+    work = annotate_normalized_marks(df, params, floor_sigma=floor_sigma)
+    judge_summary_all = compute_judge_summaries(work)
+    judge_summary = apply_min_marks_filter(judge_summary_all.copy(), min_marks)
+    marking = build_ranking_display_table(judge_summary)
+    summary = marking_score_summary(judge_summary)
+    bins_df = sigma_reference_df if sigma_reference_df is not None else df
+    if "control_score" not in bins_df.columns and not bins_df.empty:
+        bins_df = compute_control_scores(bins_df.copy())
+    sigma_bins = build_sigma_bins_dataframe(
+        bins_df,
+        params,
+        disc_map,
+        elem_map,
+        min_bin_count=min_bin_count,
+    )
+
+    if low_memory:
+        judge_discipline_detail = pd.DataFrame()
+        judge_element_detail = pd.DataFrame()
+        judge_discipline_detail_all = pd.DataFrame()
+        judge_element_detail_all = pd.DataFrame()
+    else:
+        judge_discipline_detail_all, judge_element_detail_all = (
+            compute_judge_discipline_breakdown(work, disc_map, elem_map)
+        )
+        kept_names = set(judge_summary["judge_name"])
+        judge_discipline_detail, judge_element_detail = _filter_judge_detail_by_names(
+            judge_discipline_detail_all,
+            judge_element_detail_all,
+            kept_names,
+        )
+
+    del df, work
+    gc.collect()
+
+    return {
+        "marking": marking,
+        "summary": summary,
+        "sigma_bins": sigma_bins,
+        "judge_summary_all": judge_summary_all,
+        "judge_discipline_detail": judge_discipline_detail,
+        "judge_element_detail": judge_element_detail,
+        "judge_discipline_detail_all": judge_discipline_detail_all,
+        "judge_element_detail_all": judge_element_detail_all,
+        "control_by_element": control_by_element if low_memory else pd.DataFrame(),
+        "params": params,
+        "n_raw_marks": n_raw,
+        "n_sigma_buckets": len(params),
+        "error": None,
+        "low_memory": low_memory,
+        "benchmark_start_season_year": benchmark_start_season_year,
+        "benchmark_end_season_year": benchmark_end_season_year,
+        "benchmark_competition_scope": benchmark_competition_scope_key,
+    }
 
 
 def compute_judge_detail_for_identity(
@@ -591,12 +1137,25 @@ def compute_element_deviation_rankings(
     marking, summary, sigma_bins, judge_discipline_detail, judge_element_detail,
     params, n_raw_marks, n_sigma_buckets, error (str|None).
     """
-    session = analytics.session
-    disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
-    elem_map = {int(i): n for i, n in analytics.get_element_types()}
+    scope_err = validate_element_ranking_scope(start_season_year, end_season_year)
+    if scope_err:
+        return {
+            "marking": pd.DataFrame(),
+            "summary": pd.DataFrame(),
+            "sigma_bins": pd.DataFrame(),
+            "judge_discipline_detail": pd.DataFrame(),
+            "judge_element_detail": pd.DataFrame(),
+            "control_by_element": pd.DataFrame(),
+            "params": {},
+            "n_raw_marks": 0,
+            "n_sigma_buckets": 0,
+            "error": scope_err,
+            "low_memory": memory_efficient_mode(),
+        }
 
-    df = load_element_marking_data(
-        session,
+    from element_ranking_cache import run_element_deviation_ranking_pipeline
+
+    return run_element_deviation_ranking_pipeline(
         analytics,
         start_season_year=start_season_year,
         end_season_year=end_season_year,
@@ -604,69 +1163,42 @@ def compute_element_deviation_rankings(
         event_end_date=event_end_date,
         discipline_type_ids=discipline_type_ids,
         competition_scope=competition_scope,
-    )
-    if df.empty:
-        return {
-            "marking": pd.DataFrame(),
-            "summary": pd.DataFrame(),
-            "sigma_bins": pd.DataFrame(),
-            "judge_discipline_detail": pd.DataFrame(),
-            "judge_element_detail": pd.DataFrame(),
-            "params": {},
-            "n_raw_marks": 0,
-            "n_sigma_buckets": 0,
-            "error": "No element score rows found for the selected filters.",
-        }
-
-    low_memory = (
-        include_judge_detail is False
-        if include_judge_detail is not None
-        else memory_efficient_mode()
-    )
-
-    n_raw = len(df)
-    control_by_element = control_scores_by_element(df)
-    df = compute_control_scores(df)
-    df = attach_judge_identities(df, analytics)
-    params = fit_sigma_discrete(df, min_bin_count=min_bin_count)
-    work = annotate_normalized_marks(df, params, floor_sigma=floor_sigma)
-    judge_summary = compute_judge_summaries(work)
-    judge_summary = apply_min_marks_filter(judge_summary, min_marks)
-    marking = build_ranking_display_table(judge_summary)
-    summary = marking_score_summary(judge_summary)
-    sigma_bins = build_sigma_bins_dataframe(
-        df,
-        params,
-        disc_map,
-        elem_map,
+        min_marks=min_marks,
+        floor_sigma=floor_sigma,
         min_bin_count=min_bin_count,
+        include_judge_detail=include_judge_detail,
     )
 
-    if low_memory:
-        judge_discipline_detail = pd.DataFrame()
-        judge_element_detail = pd.DataFrame()
-    else:
-        judge_discipline_detail, judge_element_detail = (
-            compute_judge_discipline_breakdown(
-                work.loc[work["judge_name"].isin(judge_summary["judge_name"])],
-                disc_map,
-                elem_map,
-            )
-        )
 
-    del df, work
-    gc.collect()
+def compute_element_deviation_rankings_from_run_params(
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    *,
+    include_judge_detail: bool | None = None,
+    cache_only: bool = False,
+    persist_shards: bool = True,
+) -> dict:
+    """Full pipeline from a 9-, 11-, or 12-element ``run_params`` tuple."""
+    rp = unpack_element_ranking_run_params(run_params)
+    bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
+    rank_scope = ranking_scope_kwargs_from_run_params(run_params)
+    from element_ranking_cache import run_element_deviation_ranking_pipeline
 
-    return {
-        "marking": marking,
-        "summary": summary,
-        "sigma_bins": sigma_bins,
-        "judge_discipline_detail": judge_discipline_detail,
-        "judge_element_detail": judge_element_detail,
-        "control_by_element": control_by_element if low_memory else pd.DataFrame(),
-        "params": params,
-        "n_raw_marks": n_raw,
-        "n_sigma_buckets": len(params),
-        "error": None,
-        "low_memory": low_memory,
-    }
+    return run_element_deviation_ranking_pipeline(
+        analytics,
+        start_season_year=rank_scope["start_season_year"],
+        end_season_year=rank_scope["end_season_year"],
+        event_start_date=rank_scope["event_start_date"],
+        event_end_date=rank_scope["event_end_date"],
+        discipline_type_ids=rank_scope["discipline_type_ids"],
+        competition_scope=rank_scope["competition_scope"],
+        min_marks=int(rp[6] or 0),
+        floor_sigma=float(rp[7]),
+        min_bin_count=int(rp[8]),
+        include_judge_detail=include_judge_detail,
+        benchmark_start_season_year=bench_scope["start_season_year"],
+        benchmark_end_season_year=bench_scope["end_season_year"],
+        benchmark_competition_scope_key=bench_scope["competition_scope"],
+        cache_only=cache_only,
+        persist_shards=persist_shards,
+    )

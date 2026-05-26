@@ -5,14 +5,20 @@ Shared Streamlit → JudgeAnalytics session helpers for Home (analysis_app) and 
 import streamlit as st
 from sqlalchemy import text
 
-from database import get_db_session, test_connection
+from database import (
+    ensure_database_for_streamlit,
+    get_db_session,
+    resolve_database_url,
+    test_connection,
+)
 from analytics import JudgeAnalytics
 
 
 @st.cache_resource
-def get_analytics():
+def get_analytics(_database_url: str, _database_source: str):
     try:
-        with st.spinner("Connecting to database..."):
+        ensure_database_for_streamlit()
+        with st.spinner("Connecting to database…"):
             connection_test = test_connection()
             if connection_test is not True:
                 st.error(f"Database connection failed: {connection_test[1]}")
@@ -53,8 +59,16 @@ def get_analytics():
 
 def get_analytics_safe():
     """Safely get analytics object with error handling and retry logic."""
+    ensure_database_for_streamlit()
+    db_url, db_source = resolve_database_url()
+    cached_url = st.session_state.get("_analytics_db_url")
+    if cached_url != db_url and "analytics" in st.session_state:
+        del st.session_state["analytics"]
+        st.cache_resource.clear()
+
     if "analytics" not in st.session_state:
-        st.session_state.analytics = get_analytics()
+        st.session_state._analytics_db_url = db_url
+        st.session_state.analytics = get_analytics(db_url, db_source)
 
     try:
         analytics = st.session_state.analytics
@@ -63,7 +77,10 @@ def get_analytics_safe():
     except Exception:
         st.warning("Database connection lost, reconnecting...")
         if "analytics" in st.session_state:
-            del st.session_state.analytics
+            del st.session_state["analytics"]
         st.cache_resource.clear()
-        st.session_state.analytics = get_analytics()
+        ensure_database_for_streamlit()
+        db_url, db_source = resolve_database_url()
+        st.session_state._analytics_db_url = db_url
+        st.session_state.analytics = get_analytics(db_url, db_source)
         return st.session_state.analytics
