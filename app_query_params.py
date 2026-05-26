@@ -218,8 +218,19 @@ def slug_map_for_labels(labels: Iterable[str]) -> dict[str, str]:
     return out
 
 
+def _query_param_list_matches(key: str, values: list[str]) -> bool:
+    """True when the URL list param matches ``values`` (order-sensitive)."""
+    current = qp_get_list(key)
+    expected = [str(v) for v in values]
+    return current == expected
+
+
 def sync_query_params(**params: Any) -> None:
-    """Write non-empty params to the browser URL; omit None/empty."""
+    """Write non-empty params to the browser URL; omit None/empty.
+
+    Skips assignments when the URL already matches so ``st.download_button``
+    clicks are not interrupted by a no-op query-string update + extra rerun.
+    """
     import streamlit as st
 
     for key, value in params.items():
@@ -228,9 +239,15 @@ def sync_query_params(**params: Any) -> None:
                 del st.query_params[key]
             continue
         if isinstance(value, (list, tuple)):
-            st.query_params[key] = ",".join(str(v) for v in value)
+            values = [str(v) for v in value]
+            if _query_param_list_matches(key, values):
+                continue
+            st.query_params[key] = ",".join(values)
         else:
-            st.query_params[key] = str(value)
+            new = str(value)
+            if qp_get(key) == new:
+                continue
+            st.query_params[key] = new
 
 
 def render_query_help(lines: list[str]) -> None:
@@ -253,6 +270,7 @@ ANALYSIS_PAGE_SLUG_TO_LABEL = {
     "competition": "Competition Analysis",
     "load-competition": "Load Competition",
     "element-deviation-ranking": "Element Deviation Ranking Analysis",
+    "pcs-quality": "PCS Quality Analysis",
 }
 ANALYSIS_LABEL_TO_PAGE_SLUG = {
     v: k for k, v in ANALYSIS_PAGE_SLUG_TO_LABEL.items()
@@ -365,6 +383,7 @@ def _scope_session_key_for_page(page: str) -> str | None:
         "Rule Errors Analysis": "rule_errors_qualifying",
         "Panel size benchmarks": "panel_benchmarks_scope",
         "Element Deviation Ranking Analysis": "element_ranking_competition_scope",
+        "PCS Quality Analysis": "pcs_quality_competition_scope",
     }.get(page)
 
 
@@ -404,6 +423,46 @@ def apply_analysis_filters_for_page(
             import streamlit as st
 
             st.session_state["individual_judge_use_event_dates"] = True
+
+    elif page == "PCS Quality Analysis":
+        apply_choice_param(
+            "competition_scope",
+            "pcs_quality_competition_scope",
+            COMPETITION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=COMPETITION_SCOPE_SLUG_TO_LABEL,
+        )
+        start_sy = qp_get("start_season")
+        end_sy = qp_get("end_season")
+        if start_sy:
+            import streamlit as st
+
+            st.session_state["pcs_quality_start_season"] = start_sy
+        if end_sy:
+            import streamlit as st
+
+            st.session_state["pcs_quality_end_season"] = end_sy
+        if _apply_date_param("start_date", "pcs_quality_start_date") or _apply_date_param(
+            "end_date", "pcs_quality_end_date"
+        ):
+            import streamlit as st
+
+            st.session_state["pcs_quality_use_event_dates"] = True
+        min_pcs = qp_get("min_pcs_marks")
+        if min_pcs:
+            try:
+                import streamlit as st
+
+                st.session_state["pcs_quality_min_pcs_marks"] = int(min_pcs)
+            except ValueError:
+                pass
+        scope_label = st.session_state.get(
+            "pcs_quality_competition_scope", "All competitions"
+        )
+        apply_multiselect_param(
+            "disciplines",
+            "pcs_quality_disciplines",
+            _discipline_names_for_scope(analytics, scope_label),
+        )
 
     elif page == "Element Deviation Ranking Analysis":
         apply_choice_param(
@@ -534,6 +593,29 @@ def sync_analysis_app_query_params(page: str) -> None:
                 params["start_date"] = start.isoformat()
             if end is not None:
                 params["end_date"] = end.isoformat()
+
+    elif page == "PCS Quality Analysis":
+        scope_ss = st.session_state.get("pcs_quality_competition_scope")
+        if scope_ss:
+            params["competition_scope"] = COMPETITION_SCOPE_LABEL_TO_SLUG.get(scope_ss)
+        start_sy = st.session_state.get("pcs_quality_start_season")
+        if start_sy and start_sy != "Any":
+            params["start_season"] = str(start_sy)
+        end_sy = st.session_state.get("pcs_quality_end_season")
+        if end_sy and end_sy != "Any":
+            params["end_season"] = str(end_sy)
+        if st.session_state.get("pcs_quality_use_event_dates"):
+            start = st.session_state.get("pcs_quality_start_date")
+            end = st.session_state.get("pcs_quality_end_date")
+            if start is not None:
+                params["start_date"] = start.isoformat()
+            if end is not None:
+                params["end_date"] = end.isoformat()
+        min_pcs = st.session_state.get("pcs_quality_min_pcs_marks")
+        if min_pcs and int(min_pcs) > 0:
+            params["min_pcs_marks"] = int(min_pcs)
+        disc = st.session_state.get("pcs_quality_disciplines")
+        params["disciplines"] = disc if disc else None
 
     elif page == "Element Deviation Ranking Analysis":
         scope_ss = st.session_state.get("element_ranking_competition_scope")

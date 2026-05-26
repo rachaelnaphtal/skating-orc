@@ -112,6 +112,25 @@ def _competition_scope_key(scope_label: str) -> str:
     return _COMPETITION_SCOPE_LABEL_TO_KEY.get(scope_label, COMPETITION_SCOPE_ALL)
 
 
+def _streamlit_download(
+    label: str,
+    *,
+    data: bytes,
+    file_name: str,
+    mime: str,
+    key: str,
+) -> None:
+    """Download without app rerun (avoids races with URL sync and large reports)."""
+    st.download_button(
+        label=label,
+        data=data,
+        file_name=file_name,
+        mime=mime,
+        key=key,
+        on_click="ignore",
+    )
+
+
 @st.cache_data(ttl=300)
 def _cached_pooled_cross_judge_metrics(
     score_type: str,
@@ -173,6 +192,7 @@ _DOWNLOAD_RESULTS_PY = _os.path.join(_REPO_ROOT, "downloadResults.py")
 _nav_pages = [
     "Individual Judge Analysis",
     "Cross-Judge Benchmarking",
+    "PCS Quality Analysis",
     "Element Deviation Ranking Analysis",
     "Temporal Trend Analysis",
     "Panel size benchmarks",
@@ -1130,6 +1150,642 @@ def _element_ranking_judge_detail_column_config() -> dict:
     }
 
 
+def _pcs_quality_methodology_text(topic: str) -> str:
+    """Markdown for the PCS quality methodology dropdown."""
+    texts = {
+        "Overview": """
+**Data** — PCS marks from competitions with event date on or after **2022-07-01**.
+Judges linked to the same directory official are one identity (same as other pages).
+
+**Per skater × segment × PCS component** — Panel reference is the **median** of all
+judges’ PCS on that line. Metrics are computed separately for each judge identity,
+discipline, and PCS component (SS, TR, PE, CO, etc.) present in the **filtered** window.
+
+**Component set per discipline** — For each discipline, only PCS components that
+appear somewhere in the filtered marks are used (not a fixed historical list).
+
+**Minimum PCS marks** — Optional filter: exclude judge identities with fewer than
+*N* PCS marks in the filtered range (each skater × component line counts as one mark).
+
+**Four alignment measures (per judge × discipline × PCS component)** — Each is scaled
+to 0–1 (higher = closer to the panel), then combined:
+
+| Measure | Weight | What it captures |
+| --- | --- | --- |
+| Ranking correlation | 40% | Per segment, does skater rank order match the panel? (mean across segments) |
+| Bias | 30% | Are your PCS systematically high or low vs the panel? |
+| Differentiation | 20% | Is your spread of marks similar to the panel’s spread? |
+| Consistency | 10% | Is skater-to-skater bias stable (not erratic)? |
+
+""",
+        "Ranking correlation score": """
+For one judge, one discipline, one PCS component: each **segment** (short program,
+free skate, etc.) is one **event**. Within that segment, rank all skaters on that
+component and compute Spearman **ρ** between the judge’s ranks and panel medians
+(needs at least **3 skaters** in the segment).
+
+Per segment:
+
+``segment_ranking = max(0, (ρ − 0.7) / 0.3)``  
+
+**Ranking sub-score** = equal-weight mean of ``segment_ranking`` over segments the
+judge marked (segments with &lt;3 skaters are skipped). **Spearman ρ** in the detail
+table is the mean ρ across those segments. Bias, differentiation, and consistency
+still use all PCS marks in the component.
+""",
+        "Bias score": """
+Per skater-line: ``bias = judge_PCS − panel_median_PCS``.
+
+``average_bias = mean(bias)`` over skater-lines in that judge × discipline × component.
+
+``bias_score = max(0, 1 − |average_bias| / 0.5)``  
+
+0 average bias → 1; |average bias| ≥ 0.5 → 0.
+""",
+        "Differentiation score": """
+Compare spread of judge PCS vs spread of panel medians across skater-lines (same slice).
+
+``judge_variance = variance(judge_PCS)``  
+``panel_variance = variance(panel_median)``  
+
+``diff_score = max(0, min(1, 1 − |log(judge_variance / panel_variance)|))``  
+
+1 when variances match; penalizes much wider or narrower marking than the panel.
+""",
+        "Consistency score": """
+Per skater-line: ``bias = judge_PCS − panel_median_PCS``.
+
+``consistency_score = max(0, 1 − std_dev(bias) / 0.75)``  
+
+Low spread of bias across skaters → high score (stable marking vs the panel).
+""",
+        "Component quality (weighted)": """
+For each judge × discipline × PCS component (in the period’s component set):
+
+``component_quality = 0.4 × ranking_score + 0.3 × bias_score``  
+``+ 0.2 × differentiation_score + 0.1 × consistency_score``  
+
+All four inputs are in [0, 1]. Only components the judge actually marked in that
+discipline are included in the discipline average.
+""",
+        "Discipline & overall quality": """
+**Discipline quality** — Equal-weight mean of ``component_quality`` over PCS
+components that (1) exist for that discipline in the filtered period and
+(2) the judge marked.
+
+**Overall quality** — Mark-weighted mean of discipline qualities:
+
+``overall = Σ (discipline_quality × PCS_marks_in_discipline) / Σ PCS_marks``  
+""",
+    }
+    return texts.get(topic, "")
+
+
+def _pcs_quality_rankings_column_config() -> dict:
+    return {
+        "Rank": st.column_config.NumberColumn(
+            "Rank",
+            format="%d",
+            width="small",
+            help="Order by overall PCS quality (1 = highest).",
+        ),
+        "Judge": st.column_config.TextColumn(
+            "Judge",
+            width="medium",
+            help="Official identity (directory-linked judges grouped).",
+        ),
+        "Overall quality": st.column_config.NumberColumn(
+            "Overall quality",
+            format="%.4f",
+            width="small",
+            help=(
+                "Mark-weighted mean of discipline qualities (0–1). "
+                "Higher = closer alignment with panel medians on ranking, bias, spread, and consistency."
+            ),
+        ),
+        "Ranking": st.column_config.NumberColumn(
+            "Ranking",
+            format="%.4f",
+            width="small",
+            help=(
+                "Mean ranking sub-score (40% weight in component quality): per-segment "
+                "rank order vs panel, averaged across components."
+            ),
+        ),
+        "Bias": st.column_config.NumberColumn(
+            "Bias",
+            format="%.4f",
+            width="small",
+            help="Mean bias sub-score (30% weight): systematic PCS vs panel median.",
+        ),
+        "Differentiation": st.column_config.NumberColumn(
+            "Differentiation",
+            format="%.4f",
+            width="small",
+            help="Mean differentiation sub-score (20% weight): mark spread vs panel.",
+        ),
+        "Consistency": st.column_config.NumberColumn(
+            "Consistency",
+            format="%.4f",
+            width="small",
+            help="Mean consistency sub-score (10% weight): stable skater-to-skater bias.",
+        ),
+        "Disciplines": st.column_config.NumberColumn(
+            "Disciplines",
+            format="%d",
+            width="small",
+            help="Number of discipline types this judge scored in the filtered range.",
+        ),
+        "Component σ": st.column_config.NumberColumn(
+            "Component σ",
+            format="%.4f",
+            width="small",
+            help=(
+                "Standard deviation of component quality scores (SS, TR, PE, CO, …) "
+                "for this judge. Higher σ means more uneven marking across components "
+                "(one component much stronger or weaker than another)."
+            ),
+        ),
+        "PCS marks": st.column_config.NumberColumn(
+            "PCS marks",
+            format="%d",
+            width="small",
+            help="PCS lines (judge × skater × segment × component) in the filtered range.",
+        ),
+    }
+
+
+def _pcs_quality_discipline_column_config() -> dict:
+    return {
+        "Discipline": st.column_config.TextColumn(
+            "Discipline",
+            width="large",
+            help="Discipline type for this block of PCS marks.",
+        ),
+        "Discipline quality": st.column_config.NumberColumn(
+            "Discipline quality",
+            format="%.4f",
+            width="medium",
+            help="Equal-weight mean of component quality scores the judge marked in this discipline.",
+        ),
+        "Components scored": st.column_config.NumberColumn(
+            "Components scored",
+            format="%d",
+            width="medium",
+            help=(
+                "Count of PCS components this judge marked in this discipline "
+                "(among components present in the filtered period)."
+            ),
+        ),
+        "PCS marks": st.column_config.NumberColumn(
+            "PCS marks",
+            format="%d",
+            width="medium",
+            help="PCS lines for this judge in this discipline within the filters.",
+        ),
+    }
+
+
+def _pcs_quality_component_column_config() -> dict:
+    return {
+        "Discipline": st.column_config.TextColumn(
+            "Discipline",
+            width="medium",
+            help="Discipline type for this PCS component block.",
+        ),
+        "Component": st.column_config.TextColumn(
+            "Component",
+            width="small",
+            help="PCS component code (SS, TR, PE, CO, PR, TI, …).",
+        ),
+        "Spearman ρ": st.column_config.NumberColumn(
+            "Spearman ρ",
+            format="%.3f",
+            width="small",
+            help=(
+                "Mean Spearman ρ across segments: within each segment, judge vs panel "
+                "skater rank order on this component (segments with <3 skaters skipped)."
+            ),
+        ),
+        "Segments ranked": st.column_config.NumberColumn(
+            "Segments ranked",
+            format="%d",
+            width="small",
+            help=(
+                "Segments with ≥3 skaters where rank correlation was computed "
+                "(each segment is one event)."
+            ),
+        ),
+        "Ranking (40%)": st.column_config.NumberColumn(
+            "Ranking (40%)",
+            format="%.3f",
+            width="small",
+            help=(
+                "Equal-weight mean of per-segment rank scores: each segment maps "
+                "ρ to max(0, (ρ−0.7)/0.3). 40% of component quality."
+            ),
+        ),
+        "Mean bias": st.column_config.NumberColumn(
+            "Mean bias",
+            format="%+.3f",
+            width="small",
+            help="Average (judge PCS − panel median). Positive = tends above the panel.",
+        ),
+        "Bias (30%)": st.column_config.NumberColumn(
+            "Bias (30%)",
+            format="%.3f",
+            width="small",
+            help="Scaled bias score in [0, 1]; 30% of component quality.",
+        ),
+        "Bias σ": st.column_config.NumberColumn(
+            "Bias σ",
+            format="%.3f",
+            width="small",
+            help="Std dev of (judge − panel) across PCS marks; lower → higher consistency score.",
+        ),
+        "Consistency (10%)": st.column_config.NumberColumn(
+            "Consistency (10%)",
+            format="%.3f",
+            width="small",
+            help="Scaled consistency in [0, 1]; 10% of component quality.",
+        ),
+        "Differentiation (20%)": st.column_config.NumberColumn(
+            "Differentiation (20%)",
+            format="%.3f",
+            width="small",
+            help="Scaled match of mark spread vs panel; 20% of component quality.",
+        ),
+        "Component quality": st.column_config.NumberColumn(
+            "Component quality",
+            format="%.4f",
+            width="small",
+            help="Weighted sum: 0.4×ranking + 0.3×bias + 0.2×differentiation + 0.1×consistency.",
+        ),
+        "PCS marks": st.column_config.NumberColumn(
+            "PCS marks",
+            format="%d",
+            width="small",
+            help="Skater-segment lines for this judge × discipline × component.",
+        ),
+    }
+
+
+def _pcs_quality_format_component_detail(detail: pd.DataFrame) -> pd.DataFrame:
+    if detail.empty:
+        return detail
+    out = detail.copy()
+    out = out.sort_values(
+        ["discipline", "component_quality", "component"],
+        ascending=[True, False, True],
+    )
+    out = out.rename(
+        columns={
+            "discipline": "Discipline",
+            "component": "Component",
+            "spearman_rho": "Spearman ρ",
+            "n_segments_ranked": "Segments ranked",
+            "ranking_score": "Ranking (40%)",
+            "mean_bias": "Mean bias",
+            "bias_score": "Bias (30%)",
+            "bias_std": "Bias σ",
+            "consistency_score": "Consistency (10%)",
+            "diff_score": "Differentiation (20%)",
+            "component_quality": "Component quality",
+            "n_marks": "PCS marks",
+        }
+    )
+    display_cols = [
+        "Discipline",
+        "Component",
+        "Spearman ρ",
+        "Segments ranked",
+        "Ranking (40%)",
+        "Mean bias",
+        "Bias (30%)",
+        "Bias σ",
+        "Consistency (10%)",
+        "Differentiation (20%)",
+        "Component quality",
+        "PCS marks",
+    ]
+    for col in (
+        "Spearman ρ",
+        "Ranking (40%)",
+        "Mean bias",
+        "Bias (30%)",
+        "Bias σ",
+        "Consistency (10%)",
+        "Differentiation (20%)",
+        "Component quality",
+    ):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(4)
+    if "Mean bias" in out.columns:
+        out["Mean bias"] = out["Mean bias"].round(3)
+    return out[display_cols]
+
+
+def pcs_quality_analysis_page():
+    """PCS judge quality vs panel medians for post-2022-07-01 competitions."""
+    from pcs_quality_analysis import MIN_PCS_ANALYSIS_EVENT_DATE, run_pcs_quality_analysis
+
+    st.header("PCS Quality Analysis")
+    st.caption(
+        "Scores judges on whichever **PCS components appear in each discipline** (e.g. SS, TR, PE, CO), "
+        "with equal weight across the components that exist in each discipline during the "
+        "filtered period, then combines disciplines by mark count. "
+        f"Only competitions on or after **{MIN_PCS_ANALYSIS_EVENT_DATE.isoformat()}** are included."
+    )
+
+    with st.expander("How scores are calculated", expanded=False):
+        methodology_topic = st.selectbox(
+            "Topic",
+            [
+                "Overview",
+                "Ranking correlation score",
+                "Bias score",
+                "Differentiation score",
+                "Consistency score",
+                "Component quality (weighted)",
+                "Discipline & overall quality",
+            ],
+            index=0,
+            key="pcs_quality_methodology",
+            help="Reference only — there is no alternate scoring model on this page.",
+        )
+        st.markdown(_pcs_quality_methodology_text(methodology_topic))
+
+    analytics = get_analytics_safe()
+
+    scope_label = st.selectbox(
+        "Competition scope",
+        list(_COMPETITION_SCOPE_LABELS),
+        index=0,
+        key="pcs_quality_competition_scope",
+        help="Filters competitions via linked officials competition type.",
+    )
+    scope_key = _competition_scope_key(scope_label)
+
+    years = sorted(
+        {str(y) for y in analytics.get_years() if y},
+        reverse=True,
+    )
+    col_y1, col_y2 = st.columns(2)
+    with col_y1:
+        start_season = st.selectbox(
+            "Season year from",
+            ["Any"] + years,
+            key="pcs_quality_start_season",
+        )
+        start_season_year = None if start_season == "Any" else start_season
+    with col_y2:
+        end_season = st.selectbox(
+            "Season year to",
+            ["Any"] + years,
+            key="pcs_quality_end_season",
+        )
+        end_season_year = None if end_season == "Any" else end_season
+
+    use_event_dates = st.checkbox(
+        "Narrow by competition event dates",
+        key="pcs_quality_use_event_dates",
+        help=(
+            "Further restrict by event date (still at least "
+            f"{MIN_PCS_ANALYSIS_EVENT_DATE.isoformat()})."
+        ),
+    )
+    event_start_date = None
+    event_end_date = None
+    if use_event_dates:
+        date_min, date_max = analytics.get_competition_event_date_bounds(
+            competition_scope=scope_key,
+        )
+        date_min = max(date_min, MIN_PCS_ANALYSIS_EVENT_DATE)
+        date_max = max(date_max, date_min)
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            event_start_date = st.date_input(
+                "Event on or after",
+                value=date_min,
+                min_value=MIN_PCS_ANALYSIS_EVENT_DATE,
+                max_value=date_max,
+                key="pcs_quality_start_date",
+            )
+        with dc2:
+            event_end_date = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=MIN_PCS_ANALYSIS_EVENT_DATE,
+                max_value=date_max,
+                key="pcs_quality_end_date",
+            )
+        if event_start_date > event_end_date:
+            st.warning("Start date is after end date; results may be empty.")
+
+    if scope_key != COMPETITION_SCOPE_ALL:
+        discipline_types = analytics.qualifying_event_segment_discipline_types()
+    else:
+        discipline_types = analytics.get_discipline_types()
+    discipline_names = [name for _id, name in discipline_types if name]
+    selected_disciplines = st.multiselect(
+        "Discipline types (optional)",
+        discipline_names,
+        key="pcs_quality_disciplines",
+    )
+    discipline_ids = (
+        [dt_id for dt_id, name in discipline_types if name in selected_disciplines]
+        if selected_disciplines
+        else None
+    )
+
+    if "pcs_quality_min_pcs_marks" not in st.session_state:
+        st.session_state["pcs_quality_min_pcs_marks"] = 0
+    min_pcs_marks = st.number_input(
+        "Minimum PCS marks per judge",
+        min_value=0,
+        step=10,
+        key="pcs_quality_min_pcs_marks",
+        help=(
+            "Exclude judge identities with fewer PCS marks in the filtered range. "
+            "Changing only this re-filters the last run (no reload)."
+        ),
+    )
+
+    run_clicked = st.button("Run analysis", type="primary", key="pcs_quality_run_btn")
+
+    if run_clicked:
+        with st.spinner("Loading PCS marks and computing judge profiles…"):
+            st.session_state.pcs_quality_result = run_pcs_quality_analysis(
+                analytics,
+                start_season_year=start_season_year,
+                end_season_year=end_season_year,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
+                discipline_type_ids=discipline_ids,
+                competition_scope=scope_key,
+            )
+
+    base_result = st.session_state.get("pcs_quality_result")
+    if base_result is None:
+        st.info("Set filters and click **Run analysis**.")
+        return
+
+    from pcs_quality_analysis import apply_min_pcs_marks_to_result
+
+    result = apply_min_pcs_marks_to_result(base_result, int(min_pcs_marks))
+
+    if result.get("error") and result["profiles"].empty:
+        st.warning(result["error"])
+        return
+
+    profiles = result["profiles"]
+    component_detail = result.get("component_detail", pd.DataFrame())
+    discipline_summary = result.get("discipline_summary", pd.DataFrame())
+    n_marks = int(result.get("n_raw_marks") or 0)
+
+    n_before = result.get("n_judges_before_min_filter")
+    excluded = (
+        int(n_before) - len(profiles)
+        if n_before is not None and int(min_pcs_marks) > 0
+        else 0
+    )
+
+    if int(min_pcs_marks) > 0:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("PCS marks in scope", f"{n_marks:,}")
+        m2.metric("Judges ranked", len(profiles))
+        m3.metric(
+            "Excluded (below min marks)",
+            excluded,
+            help=f"Judges with fewer than {int(min_pcs_marks)} PCS marks in scope",
+        )
+    else:
+        m1, m2 = st.columns(2)
+        m1.metric("PCS marks in scope", f"{n_marks:,}")
+        m2.metric("Judges ranked", len(profiles))
+
+    if profiles.empty:
+        n_before = base_result.get("n_judges") or 0
+        if int(min_pcs_marks) > 0 and n_before > 0:
+            st.warning(
+                f"No judges meet the minimum of **{int(min_pcs_marks)}** PCS marks "
+                f"({n_before} judge(s) had marks in scope)."
+            )
+        else:
+            st.info("No judge profiles could be built for the selected filters.")
+        return
+
+    with st.expander("What goes into the PCS quality score?", expanded=False):
+        st.markdown(
+            """
+Each **PCS component** (SS, TR, PE, CO, …) is scored separately against **panel medians**
+on the same skater-segment lines. **Ranking** is computed per segment (event), then
+averaged. Four sub-scores (0–1, higher is better) are combined:
+
+- **Ranking (40%)** — Per segment, rank-order agreement vs panel; mean across segments (≥3 skaters each)  
+- **Bias (30%)** — Average PCS above/below panel (penalizes systematic leniency/harshness)  
+- **Differentiation (20%)** — Whether your mark spread matches the panel’s spread  
+- **Consistency (10%)** — Whether bias is stable skater-to-skater  
+
+**Discipline quality** = equal weight across components you marked in that discipline.  
+**Overall quality** = mark-weighted across disciplines. Open **How scores are calculated** above for formulas.
+            """
+        )
+
+    st.subheader("Judge quality rankings")
+    st.caption(
+        "Within each discipline, equal weight across PCS components the judge marked; "
+        "overall quality is mark-weighted across disciplines. Scroll horizontally for all columns."
+    )
+    st.dataframe(
+        profiles,
+        width="content",
+        hide_index=True,
+        column_config=_pcs_quality_rankings_column_config(),
+    )
+    _streamlit_download(
+        "Download rankings CSV",
+        data=profiles.to_csv(index=False).encode("utf-8"),
+        file_name="pcs_quality_rankings.csv",
+        mime="text/csv",
+        key="pcs_quality_rankings_download",
+    )
+
+    judge_names = profiles["Judge"].tolist()
+    pick = st.selectbox("Judge detail", judge_names, key="pcs_quality_detail_judge")
+    if pick:
+        judge_row = profiles.loc[profiles["Judge"] == pick]
+        if not judge_row.empty:
+            jr = judge_row.iloc[0]
+            st.subheader(f"Summary — {pick}")
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Overall quality", f"{jr['Overall quality']:.4f}")
+            s2.metric(
+                "Component σ",
+                f"{jr.get('Component σ', 0):.4f}",
+                help=(
+                    "Spread of component quality scores across PCS components. "
+                    "Higher values mean uneven performance by component."
+                ),
+            )
+            s3.metric("PCS marks", f"{int(jr.get('PCS marks', 0)):,}")
+
+        if not discipline_summary.empty:
+            disc_sub = discipline_summary.loc[
+                discipline_summary["identity"] == pick
+            ].copy()
+            if not disc_sub.empty:
+                st.subheader(f"By discipline — {pick}")
+                disc_display = disc_sub.rename(
+                    columns={
+                        "discipline": "Discipline",
+                        "discipline_quality": "Discipline quality",
+                        "n_components_scored": "Components scored",
+                    }
+                )[
+                    [
+                        "Discipline",
+                        "Discipline quality",
+                        "Components scored",
+                        "PCS marks",
+                    ]
+                ]
+                st.dataframe(
+                    disc_display,
+                    width="content",
+                    hide_index=True,
+                    column_config=_pcs_quality_discipline_column_config(),
+                )
+
+        if not component_detail.empty:
+            comp_sub = component_detail.loc[
+                component_detail["identity"] == pick
+            ].copy()
+            if not comp_sub.empty:
+                st.subheader(f"By PCS component — {pick}")
+                st.caption(
+                    "One row per discipline × component the judge marked. Sub-scores are in [0, 1]; "
+                    "weights show their share of component quality. Scroll horizontally for all columns."
+                )
+                comp_display = _pcs_quality_format_component_detail(comp_sub)
+                st.dataframe(
+                    comp_display,
+                    width="content",
+                    hide_index=True,
+                    column_config=_pcs_quality_component_column_config(),
+                )
+                from app_query_params import label_to_query_slug
+
+                _pick_slug = label_to_query_slug(pick)
+                _streamlit_download(
+                    f"Download component detail CSV ({pick})",
+                    data=comp_display.to_csv(index=False).encode("utf-8"),
+                    file_name=f"pcs_quality_{_pick_slug}_components.csv",
+                    mime="text/csv",
+                    key=f"pcs_quality_comp_dl_{_pick_slug}",
+                )
+
+
 def element_deviation_ranking_page():
     """Element GOE marking scores vs panel-median control (sigma-normalized)."""
     st.header("Element Deviation Ranking Analysis")
@@ -1306,10 +1962,11 @@ PCS scores and throwouts are not part of this model.
     st.subheader("Model parameters")
     p1, p2, p3 = st.columns(3)
     with p1:
+        if "element_ranking_min_marks" not in st.session_state:
+            st.session_state["element_ranking_min_marks"] = 0
         min_marks = st.number_input(
             "Minimum element marks per judge",
             min_value=0,
-            value=0,
             step=50,
             key="element_ranking_min_marks",
             help=(
@@ -1605,11 +2262,12 @@ PCS scores and throwouts are not part of this model.
         hide_index=True,
         column_config=_element_ranking_rankings_column_config(),
     )
-    st.download_button(
+    _streamlit_download(
         "Download rankings CSV",
         data=marking.to_csv(index=False).encode("utf-8"),
         file_name="element_deviation_rankings.csv",
         mime="text/csv",
+        key="element_ranking_rankings_download",
     )
 
     st.subheader("σ̂ parameters (by discipline, element type, control GOE)")
@@ -1629,11 +2287,12 @@ PCS scores and throwouts are not part of this model.
             hide_index=True,
             column_config=_element_ranking_sigma_bins_column_config(),
         )
-        st.download_button(
+        _streamlit_download(
             "Download σ̂ parameters CSV",
             data=sigma_bins.to_csv(index=False).encode("utf-8"),
             file_name="element_sigma_parameters.csv",
             mime="text/csv",
+            key="element_ranking_sigma_download",
         )
 
     judge_names = marking["Judge"].tolist() if "Judge" in marking.columns else []
@@ -2684,15 +3343,36 @@ if page == "Individual Judge Analysis":
         else:
             report_filter_lines.append("Discipline types: All")
 
-    html_bytes = build_judge_report_html(
+    report_cache_key = (
         selected_judge_display,
-        stats,
-        pcs_df,
-        element_df,
-        segment_df,
-        single_competition_display_name=single_competition_display_name,
-        filter_summary_lines=report_filter_lines,
+        year_filter,
+        individual_competition_scope,
+        tuple(selected_disciplines) if selected_disciplines else (),
+        tuple(sorted(competition_ids)) if competition_ids else (),
+        event_start_date.isoformat()
+        if use_event_dates and event_start_date
+        else None,
+        event_end_date.isoformat()
+        if use_event_dates and event_end_date
+        else None,
+        stats.get("pcs_total_scores"),
+        stats.get("element_total_scores"),
+        len(pcs_df),
+        len(element_df),
+        len(segment_df),
     )
+    if st.session_state.get("individual_judge_report_cache_key") != report_cache_key:
+        st.session_state["individual_judge_report_cache_key"] = report_cache_key
+        st.session_state["individual_judge_report_bytes"] = build_judge_report_html(
+            selected_judge_display,
+            stats,
+            pcs_df,
+            element_df,
+            segment_df,
+            single_competition_display_name=single_competition_display_name,
+            filter_summary_lines=report_filter_lines,
+        )
+    html_bytes = st.session_state["individual_judge_report_bytes"]
     _dn_comp = ""
     if single_competition_display_name:
         _dn_comp = (
@@ -2702,11 +3382,12 @@ if page == "Individual Judge Analysis":
             .replace("(", "")
             .replace(")", "")
         )
-    st.download_button(
-        label="Download Interactive HTML Report",
+    _streamlit_download(
+        "Download Interactive HTML Report",
         data=html_bytes,
         file_name=f"judge_report_{safe_name}{_dn_comp}.html",
         mime="text/html",
+        key="individual_judge_report_download",
     )
 
 elif page == "Rule Errors Analysis":
@@ -3383,6 +4064,9 @@ elif page == "Competition Analysis":
 elif page == "Cross-Judge Benchmarking":
     cross_judge_benchmarking_page()
 
+elif page == "PCS Quality Analysis":
+    pcs_quality_analysis_page()
+
 elif page == "Element Deviation Ranking Analysis":
     element_deviation_ranking_page()
 
@@ -3456,11 +4140,12 @@ elif page == "Panel size benchmarks":
         else:
             st.subheader("Summary table")
             st.dataframe(df_bm, width="stretch", hide_index=True)
-            st.download_button(
+            _streamlit_download(
                 "Download CSV",
                 data=df_bm.to_csv(index=False).encode("utf-8"),
                 file_name="panel_size_benchmarks.csv",
                 mime="text/csv",
+                key="panel_benchmarks_download",
             )
             st.subheader("Charts")
             st.caption(
@@ -3678,7 +4363,7 @@ else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")
 
 render_query_help([
-    "**Navigation:** `?page=` — `individual`, `cross-judge`, "
+    "**Navigation:** `?page=` — `individual`, `cross-judge`, `pcs-quality`, "
     "`element-deviation-ranking`, `temporal`, `panel-size-benchmarks`, "
     "`rule-errors`, `competition`, `load-competition`",
     "",
@@ -3694,6 +4379,10 @@ render_query_help([
     "",
     "**Element deviation ranking:** `?competition_scope=`, `?start_season=`, "
     "`?end_season=`, `?disciplines=`, `?start_date=` / `?end_date=`, `?min_marks=`",
+    "",
+    "**PCS quality:** `?competition_scope=`, `?start_season=`, `?end_season=`, "
+    "`?disciplines=` (comma-separated names), `?start_date=` / `?end_date=`, "
+    "`?min_pcs_marks=`",
     "",
     "**Temporal:** `?analysis_type=`, `?metric=`, `?score_type=`, `?judge=`",
     "",
