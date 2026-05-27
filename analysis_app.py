@@ -1238,7 +1238,7 @@ appear somewhere in the filtered marks are used (not a fixed historical list).
 **Minimum PCS marks** — Optional filter: exclude judge identities with fewer than
 *N* PCS marks in the filtered range (each skater × component line counts as one mark).
 
-**Four alignment measures (per judge × discipline × PCS component)** — Each is scaled
+**Three alignment measures (per judge × discipline × PCS component)** — Each is scaled
 to 0–1 (higher = closer to the panel). They are reported and ranked **separately**;
 there is no combined overall score.
 
@@ -1247,7 +1247,6 @@ there is no combined overall score.
 | Ranking | Per segment, does skater rank order match the panel? (mean across segments) |
 | Bias | Are your PCS systematically high or low vs the panel? |
 | Differentiation | Is your spread of marks similar to the panel’s spread? |
-| Consistency | Is deviation from the panel stable mark to mark (not erratic)? |
 
 **Judge-level scores** — Equal weight across PCS components in each discipline, then
 mark-weighted across disciplines. Each measure has its own ranking table.
@@ -1265,8 +1264,8 @@ Per segment:
 
 **Ranking sub-score** = equal-weight mean of ``segment_ranking`` over segments the
 judge marked (segments with &lt;3 skaters are skipped). **Spearman ρ** in the detail
-table is the mean ρ across those segments. Bias, differentiation, and consistency
-are separate measures (not combined with ranking).
+table is the mean ρ across those segments. Bias and differentiation are separate
+measures (not combined with ranking).
 """,
         "Bias score": """
 Per skater-line: ``bias = judge_PCS − panel_median_PCS``.
@@ -1286,13 +1285,7 @@ Compare spread of judge PCS vs spread of panel medians across skater-lines (same
 ``diff_score = max(0, min(1, 1 − |log(judge_variance / panel_variance)|))``  
 
 1 when variances match; penalizes much wider or narrower marking than the panel.
-""",
-        "Consistency score": """
-Per skater-line: ``bias = judge_PCS − panel_median_PCS``.
 
-``consistency_score = max(0, 1 − std_dev(bias) / 0.75)``  
-
-Low spread of per-mark bias → high score (stable vs the panel from mark to mark).
 ``bias_tendency`` and ``spread_tendency`` summarize direction (lenient/harsh; wider/narrower).
 """,
         "Judge-level aggregation": """
@@ -1303,7 +1296,7 @@ judge marked in that discipline (among components present in the filtered period
 
 ``judge_score = Σ (discipline_score × PCS_marks_in_discipline) / Σ PCS_marks``  
 
-The four measures are independent; rankings are computed separately for each.
+The three measures are independent; rankings are computed separately for each.
 """,
     }
     return texts.get(topic, "")
@@ -1399,14 +1392,6 @@ _PCS_METRIC_RANKING_UI: tuple[tuple[str, str, str, str], ...] = (
         "See **Spread vs panel** (wider / narrower / similar) and **Var ratio** "
         "(judge variance ÷ panel variance). A higher score means spread is closer to the panel.",
     ),
-    (
-        "consistency",
-        "Consistency score",
-        "Consistency — stable mark to mark",
-        "Whether deviation from the panel is steady from PCS mark to PCS mark "
-        "(each skater in each program), not erratic. A higher score means a similar "
-        "gap on each mark—for example, always about the same amount above (or below) the median.",
-    ),
 )
 
 
@@ -1425,12 +1410,11 @@ def _pcs_quality_format_discipline_summary(disc_sub: pd.DataFrame) -> pd.DataFra
             "diff_score": "Differentiation",
             "variance_ratio": "Var ratio",
             "spread_tendency": "Spread",
-            "consistency_score": "Consistency",
             "n_components_scored": "Components",
             "PCS marks": "Marks",
         }
     )
-    for col in ("Ranking", "Bias", "Differentiation", "Consistency", "Var ratio"):
+    for col in ("Ranking", "Bias", "Differentiation", "Var ratio"):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce").round(4)
     if "Mean bias" in out.columns:
@@ -1444,7 +1428,6 @@ def _pcs_quality_format_discipline_summary(disc_sub: pd.DataFrame) -> pd.DataFra
         "Differentiation",
         "Var ratio",
         "Spread",
-        "Consistency",
         "Components",
         "Marks",
     ]
@@ -1497,12 +1480,6 @@ def _pcs_quality_discipline_column_config() -> dict:
             "Spread",
             width="medium",
             help="Wider, narrower, or similar vs panel spread.",
-        ),
-        "Consistency": st.column_config.NumberColumn(
-            "Consistency",
-            format="%.4f",
-            width="small",
-            help="Equal-weight mean consistency score in this discipline.",
         ),
         "Components": st.column_config.NumberColumn(
             "Components",
@@ -1578,18 +1555,6 @@ def _pcs_quality_component_column_config() -> dict:
             width="small",
             help="Scaled bias score in [0, 1].",
         ),
-        "Bias σ": st.column_config.NumberColumn(
-            "Bias σ",
-            format="%.3f",
-            width="small",
-            help="Std dev of (judge − panel) across PCS marks; lower → higher consistency score.",
-        ),
-        "Consistency score": st.column_config.NumberColumn(
-            "Consistency score",
-            format="%.3f",
-            width="small",
-            help="Scaled consistency in [0, 1].",
-        ),
         "Differentiation score": st.column_config.NumberColumn(
             "Differentiation score",
             format="%.3f",
@@ -1634,8 +1599,6 @@ def _pcs_quality_format_component_detail(detail: pd.DataFrame) -> pd.DataFrame:
             "mean_bias": "Mean bias",
             "bias_score": "Bias score",
             "bias_tendency": "Tendency",
-            "bias_std": "Bias σ",
-            "consistency_score": "Consistency score",
             "diff_score": "Differentiation score",
             "variance_ratio": "Var ratio",
             "spread_tendency": "Spread",
@@ -1651,8 +1614,6 @@ def _pcs_quality_format_component_detail(detail: pd.DataFrame) -> pd.DataFrame:
         "Mean bias",
         "Tendency",
         "Bias score",
-        "Bias σ",
-        "Consistency score",
         "Differentiation score",
         "Var ratio",
         "Spread",
@@ -1665,8 +1626,6 @@ def _pcs_quality_format_component_detail(detail: pd.DataFrame) -> pd.DataFrame:
         "Ranking score",
         "Mean bias",
         "Bias score",
-        "Bias σ",
-        "Consistency score",
         "Differentiation score",
     ):
         if col in out.columns:
@@ -1681,13 +1640,17 @@ def pcs_quality_analysis_page():
     from pcs_quality_analysis import MIN_PCS_ANALYSIS_EVENT_DATE
 
     st.header("PCS Quality Analysis")
+    from pcs_quality_analysis import PCS_QUALITY_MAX_MARKS
+
     st.caption(
-        "Four separate alignment measures vs **panel medians** on PCS (ranking, bias, "
-        "differentiation, consistency). Each has its own ranking table — they are not "
+        "Three separate alignment measures vs **panel medians** on PCS (ranking, bias, "
+        "differentiation). Each has its own ranking table — they are not "
         "combined into one score. **Discipline** is required (defaults to Singles). "
         "Components per discipline are equal-weighted; disciplines "
         "are mark-weighted. Only competitions on or after "
-        f"**{MIN_PCS_ANALYSIS_EVENT_DATE.isoformat()}** are included."
+        f"**{MIN_PCS_ANALYSIS_EVENT_DATE.isoformat()}** are included. "
+        f"Large filters load up to **{PCS_QUALITY_MAX_MARKS:,}** PCS marks "
+        "(set ``PCS_QUALITY_MAX_MARKS`` on the server to raise the cap)."
     )
 
     with st.expander("How scores are calculated", expanded=False):
@@ -1698,7 +1661,6 @@ def pcs_quality_analysis_page():
                 "Ranking correlation score",
                 "Bias score",
                 "Differentiation score",
-                "Consistency score",
                 "Judge-level aggregation",
             ],
             index=0,
@@ -1737,6 +1699,13 @@ def pcs_quality_analysis_page():
             key="pcs_quality_end_season",
         )
         end_season_year = None if end_season == "Any" else end_season
+
+    if start_season_year is None and end_season_year is None:
+        st.warning(
+            "Season year is **Any** for both bounds — this loads every PCS mark since "
+            "2022-07-01 and may time out or crash on small servers. Prefer a season range "
+            "or enable event dates."
+        )
 
     use_event_dates = st.checkbox(
         "Narrow by competition event dates",
@@ -1870,7 +1839,11 @@ def pcs_quality_analysis_page():
     result = apply_min_pcs_marks_to_result(base_result, int(min_pcs_marks))
 
     if result.get("error") and result["profiles"].empty:
-        st.warning(result["error"])
+        err = result["error"]
+        if "exceeds limit" in err.lower():
+            st.error(err)
+        else:
+            st.warning(err)
         return
 
     profiles = result["profiles"]
@@ -1910,17 +1883,16 @@ def pcs_quality_analysis_page():
             st.info("No judge profiles could be built for the selected filters.")
         return
 
-    with st.expander("What do the four measures mean?", expanded=False):
+    with st.expander("What do the three measures mean?", expanded=False):
         st.markdown(
             """
 Each **PCS component** (SS, TR, PE, CO, …) is scored separately against **panel medians**
 on the same skater-segment lines. **Ranking** is computed per segment (event), then
-averaged. Four scores (0–1, higher is better) are reported **independently**:
+averaged. Three scores (0–1, higher is better) are reported **independently**:
 
 - **Ranking** — Per segment, rank-order agreement vs panel; mean across segments (≥3 skaters each)  
 - **Bias** — Average PCS above/below panel (penalizes systematic leniency/harshness)  
 - **Differentiation** — Whether your mark spread matches the panel’s spread  
-- **Consistency** — Whether deviation vs the panel is stable mark to mark  
 
 Within each discipline: equal weight across components you marked.  
 Across disciplines: mark-weighted. Open **How scores are calculated** above for formulas.
@@ -1959,11 +1931,10 @@ Across disciplines: mark-weighted. Open **How scores are calculated** above for 
         if not judge_row.empty:
             jr = judge_row.iloc[0]
             st.subheader(f"Summary — {pick}")
-            s1, s2, s3, s4 = st.columns(4)
+            s1, s2, s3 = st.columns(3)
             s1.metric("Ranking score", f"{jr.get('ranking_score', 0):.4f}")
             s2.metric("Bias score", f"{jr.get('bias_score', 0):.4f}")
             s3.metric("Differentiation score", f"{jr.get('diff_score', 0):.4f}")
-            s4.metric("Consistency score", f"{jr.get('consistency_score', 0):.4f}")
             if jr.get("bias_tendency"):
                 st.caption(
                     f"Bias tendency: **{jr['bias_tendency']}** "
@@ -2055,7 +2026,7 @@ neighboring integer GOE levels (±1, ±2), else a global fallback σ (with a flo
 **5. Marking score** — Per judge identity:
 ``M = √(mean(m²))``. Ranked ascending (rank 1 = lowest M).
 
-PCS scores and throwouts are not part of this model.
+PCS scores are not part of this model.
             """
         )
 

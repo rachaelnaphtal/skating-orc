@@ -1,7 +1,7 @@
 """
 PCS judge quality vs panel medians (post-2022-07-01 competitions).
 
-Four independent alignment measures (ranking, bias, differentiation, consistency)
+Three independent alignment measures (ranking, bias, differentiation)
 are computed per judge × discipline × PCS component, then averaged within each
 discipline (equal weight across components) and across disciplines (mark-weighted).
 Each measure has its own ranking table — they are not combined into one score.
@@ -9,22 +9,22 @@ Each measure has its own ranking table — they are not combined into one score.
 
 from __future__ import annotations
 
-from collections import defaultdict
+import gc
+import os
 from datetime import date
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata, spearmanr
+from sqlalchemy import and_, func, select
 from analytics import JudgeAnalytics
 from models import (
     Competition,
     DisciplineType,
-    Judge,
     PcsScorePerJudge,
     PcsType,
     Segment,
-    Skater,
     SkaterSegment,
 )
 from officials_competition_types import COMPETITION_SCOPE_ALL
@@ -36,6 +36,8 @@ RANKING_CORRELATION_SPAN = 0.3
 BIAS_NEUTRAL_THRESHOLD = 0.05
 SPREAD_RATIO_LENIENT = 1.1
 SPREAD_RATIO_HARSH = 0.9
+# Heroku / small dynos: refuse full in-memory loads above this (override via env).
+PCS_QUALITY_MAX_MARKS = int(os.environ.get("PCS_QUALITY_MAX_MARKS", "400000"))
 
 PCS_COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "SS": "Skating Skills — blade work, flow, speed, and ice coverage.",
@@ -201,14 +203,6 @@ def differentiation_score(judge_scores: np.ndarray, panel_scores: np.ndarray) ->
     return _clamp01(1.0 - abs(float(np.log(ratio))))
 
 
-def consistency_score(judge_scores: np.ndarray, panel_scores: np.ndarray) -> float:
-    if len(judge_scores) < 2:
-        return 0.0
-    biases = judge_scores - panel_scores
-    sd = float(np.std(biases, ddof=1))
-    return _clamp01(1.0 - (sd / 0.75))
-
-
 def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
     """Metrics for one judge × discipline × PCS component mark set."""
     judge_scores = marks_df["judge_score"].to_numpy(dtype=float)
@@ -218,27 +212,98 @@ def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
     )
     bs = bias_score(judge_scores, panel_scores)
     ds = differentiation_score(judge_scores, panel_scores)
-    cs = consistency_score(judge_scores, panel_scores)
     biases = judge_scores - panel_scores if len(judge_scores) else np.array([])
-    bias_std = float(np.std(biases, ddof=1)) if len(biases) >= 2 else 0.0
+    vr = variance_ratio(judge_scores, panel_scores)
     return {
         "spearman_rho": mean_rho if mean_rho is not None else float("nan"),
         "ranking_score": rk,
         "bias_score": bs,
         "diff_score": ds,
-        "consistency_score": cs,
         "mean_bias": float(np.mean(biases)) if len(biases) else 0.0,
         "bias_tendency": bias_tendency_label(
             float(np.mean(biases)) if len(biases) else float("nan")
         ),
-        "variance_ratio": variance_ratio(judge_scores, panel_scores),
-        "spread_tendency": spread_tendency_label(
-            variance_ratio(judge_scores, panel_scores)
-        ),
-        "bias_std": bias_std,
+        "variance_ratio": vr,
+        "spread_tendency": spread_tendency_label(vr),
         "n_marks": int(len(marks_df)),
         "n_segments_ranked": int(n_segments),
     }
+
+
+def _pcs_quality_effective_start(event_start_date: date | None) -> date:
+    if event_start_date is None:
+        return MIN_PCS_ANALYSIS_EVENT_DATE
+    return max(event_start_date, MIN_PCS_ANALYSIS_EVENT_DATE)
+
+
+def _pcs_quality_segment_discipline_ids(
+    analytics: JudgeAnalytics,
+    *,
+    discipline_type_ids: Optional[list[int]],
+    competition_scope: str,
+) -> list[int] | None:
+    core_disc = analytics._qualifying_core_disciplines_active(competition_scope)
+    return analytics._merged_segment_discipline_ids(core_disc, discipline_type_ids)
+
+
+def _apply_pcs_quality_scope_filters(
+    query,
+    analytics: JudgeAnalytics,
+    *,
+    seg_discipline_ids: list[int] | None,
+    start_season_year: Optional[str],
+    end_season_year: Optional[str],
+    effective_start: date,
+    event_end_date: date | None,
+    competition_scope: str,
+):
+    if seg_discipline_ids is not None:
+        query = query.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
+    if start_season_year:
+        query = query.filter(Competition.year >= str(start_season_year))
+    if end_season_year:
+        query = query.filter(Competition.year <= str(end_season_year))
+    query = analytics._filter_orm_competition_scope(query, competition_scope)
+    return analytics._apply_competition_event_date_range(
+        query, effective_start, event_end_date
+    )
+
+
+def count_pcs_quality_marks(
+    analytics: JudgeAnalytics,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+    discipline_type_ids: Optional[list[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+) -> int:
+    """PCS mark rows in scope (same filters as ``load_pcs_quality_marks``)."""
+    seg_discipline_ids = _pcs_quality_segment_discipline_ids(
+        analytics,
+        discipline_type_ids=discipline_type_ids,
+        competition_scope=competition_scope,
+    )
+    effective_start = _pcs_quality_effective_start(event_start_date)
+    count_q = (
+        select(func.count(PcsScorePerJudge.id))
+        .select_from(PcsScorePerJudge)
+        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+        .join(Segment, SkaterSegment.segment_id == Segment.id)
+        .join(Competition, Segment.competition_id == Competition.id)
+    )
+    count_q = _apply_pcs_quality_scope_filters(
+        count_q,
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
+    )
+    return int(analytics.session.execute(count_q).scalar() or 0)
 
 
 def load_pcs_quality_marks(
@@ -250,22 +315,63 @@ def load_pcs_quality_marks(
     event_end_date: date | None = None,
     discipline_type_ids: Optional[list[int]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
+    max_marks: int | None = PCS_QUALITY_MAX_MARKS,
 ) -> pd.DataFrame:
     """PCS marks with panel median per skater×component (post-2022-07-01 competitions)."""
-    session = analytics.session
-    core_disc = analytics._qualifying_core_disciplines_active(competition_scope)
-    seg_discipline_ids = analytics._merged_segment_discipline_ids(
-        core_disc, discipline_type_ids
+    seg_discipline_ids = _pcs_quality_segment_discipline_ids(
+        analytics,
+        discipline_type_ids=discipline_type_ids,
+        competition_scope=competition_scope,
     )
+    effective_start = _pcs_quality_effective_start(event_start_date)
 
-    effective_start = MIN_PCS_ANALYSIS_EVENT_DATE
-    if event_start_date is not None:
-        effective_start = max(event_start_date, MIN_PCS_ANALYSIS_EVENT_DATE)
+    if max_marks is not None and max_marks > 0:
+        n_rows = count_pcs_quality_marks(
+            analytics,
+            start_season_year=start_season_year,
+            end_season_year=end_season_year,
+            event_start_date=event_start_date,
+            event_end_date=event_end_date,
+            discipline_type_ids=discipline_type_ids,
+            competition_scope=competition_scope,
+        )
+        if n_rows > max_marks:
+            raise ValueError(
+                f"PCS mark count ({n_rows:,}) exceeds limit ({max_marks:,}). "
+                "Narrow season years, enable event dates, or reduce disciplines."
+            )
 
-    q = (
-        session.query(
+    panel_sq = (
+        select(
+            PcsScorePerJudge.skater_segment_id.label("skater_segment_id"),
+            PcsScorePerJudge.pcs_type_id.label("pcs_type_id"),
+            func.percentile_cont(0.5)
+            .within_group(PcsScorePerJudge.judge_score)
+            .label("panel_median"),
+        )
+        .select_from(PcsScorePerJudge)
+        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+        .join(Segment, SkaterSegment.segment_id == Segment.id)
+        .join(Competition, Segment.competition_id == Competition.id)
+    )
+    panel_sq = _apply_pcs_quality_scope_filters(
+        panel_sq,
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
+    )
+    panel_sq = panel_sq.group_by(
+        PcsScorePerJudge.skater_segment_id,
+        PcsScorePerJudge.pcs_type_id,
+    ).subquery()
+
+    marks_q = (
+        select(
             PcsScorePerJudge.judge_id,
-            Judge.name.label("judge_name"),
             PcsScorePerJudge.skater_segment_id,
             PcsScorePerJudge.pcs_type_id,
             PcsType.name.label("pcs_type_name"),
@@ -273,59 +379,51 @@ def load_pcs_quality_marks(
             Segment.id.label("segment_id"),
             Segment.discipline_type_id,
             DisciplineType.name.label("discipline_name"),
-            Competition.year,
-            Competition.name.label("competition_name"),
-            Segment.name.label("segment_name"),
-            Skater.name.label("skater_name"),
+            panel_sq.c.panel_median,
         )
-        .join(Judge, PcsScorePerJudge.judge_id == Judge.id)
+        .select_from(PcsScorePerJudge)
         .join(PcsType, PcsScorePerJudge.pcs_type_id == PcsType.id)
         .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
         .join(Segment, SkaterSegment.segment_id == Segment.id)
         .join(Competition, Segment.competition_id == Competition.id)
-        .join(Skater, SkaterSegment.skater_id == Skater.id)
         .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)
+        .join(
+            panel_sq,
+            and_(
+                PcsScorePerJudge.skater_segment_id == panel_sq.c.skater_segment_id,
+                PcsScorePerJudge.pcs_type_id == panel_sq.c.pcs_type_id,
+            ),
+        )
     )
-    if seg_discipline_ids is not None:
-        q = q.filter(Segment.discipline_type_id.in_(seg_discipline_ids))
-    if start_season_year:
-        q = q.filter(Competition.year >= str(start_season_year))
-    if end_season_year:
-        q = q.filter(Competition.year <= str(end_season_year))
-    q = analytics._filter_orm_competition_scope(q, competition_scope)
-    q = analytics._apply_competition_event_date_range(
-        q, effective_start, event_end_date
+    marks_q = _apply_pcs_quality_scope_filters(
+        marks_q,
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
     )
 
-    rows = q.all()
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
-        [
-            {
-                "judge_id": int(r.judge_id),
-                "skater_segment_id": int(r.skater_segment_id),
-                "pcs_type_id": int(r.pcs_type_id),
-                "pcs_type_name": r.pcs_type_name,
-                "judge_score": float(r.judge_score),
-                "segment_id": int(r.segment_id),
-                "discipline_type_id": int(r.discipline_type_id)
-                if r.discipline_type_id is not None
-                else None,
-                "discipline_name": r.discipline_name or "Unknown",
-            }
-            for r in rows
-        ]
-    )
-    df["component"] = df["pcs_type_name"].map(pcs_component_label)
-    df = df.dropna(subset=["component", "discipline_type_id"]).copy()
+    df = pd.read_sql(marks_q, analytics.session.bind)
     if df.empty:
         return df
 
-    df["panel_median"] = df.groupby(
-        ["skater_segment_id", "pcs_type_id"], sort=False
-    )["judge_score"].transform("median")
+    df["judge_id"] = pd.to_numeric(df["judge_id"], downcast="integer")
+    df["skater_segment_id"] = pd.to_numeric(
+        df["skater_segment_id"], downcast="integer"
+    )
+    df["pcs_type_id"] = pd.to_numeric(df["pcs_type_id"], downcast="integer")
+    df["segment_id"] = pd.to_numeric(df["segment_id"], downcast="integer")
+    df["discipline_type_id"] = pd.to_numeric(
+        df["discipline_type_id"], downcast="integer"
+    )
+    df["judge_score"] = df["judge_score"].astype(np.float32)
+    df["panel_median"] = df["panel_median"].astype(np.float32)
+    df["component"] = df["pcs_type_name"].map(pcs_component_label)
+    df["discipline_name"] = df["discipline_name"].fillna("Unknown")
+    df = df.dropna(subset=["component", "discipline_type_id"]).copy()
     return df
 
 
@@ -365,7 +463,6 @@ def build_metric_ranking_table(
         "ranking_score": "Ranking score",
         "bias_score": "Bias score",
         "diff_score": "Differentiation score",
-        "consistency_score": "Consistency score",
     }.get(metric_key, score_label)
     if metric_key not in df.columns:
         return pd.DataFrame()
@@ -398,7 +495,6 @@ PCS_METRIC_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ("ranking_score", "Ranking score", "ranking"),
     ("bias_score", "Bias score", "bias"),
     ("diff_score", "Differentiation score", "differentiation"),
-    ("consistency_score", "Consistency score", "consistency"),
 )
 
 
@@ -455,7 +551,6 @@ def compute_judge_profiles(
         disc_mean_bias: list[tuple[float, float]] = []
         disc_diff: list[tuple[float, float]] = []
         disc_var_ratio: list[tuple[float, float]] = []
-        disc_consistency: list[tuple[float, float]] = []
         rhos: list[float] = []
         pcs_marks = 0
 
@@ -470,9 +565,6 @@ def compute_judge_profiles(
             disc_diff.append((float(disc_grp["diff_score"].mean()), float(n_marks)))
             vr = float(np.average(disc_grp["variance_ratio"], weights=w))
             disc_var_ratio.append((vr, float(n_marks)))
-            disc_consistency.append(
-                (float(disc_grp["consistency_score"].mean()), float(n_marks))
-            )
             for rho in disc_grp["spearman_rho"]:
                 if rho is not None and np.isfinite(rho):
                     rhos.append(float(rho))
@@ -489,9 +581,6 @@ def compute_judge_profiles(
                     "diff_score": round(float(disc_grp["diff_score"].mean()), 4),
                     "variance_ratio": round(vr, 4),
                     "spread_tendency": spread_tendency_label(vr),
-                    "consistency_score": round(
-                        float(disc_grp["consistency_score"].mean()), 4
-                    ),
                     "n_components_scored": int(len(disc_grp)),
                     "PCS marks": n_marks,
                 }
@@ -509,9 +598,6 @@ def compute_judge_profiles(
                 "diff_score": round(_weighted_discipline_metric(disc_diff), 4),
                 "variance_ratio": round(pooled_var_ratio, 4),
                 "spread_tendency": spread_tendency_label(pooled_var_ratio),
-                "consistency_score": round(
-                    _weighted_discipline_metric(disc_consistency), 4
-                ),
                 "Mean Spearman ρ": float(np.mean(rhos)) if rhos else float("nan"),
                 "Disciplines": len(disc_ranking),
                 "PCS marks": pcs_marks,
@@ -596,25 +682,41 @@ def run_pcs_quality_analysis(
     competition_scope: str = COMPETITION_SCOPE_ALL,
 ) -> dict[str, Any]:
     """Load marks and return profiles, component detail, and mark counts."""
-    marks = load_pcs_quality_marks(
-        analytics,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        event_start_date=event_start_date,
-        event_end_date=event_end_date,
-        discipline_type_ids=discipline_type_ids,
-        competition_scope=competition_scope,
-    )
+    try:
+        marks = load_pcs_quality_marks(
+            analytics,
+            start_season_year=start_season_year,
+            end_season_year=end_season_year,
+            event_start_date=event_start_date,
+            event_end_date=event_end_date,
+            discipline_type_ids=discipline_type_ids,
+            competition_scope=competition_scope,
+        )
+    except ValueError as exc:
+        return {
+            "profiles": pd.DataFrame(),
+            "metric_rankings": {
+                slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
+            },
+            "component_detail": pd.DataFrame(),
+            "discipline_summary": pd.DataFrame(),
+            "n_raw_marks": 0,
+            "n_judges": 0,
+            "error": str(exc),
+        }
     id_map = analytics.get_judge_id_to_identity_label()
     profiles, detail, discipline_summary, metric_rankings = compute_judge_profiles(
         marks, id_map
     )
+    n_raw = len(marks)
+    del marks
+    gc.collect()
     return {
         "profiles": profiles,
         "metric_rankings": metric_rankings,
         "component_detail": detail,
         "discipline_summary": discipline_summary,
-        "n_raw_marks": len(marks),
+        "n_raw_marks": n_raw,
         "n_judges": len(profiles),
-        "error": None if not profiles.empty or marks.empty else "No PCS marks in scope.",
+        "error": None if not profiles.empty or n_raw == 0 else "No PCS marks in scope.",
     }
