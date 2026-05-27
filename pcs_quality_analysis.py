@@ -1,8 +1,10 @@
 """
 PCS judge quality vs panel medians (post-2022-07-01 competitions).
 
-Overall quality: per discipline, equal weight across whichever PCS components
-appear in that discipline; judge overall is mark-weighted across disciplines.
+Four independent alignment measures (ranking, bias, differentiation, consistency)
+are computed per judge × discipline × PCS component, then averaged within each
+discipline (equal weight across components) and across disciplines (mark-weighted).
+Each measure has its own ranking table — they are not combined into one score.
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ MIN_PCS_ANALYSIS_EVENT_DATE = date(2022, 7, 1)
 MIN_SKATERS_PER_SEGMENT_RANKING = 3
 RANKING_CORRELATION_FLOOR = 0.7
 RANKING_CORRELATION_SPAN = 0.3
+BIAS_NEUTRAL_THRESHOLD = 0.05
+SPREAD_RATIO_LENIENT = 1.1
+SPREAD_RATIO_HARSH = 0.9
 
 PCS_COMPONENT_DESCRIPTIONS: dict[str, str] = {
     "SS": "Skating Skills — blade work, flow, speed, and ice coverage.",
@@ -156,15 +161,42 @@ def bias_score(judge_scores: np.ndarray, panel_scores: np.ndarray) -> float:
     return _clamp01(1.0 - (abs(avg_bias) / 0.5))
 
 
-def differentiation_score(judge_scores: np.ndarray, panel_scores: np.ndarray) -> float:
+def variance_ratio(judge_scores: np.ndarray, panel_scores: np.ndarray) -> float:
+    """Judge mark variance / panel median variance (same slice as differentiation)."""
     if len(judge_scores) < 2:
-        return 0.0
+        return float("nan")
     jv = float(np.var(judge_scores, ddof=1))
     pv = float(np.var(panel_scores, ddof=1))
     if jv <= 0 or pv <= 0:
+        return float("nan")
+    return float(jv / pv)
+
+
+def bias_tendency_label(mean_bias: float) -> str:
+    if not np.isfinite(mean_bias):
+        return "—"
+    if mean_bias > BIAS_NEUTRAL_THRESHOLD:
+        return "Lenient (above panel)"
+    if mean_bias < -BIAS_NEUTRAL_THRESHOLD:
+        return "Harsh (below panel)"
+    return "Neutral (near panel)"
+
+
+def spread_tendency_label(var_ratio: float) -> str:
+    if not np.isfinite(var_ratio):
+        return "—"
+    if var_ratio > SPREAD_RATIO_LENIENT:
+        return "Wider than panel"
+    if var_ratio < SPREAD_RATIO_HARSH:
+        return "Narrower than panel"
+    return "Similar to panel"
+
+
+def differentiation_score(judge_scores: np.ndarray, panel_scores: np.ndarray) -> float:
+    if len(judge_scores) < 2:
         return 0.0
-    ratio = jv / pv
-    if ratio <= 0:
+    ratio = variance_ratio(judge_scores, panel_scores)
+    if not np.isfinite(ratio) or ratio <= 0:
         return 0.0
     return _clamp01(1.0 - abs(float(np.log(ratio))))
 
@@ -175,12 +207,6 @@ def consistency_score(judge_scores: np.ndarray, panel_scores: np.ndarray) -> flo
     biases = judge_scores - panel_scores
     sd = float(np.std(biases, ddof=1))
     return _clamp01(1.0 - (sd / 0.75))
-
-
-def component_quality_score(
-    ranking: float, bias: float, diff: float, consistency: float
-) -> float:
-    return 0.4 * ranking + 0.3 * bias + 0.2 * diff + 0.1 * consistency
 
 
 def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
@@ -201,8 +227,14 @@ def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
         "bias_score": bs,
         "diff_score": ds,
         "consistency_score": cs,
-        "component_quality": component_quality_score(rk, bs, ds, cs),
         "mean_bias": float(np.mean(biases)) if len(biases) else 0.0,
+        "bias_tendency": bias_tendency_label(
+            float(np.mean(biases)) if len(biases) else float("nan")
+        ),
+        "variance_ratio": variance_ratio(judge_scores, panel_scores),
+        "spread_tendency": spread_tendency_label(
+            variance_ratio(judge_scores, panel_scores)
+        ),
         "bias_std": bias_std,
         "n_marks": int(len(marks_df)),
         "n_segments_ranked": int(n_segments),
@@ -273,7 +305,6 @@ def load_pcs_quality_marks(
         [
             {
                 "judge_id": int(r.judge_id),
-                "judge_name": r.judge_name,
                 "skater_segment_id": int(r.skater_segment_id),
                 "pcs_type_id": int(r.pcs_type_id),
                 "pcs_type_name": r.pcs_type_name,
@@ -283,10 +314,6 @@ def load_pcs_quality_marks(
                 if r.discipline_type_id is not None
                 else None,
                 "discipline_name": r.discipline_name or "Unknown",
-                "season_year": str(r.year) if r.year else None,
-                "competition_name": r.competition_name,
-                "segment_name": r.segment_name,
-                "skater_name": r.skater_name,
             }
             for r in rows
         ]
@@ -312,156 +339,230 @@ def components_by_discipline_in_period(marks: pd.DataFrame) -> dict[int, list[st
     return out
 
 
-def _discipline_component_summary(
-    disc_df: pd.DataFrame,
-    period_components: list[str],
-) -> tuple[list[str], list[str], dict[str, float], dict[str, float]]:
-    """
-    Equal-weight component qualities for one judge × one discipline.
+def _weighted_discipline_metric(
+    discipline_avgs: list[tuple[float, float]],
+) -> float:
+    """Mark-weighted mean across disciplines: [(score, n_marks), ...]."""
+    if not discipline_avgs:
+        return 0.0
+    weights = [w for _, w in discipline_avgs]
+    total_w = sum(weights)
+    if total_w <= 0:
+        return float(np.mean([s for s, _ in discipline_avgs]))
+    return float(
+        sum(s * w for s, w in discipline_avgs) / total_w
+    )
 
-    ``period_components`` is the full component set for that discipline in the
-    filtered time window; only components the judge actually marked are scored.
-    """
-    judge_components = set(disc_df["component"].dropna().unique())
-    scored = [c for c in period_components if c in judge_components]
-    comp_scores: dict[str, float] = {}
-    comp_bias: dict[str, float] = {}
-    for comp in scored:
-        sub = disc_df.loc[disc_df["component"] == comp]
-        m = compute_component_metrics(sub)
-        comp_scores[comp] = m["component_quality"]
-        comp_bias[comp] = m["mean_bias"]
-    return period_components, scored, comp_scores, comp_bias
+
+def build_metric_ranking_table(
+    profile_rows: list[dict[str, Any]], metric_key: str, score_label: str
+) -> pd.DataFrame:
+    """Sort judges by one metric (higher = better alignment)."""
+    if not profile_rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(profile_rows)
+    sort_col = {
+        "ranking_score": "Ranking score",
+        "bias_score": "Bias score",
+        "diff_score": "Differentiation score",
+        "consistency_score": "Consistency score",
+    }.get(metric_key, score_label)
+    if metric_key not in df.columns:
+        return pd.DataFrame()
+    df = df.sort_values(metric_key, ascending=False).reset_index(drop=True)
+    out = pd.DataFrame(
+        {
+            "Rank": range(1, len(df) + 1),
+            "Judge": df["Judge"],
+            sort_col: df[metric_key].round(4),
+            "Disciplines": df.get("Disciplines", 0),
+            "PCS marks": df.get("PCS marks", 0),
+        }
+    )
+    if metric_key == "ranking_score" and "Mean Spearman ρ" in df.columns:
+        out.insert(3, "Mean Spearman ρ", df["Mean Spearman ρ"].round(3))
+    if metric_key == "bias_score":
+        if "mean_bias" in df.columns:
+            out.insert(3, "Mean bias", df["mean_bias"].round(3))
+        if "bias_tendency" in df.columns:
+            out.insert(4, "Tendency", df["bias_tendency"])
+    if metric_key == "diff_score":
+        if "variance_ratio" in df.columns:
+            out.insert(3, "Var ratio", df["variance_ratio"].round(2))
+        if "spread_tendency" in df.columns:
+            out.insert(4, "Spread vs panel", df["spread_tendency"])
+    return out
+
+
+PCS_METRIC_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
+    ("ranking_score", "Ranking score", "ranking"),
+    ("bias_score", "Bias score", "bias"),
+    ("diff_score", "Differentiation score", "differentiation"),
+    ("consistency_score", "Consistency score", "consistency"),
+)
 
 
 def compute_judge_profiles(
     marks: pd.DataFrame, judge_id_to_identity: dict[int, str]
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
     """
-    Build judge profiles, per-judge×discipline×component detail, and discipline summaries.
+    Build judge profiles, per-judge×discipline×component detail, discipline summaries,
+    and one ranking table per metric.
 
-    Returns ``(profiles_df, component_detail_df, discipline_summary_df)``.
+    Returns ``(profiles_df, component_detail_df, discipline_summary_df, metric_rankings)``.
     """
+    empty_rankings = {
+        slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
+    }
     if marks.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
 
-    work = marks.copy()
-    work["identity"] = work["judge_id"].map(judge_id_to_identity)
+    work = marks
+    if "identity" not in work.columns:
+        work = marks.copy()
+        work["identity"] = work["judge_id"].map(judge_id_to_identity)
     work = work.dropna(subset=["identity"])
 
     period_by_discipline = components_by_discipline_in_period(work)
 
     component_rows: list[dict[str, Any]] = []
+    for (identity, disc_id, comp), grp in work.groupby(
+        ["identity", "discipline_type_id", "component"], sort=False
+    ):
+        period_components = period_by_discipline.get(int(disc_id), [])
+        if comp not in period_components:
+            continue
+        m = compute_component_metrics(grp)
+        component_rows.append(
+            {
+                "identity": identity,
+                "discipline": str(grp["discipline_name"].iloc[0]),
+                "component": comp,
+                **m,
+            }
+        )
+
+    if not component_rows:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
+
+    detail = pd.DataFrame(component_rows)
     discipline_rows: list[dict[str, Any]] = []
     profile_rows: list[dict[str, Any]] = []
 
-    for identity, id_df in work.groupby("identity", sort=False):
-        all_comp_qualities: list[float] = []
-        ranking_scores: list[float] = []
-        bias_scores: list[float] = []
-        diff_scores: list[float] = []
-        consistency_scores: list[float] = []
-        disc_overalls: list[float] = []
-        disc_weights: list[float] = []
+    for identity, id_df in detail.groupby("identity", sort=False):
+        disc_ranking: list[tuple[float, float]] = []
+        disc_bias: list[tuple[float, float]] = []
+        disc_mean_bias: list[tuple[float, float]] = []
+        disc_diff: list[tuple[float, float]] = []
+        disc_var_ratio: list[tuple[float, float]] = []
+        disc_consistency: list[tuple[float, float]] = []
+        rhos: list[float] = []
+        pcs_marks = 0
 
-        for disc_id, disc_df in id_df.groupby("discipline_type_id", sort=False):
-            disc_name = str(disc_df["discipline_name"].iloc[0])
-            period_components = period_by_discipline.get(int(disc_id), [])
-            if not period_components:
-                continue
-
-            period_components, scored, comp_scores, _ = (
-                _discipline_component_summary(disc_df, period_components)
+        for (_disc_name, disc_grp) in id_df.groupby("discipline", sort=False):
+            n_marks = int(disc_grp["n_marks"].sum())
+            w = disc_grp["n_marks"].to_numpy(dtype=float)
+            pcs_marks += n_marks
+            disc_ranking.append((float(disc_grp["ranking_score"].mean()), float(n_marks)))
+            disc_bias.append((float(disc_grp["bias_score"].mean()), float(n_marks)))
+            mb = float(np.average(disc_grp["mean_bias"], weights=w))
+            disc_mean_bias.append((mb, float(n_marks)))
+            disc_diff.append((float(disc_grp["diff_score"].mean()), float(n_marks)))
+            vr = float(np.average(disc_grp["variance_ratio"], weights=w))
+            disc_var_ratio.append((vr, float(n_marks)))
+            disc_consistency.append(
+                (float(disc_grp["consistency_score"].mean()), float(n_marks))
             )
-            if not comp_scores:
-                continue
-
-            disc_overall = float(np.mean(list(comp_scores.values())))
-            disc_overalls.append(disc_overall)
-            disc_weights.append(float(len(disc_df)))
-
+            for rho in disc_grp["spearman_rho"]:
+                if rho is not None and np.isfinite(rho):
+                    rhos.append(float(rho))
             discipline_rows.append(
                 {
                     "identity": identity,
-                    "discipline": disc_name,
-                    "discipline_quality": round(disc_overall, 4),
-                    "n_components_scored": len(scored),
-                    "PCS marks": int(len(disc_df)),
+                    "discipline": str(_disc_name),
+                    "ranking_score": round(
+                        float(disc_grp["ranking_score"].mean()), 4
+                    ),
+                    "bias_score": round(float(disc_grp["bias_score"].mean()), 4),
+                    "mean_bias": round(mb, 4),
+                    "bias_tendency": bias_tendency_label(mb),
+                    "diff_score": round(float(disc_grp["diff_score"].mean()), 4),
+                    "variance_ratio": round(vr, 4),
+                    "spread_tendency": spread_tendency_label(vr),
+                    "consistency_score": round(
+                        float(disc_grp["consistency_score"].mean()), 4
+                    ),
+                    "n_components_scored": int(len(disc_grp)),
+                    "PCS marks": n_marks,
                 }
             )
 
-            for comp in scored:
-                sub = disc_df.loc[disc_df["component"] == comp]
-                m = compute_component_metrics(sub)
-                all_comp_qualities.append(m["component_quality"])
-                ranking_scores.append(m["ranking_score"])
-                bias_scores.append(m["bias_score"])
-                diff_scores.append(m["diff_score"])
-                consistency_scores.append(m["consistency_score"])
-                component_rows.append(
-                    {
-                        "identity": identity,
-                        "discipline": disc_name,
-                        "component": comp,
-                        **m,
-                    }
-                )
-
-        if not disc_overalls:
-            continue
-
-        overall = float(np.average(disc_overalls, weights=disc_weights))
-        comp_var = (
-            float(np.std(all_comp_qualities, ddof=0))
-            if len(all_comp_qualities) > 1
-            else 0.0
-        )
-
+        pooled_mean_bias = _weighted_discipline_metric(disc_mean_bias)
+        pooled_var_ratio = _weighted_discipline_metric(disc_var_ratio)
         profile_rows.append(
             {
                 "Judge": identity,
-                "Overall quality": round(overall, 4),
-                "Ranking": round(float(np.mean(ranking_scores)), 4),
-                "Bias": round(float(np.mean(bias_scores)), 4),
-                "Differentiation": round(float(np.mean(diff_scores)), 4),
-                "Consistency": round(float(np.mean(consistency_scores)), 4),
-                "Disciplines": len(disc_overalls),
-                "Component σ": round(comp_var, 4),
-                "PCS marks": int(len(id_df)),
+                "ranking_score": round(_weighted_discipline_metric(disc_ranking), 4),
+                "bias_score": round(_weighted_discipline_metric(disc_bias), 4),
+                "mean_bias": round(pooled_mean_bias, 4),
+                "bias_tendency": bias_tendency_label(pooled_mean_bias),
+                "diff_score": round(_weighted_discipline_metric(disc_diff), 4),
+                "variance_ratio": round(pooled_var_ratio, 4),
+                "spread_tendency": spread_tendency_label(pooled_var_ratio),
+                "consistency_score": round(
+                    _weighted_discipline_metric(disc_consistency), 4
+                ),
+                "Mean Spearman ρ": float(np.mean(rhos)) if rhos else float("nan"),
+                "Disciplines": len(disc_ranking),
+                "PCS marks": pcs_marks,
             }
         )
 
     profiles = pd.DataFrame(profile_rows)
-    if not profiles.empty:
-        profiles = profiles.sort_values("Overall quality", ascending=False).reset_index(
-            drop=True
-        )
-        profiles.insert(0, "Rank", range(1, len(profiles) + 1))
-
-    detail = pd.DataFrame(component_rows)
     discipline_summary = pd.DataFrame(discipline_rows)
-    return profiles, detail, discipline_summary
+    metric_rankings = {
+        slug: build_metric_ranking_table(profile_rows, key, label)
+        for key, label, slug in PCS_METRIC_DEFINITIONS
+    }
+    return profiles, detail, discipline_summary, metric_rankings
 
 
 def apply_min_pcs_marks_to_result(
     result: dict[str, Any], min_pcs_marks: int
 ) -> dict[str, Any]:
     """Drop judges below ``min_pcs_marks`` PCS lines in scope; re-rank survivors."""
-    min_pcs_marks = int(min_pcs_marks or 0)
-    if min_pcs_marks <= 0 or not result:
+    if not result:
         return result
+    min_pcs_marks = int(min_pcs_marks or 0)
+    if result.get("_min_pcs_applied") == min_pcs_marks:
+        return result
+
+    if min_pcs_marks <= 0:
+        out = dict(result)
+        out.pop("marks", None)
+        profiles = out.get("profiles")
+        if profiles is not None and not profiles.empty and not out.get("metric_rankings"):
+            rows = profiles.to_dict("records")
+            out["metric_rankings"] = {
+                slug: build_metric_ranking_table(rows, key, label)
+                for key, label, slug in PCS_METRIC_DEFINITIONS
+            }
+        out["_min_pcs_applied"] = 0
+        out.pop("marks", None)
+        return out
 
     profiles = result.get("profiles")
     if profiles is None or profiles.empty:
         return result
 
     kept = profiles.loc[profiles["PCS marks"] >= min_pcs_marks].copy()
-    kept = kept.sort_values("Overall quality", ascending=False).reset_index(drop=True)
-    if "Rank" in kept.columns:
-        kept = kept.drop(columns=["Rank"])
-    kept.insert(0, "Rank", range(1, len(kept) + 1))
-
     kept_judges = set(kept["Judge"].tolist())
+    kept_rows = kept.to_dict("records")
+    metric_rankings = {
+        slug: build_metric_ranking_table(kept_rows, key, label)
+        for key, label, slug in PCS_METRIC_DEFINITIONS
+    }
+
     detail = result.get("component_detail", pd.DataFrame())
     if not detail.empty:
         detail = detail.loc[detail["identity"].isin(kept_judges)].copy()
@@ -472,12 +573,15 @@ def apply_min_pcs_marks_to_result(
         ].copy()
 
     out = dict(result)
+    out.pop("marks", None)
     out["profiles"] = kept
+    out["metric_rankings"] = metric_rankings
     out["component_detail"] = detail
     out["discipline_summary"] = discipline_summary
     out["n_judges"] = len(kept)
     out["n_judges_before_min_filter"] = len(profiles)
     out["min_pcs_marks"] = min_pcs_marks
+    out["_min_pcs_applied"] = min_pcs_marks
     return out
 
 
@@ -502,10 +606,12 @@ def run_pcs_quality_analysis(
         competition_scope=competition_scope,
     )
     id_map = analytics.get_judge_id_to_identity_label()
-    profiles, detail, discipline_summary = compute_judge_profiles(marks, id_map)
+    profiles, detail, discipline_summary, metric_rankings = compute_judge_profiles(
+        marks, id_map
+    )
     return {
-        "marks": marks,
         "profiles": profiles,
+        "metric_rankings": metric_rankings,
         "component_detail": detail,
         "discipline_summary": discipline_summary,
         "n_raw_marks": len(marks),

@@ -121,6 +121,7 @@ def load_element_marking_data(
             Element.element_type_id,
             Competition.year.label("competition_year"),
         )
+        .select_from(ElementScorePerJudge)
         .join(Element, ElementScorePerJudge.element_id == Element.id)
         .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
         .join(Segment, SkaterSegment.segment_id == Segment.id)
@@ -169,14 +170,15 @@ def compute_element_ranking_data_fingerprint(
     where_clause = build_element_mark_filters(
         start_season_year, end_season_year, discipline_type_ids
     )
-    # Same join order as ``load_element_marking_data`` (no ``select_from`` — avoids
-    # SQLAlchemy adding a second ``competition`` alias when filtering on Competition).
+    # Count competitions via ``Segment.competition_id`` (not ``Competition.id``) so
+    # SQLAlchemy does not add a second ``competition`` FROM entry for the aggregate.
     stmt = (
         select(
             func.count(ElementScorePerJudge.id),
             func.coalesce(func.max(ElementScorePerJudge.id), 0),
-            func.count(func.distinct(Competition.id)),
+            func.count(func.distinct(Segment.competition_id)),
         )
+        .select_from(ElementScorePerJudge)
         .join(Element, ElementScorePerJudge.element_id == Element.id)
         .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
         .join(Segment, SkaterSegment.segment_id == Segment.id)

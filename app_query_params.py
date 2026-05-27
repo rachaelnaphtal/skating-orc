@@ -458,11 +458,19 @@ def apply_analysis_filters_for_page(
         scope_label = st.session_state.get(
             "pcs_quality_competition_scope", "All competitions"
         )
-        apply_multiselect_param(
+        disc_names = _discipline_names_for_scope(analytics, scope_label)
+        if not apply_multiselect_param(
             "disciplines",
             "pcs_quality_disciplines",
-            _discipline_names_for_scope(analytics, scope_label),
-        )
+            disc_names,
+        ):
+            import streamlit as st
+
+            if "pcs_quality_disciplines" not in st.session_state:
+                if "Singles" in disc_names:
+                    st.session_state["pcs_quality_disciplines"] = ["Singles"]
+                elif disc_names:
+                    st.session_state["pcs_quality_disciplines"] = [disc_names[0]]
 
     elif page == "Element Deviation Ranking Analysis":
         apply_choice_param(

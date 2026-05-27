@@ -133,6 +133,50 @@ class JudgeSummaryCache(Base):
     computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
 
+class CrossJudgeCompetitionShard(Base):
+    """Per-competition judge×discipline score aggregates for cross-judge benchmarking."""
+
+    __tablename__ = "cross_judge_competition_shard"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "competition_id",
+            "discipline_type_id",
+            "judge_id",
+            name="cross_judge_competition_shard_pkey",
+        ),
+        Index("idx_cross_judge_shard_competition", "competition_id"),
+        Index("idx_cross_judge_shard_year", "competition_year"),
+    )
+
+    competition_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    discipline_type_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    judge_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competition_year: Mapped[str] = mapped_column(String(8))
+    pcs_total: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pcs_throwouts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pcs_anomalies: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pcs_rule_errors: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    pcs_sum_deviation: Mapped[float] = mapped_column(
+        Double, server_default=text("0")
+    )
+    pcs_sum_abs_deviation: Mapped[float] = mapped_column(
+        Double, server_default=text("0")
+    )
+    elem_total: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    elem_throwouts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    elem_anomalies: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    elem_rule_errors: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    elem_sum_deviation: Mapped[float] = mapped_column(
+        Double, server_default=text("0")
+    )
+    elem_sum_abs_deviation: Mapped[float] = mapped_column(
+        Double, server_default=text("0")
+    )
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class ElementDeviationRankingShardCache(Base):
     """Per-season, per-discipline element marks (assembled into full rankings on read)."""
 

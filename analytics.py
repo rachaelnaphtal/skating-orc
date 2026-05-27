@@ -1770,6 +1770,25 @@ class JudgeAnalytics:
         event_end_date: date | None = None,
     ):
         """Get data for judge performance heatmap"""
+        from cross_judge_cache import (
+            assemble_judge_overview_heatmap,
+            shard_cache_populated,
+        )
+
+        if shard_cache_populated(self.session):
+            cached = assemble_judge_overview_heatmap(
+                self,
+                metric=metric,
+                score_type=score_type,
+                year_filter=year_filter,
+                competition_ids=competition_ids,
+                discipline_type_ids=discipline_type_ids,
+                competition_scope=competition_scope,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
+            )
+            if cached is not None:
+                return cached
 
         judge_id_to_label = self.get_judge_id_to_identity_label()
         core_disc = self._qualifying_core_disciplines_active(competition_scope)
@@ -1975,6 +1994,26 @@ class JudgeAnalytics:
         Aggregate all judge scores matching the same filters as cross-judge benchmarking.
         Rates are global counts / total scores (each score weighted equally, not each judge).
         """
+        from cross_judge_cache import (
+            assemble_pooled_cross_judge_metrics,
+            shard_cache_populated,
+        )
+
+        if shard_cache_populated(self.session):
+            cached = assemble_pooled_cross_judge_metrics(
+                self,
+                score_type=score_type,
+                year_filter=year_filter,
+                competition_ids=competition_ids,
+                discipline_type_ids=discipline_type_ids,
+                competition_scope=competition_scope,
+                include_excess=include_excess,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
+            )
+            if cached is not None:
+                return cached
+
         core_disc = self._qualifying_core_disciplines_active(competition_scope)
         seg_discipline_ids = self._merged_segment_discipline_ids(
             core_disc, discipline_type_ids
@@ -2308,6 +2347,22 @@ class JudgeAnalytics:
         event_end_date: date | None = None,
     ):
         """Fast version: judge vs competition heatmap with batch queries"""
+        from cross_judge_cache import (
+            assemble_judge_competition_heatmap,
+            shard_cache_populated,
+        )
+
+        if shard_cache_populated(self.session):
+            cached = assemble_judge_competition_heatmap(
+                self,
+                metric=metric,
+                score_type=score_type,
+                competition_scope=competition_scope,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
+            )
+            if cached is not None:
+                return cached
 
         core_disc = self._qualifying_core_disciplines_active(competition_scope)
         seg_discipline_ids = self._merged_segment_discipline_ids(core_disc, None)

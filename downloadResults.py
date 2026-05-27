@@ -1126,6 +1126,11 @@ def scrape(
             invalidate_element_ranking_cache_for_competition(
                 database_obj.session, competition_id
             )
+            from cross_judge_cache import build_cross_judge_shards_for_competition
+
+            build_cross_judge_shards_for_competition(
+                database_obj.session, competition_id
+            )
             database_obj.commit()
         warnings = pop_warnings()
         log_competition_summary(
