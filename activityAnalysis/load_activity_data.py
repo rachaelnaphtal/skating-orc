@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+from functools import lru_cache
 from typing import Any
 try:
     from activityAnalysis.officials_analysis_models import (
@@ -65,6 +66,11 @@ def _build_engine(database_url):
             "connect_timeout": connect_timeout,
         }
         engine_kwargs["pool_pre_ping"] = True
+        # Heroku/low-limit Postgres roles: one shared pool per process (see get_engine).
+        engine_kwargs["pool_size"] = int(os.environ.get("SQLALCHEMY_POOL_SIZE", "2"))
+        engine_kwargs["max_overflow"] = int(os.environ.get("SQLALCHEMY_MAX_OVERFLOW", "1"))
+        engine_kwargs["pool_recycle"] = int(os.environ.get("SQLALCHEMY_POOL_RECYCLE", "300"))
+        engine_kwargs["pool_timeout"] = int(os.environ.get("SQLALCHEMY_POOL_TIMEOUT", "30"))
     return create_engine(database_url, **engine_kwargs)
 
 
@@ -134,7 +140,14 @@ def _seed_local_sqlite_data_if_empty(db_engine):
         session.commit()
 
 
+@lru_cache(maxsize=1)
 def get_engine():
+    """
+    Process-wide SQLAlchemy engine (cached).
+
+    Streamlit reruns the script often; without caching, each ``get_engine()`` call
+    allocates a new connection pool and can exhaust Postgres role connection limits.
+    """
     database_url = _resolve_database_url()
     db_engine = _build_engine(database_url)
     if database_url.startswith("sqlite:"):

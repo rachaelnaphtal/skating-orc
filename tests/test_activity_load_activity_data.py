@@ -60,6 +60,8 @@ def test_build_engine_uses_postgres_search_path(monkeypatch):
     assert ca["options"] == "-csearch_path=officials_analysis"
     assert ca["connect_timeout"] == 15
     assert captured["kwargs"]["pool_pre_ping"] is True
+    assert captured["kwargs"]["pool_size"] == 2
+    assert captured["kwargs"]["max_overflow"] == 1
 
 
 def test_get_appointments_by_achieved_date_range_empty_when_end_before_start():
