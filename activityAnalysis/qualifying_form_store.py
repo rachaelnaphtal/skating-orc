@@ -92,6 +92,7 @@ try:
         _resolve_discipline_ids,
         count_official_segment_competitions_batch,
         get_engine,
+        calendar_years_for_usfs_season_codes,
         other_comps_segment_season_year_codes,
         segment_discipline_type_ids_for_directory,
     )
@@ -105,6 +106,7 @@ except ModuleNotFoundError:
         _resolve_discipline_ids,
         count_official_segment_competitions_batch,
         get_engine,
+        calendar_years_for_usfs_season_codes,
         other_comps_segment_season_year_codes,
         segment_discipline_type_ids_for_directory,
     )
@@ -1435,6 +1437,9 @@ def build_qualifying_availability_report(
             in_role_discipline_id=in_role_discipline_id,
         )
         season_codes = other_comps_segment_season_year_codes()
+        meta["other_comp_calendar_years"] = calendar_years_for_usfs_season_codes(
+            season_codes
+        )
         other_comp_cache = count_official_segment_competitions_batch(
             report_oids,
             season_year_codes=season_codes,

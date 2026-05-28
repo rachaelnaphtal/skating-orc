@@ -1,7 +1,10 @@
+import logging
 import os
 import pandas as pd
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 try:
     from activityAnalysis.officials_analysis_models import (
         Base,
@@ -2133,6 +2136,41 @@ def other_comps_segment_season_year_codes() -> list[int]:
     return list(OTHER_COMPS_SEGMENT_SEASON_CODES)
 
 
+def calendar_years_for_usfs_season_codes(codes: Iterable[int]) -> list[int]:
+    """
+    Calendar years that overlap USFS season codes (e.g. 2526 → 2025 and 2026).
+
+    Cloud DBs often store ``competition.year`` as 2025/2026; local scrapes may use 2526.
+    """
+    years: set[int] = set()
+    for code in codes:
+        try:
+            c = int(code)
+        except (TypeError, ValueError):
+            continue
+        if 1000 <= c <= 9999:
+            sy, ey = c // 100, c % 100
+            years.add(2000 + sy)
+            years.add(2000 + ey)
+        elif 2000 <= c <= 2100:
+            years.add(c)
+    return sorted(years)
+
+
+def _segment_competition_year_sql_predicate() -> str:
+    """Match USFS season codes and 4-digit calendar years on ``competition.year``."""
+    return """
+              AND btrim(c.year::text) ~ '^[0-9]+$'
+              AND (
+                (btrim(c.year::text)::integer IN :season_year_codes)
+                OR (
+                  btrim(c.year::text) ~ '^[0-9]{4}$'
+                  AND btrim(c.year::text)::integer IN :calendar_year_codes
+                )
+              )
+"""
+
+
 def segment_discipline_type_ids_for_directory(
     discipline_id: int,
     appointment_type_id: int,
@@ -2181,9 +2219,9 @@ def count_official_segment_competitions_batch(
     Distinct ``public.competition`` rows per directory official from ``segment_official``
     (same attribution as :func:`get_official_segment_official_activity_detail`).
 
-    Includes qualifying and nonqualifying competitions whose ``competition.year`` is one
-    of ``season_year_codes`` (USFS YYXX codes, default
-    :data:`OTHER_COMPS_SEGMENT_SEASON_CODES`).
+    Includes qualifying and nonqualifying competitions whose ``competition.year`` is a
+    USFS season code in ``season_year_codes`` (e.g. 2526) **or** a matching 4-digit
+    calendar year (e.g. 2025, 2026 for code 2526).
 
     When ``appointment_type_id`` / ``segment_discipline_type_ids`` are set, only
     ``segment_official`` rows matching those protocol role and segment disciplines count.
@@ -2196,6 +2234,9 @@ def count_official_segment_competitions_batch(
     codes = list(season_year_codes or other_comps_segment_season_year_codes())
     if not codes:
         return out
+    calendar_years = calendar_years_for_usfs_season_codes(codes)
+    if not calendar_years:
+        return out
 
     if segment_discipline_type_ids is not None and not segment_discipline_type_ids:
         return out
@@ -2204,6 +2245,7 @@ def count_official_segment_competitions_batch(
     bind_params = [
         bindparam("official_ids", expanding=True),
         bindparam("season_year_codes", expanding=True),
+        bindparam("calendar_year_codes", expanding=True),
     ]
     if appointment_type_id is not None:
         role_clauses += "              AND so.appointment_type_id = :appointment_type_id\n"
@@ -2238,9 +2280,7 @@ def count_official_segment_competitions_batch(
               ) AS directory_official_id
             ) AS attrib
             WHERE attrib.directory_official_id IS NOT NULL
-              AND c.year ~ '^[0-9]+$'
-              AND c.year::integer IN :season_year_codes
-{role_clauses}            GROUP BY attrib.directory_official_id
+{_segment_competition_year_sql_predicate()}{role_clauses}            GROUP BY attrib.directory_official_id
             """
         )
         .bindparams(*bind_params)
@@ -2248,6 +2288,7 @@ def count_official_segment_competitions_batch(
     params: dict[str, Any] = {
         "official_ids": [int(x) for x in official_ids],
         "season_year_codes": [int(x) for x in codes],
+        "calendar_year_codes": [int(x) for x in calendar_years],
     }
     if appointment_type_id is not None:
         params["appointment_type_id"] = int(appointment_type_id)
@@ -2258,6 +2299,10 @@ def count_official_segment_competitions_batch(
         with Session(engine) as session:
             rows = session.execute(stmt, params).all()
     except Exception:
+        logger.exception(
+            "count_official_segment_competitions_batch failed for %s officials",
+            len(official_ids),
+        )
         return out
     for oid, cnt in rows:
         out[int(oid)] = int(cnt or 0)

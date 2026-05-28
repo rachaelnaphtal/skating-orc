@@ -845,10 +845,20 @@ def render_qualifying_availability_page(
     season_codes = meta.get("other_comp_season_codes") or []
     if season_codes:
         codes = ", ".join(str(c) for c in season_codes)
+        cal_years = ", ".join(
+            str(y)
+            for y in (meta.get("other_comp_calendar_years") or [])
+        )
+        cal_part = (
+            f" or calendar years **{cal_years}**"
+            if cal_years
+            else ""
+        )
         st.caption(
             f"**Total comps (2 yr)** counts distinct competitions from IJS protocol data "
-            f"(``segment_official``) with season year **{codes}**, same source as "
-            "**Additional Qualifying / Nonqualifying Activity** on the per-person report. "
+            f"(``segment_official``) with USFS season **{codes}**{cal_part} on "
+            "``competition.year``, same source as **Additional Qualifying / "
+            "Nonqualifying Activity** on the per-person report. "
             + (
                 "**Total comps (2 yr, in role)** uses the same seasons but only panels "
                 "matching the selected appointment type and discipline. "
