@@ -12,8 +12,6 @@ try:
         CompetitionType,
         AppointmentTypes,
         Levels,
-        OfficialQualifyingAvailability,
-        OfficialQualifyingSupplemental,
     )
 except ModuleNotFoundError:
     from officials_analysis_models import (
@@ -26,26 +24,6 @@ except ModuleNotFoundError:
         CompetitionType,
         AppointmentTypes,
         Levels,
-        OfficialQualifyingAvailability,
-        OfficialQualifyingSupplemental,
-    )
-try:
-    from activityAnalysis.qualifying_availability_ingest import (
-        load_original_sheet,
-        melt_competition_availability,
-        build_respondent_supplemental_snapshot,
-        normalize_member_number_value,
-        normalize_qualifying_availability_cell,
-        conflicts_ethics_related_columns,
-    )
-except ModuleNotFoundError:
-    from qualifying_availability_ingest import (
-        load_original_sheet,
-        melt_competition_availability,
-        build_respondent_supplemental_snapshot,
-        normalize_member_number_value,
-        normalize_qualifying_availability_cell,
-        conflicts_ethics_related_columns,
     )
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, select, func, and_, or_, case, text, bindparam, tuple_
@@ -2133,6 +2111,146 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+# USFS ``competition.year`` codes for qualifying availability "total comps" window.
+OTHER_COMPS_SEGMENT_SEASON_CODES: tuple[int, ...] = (2425, 2526, 2627)
+
+
+def other_comps_segment_season_year_codes() -> list[int]:
+    """Season codes counted in the qualifying availability total-comps column."""
+    return list(OTHER_COMPS_SEGMENT_SEASON_CODES)
+
+
+def segment_discipline_type_ids_for_directory(
+    discipline_id: int,
+    appointment_type_id: int,
+) -> tuple[int, ...]:
+    """
+    Map directory ``discipline_id`` + ``appointment_type_id`` to IJS
+    ``public.segment.discipline_type_id`` values for protocol activity filters.
+    """
+    try:
+        did = int(discipline_id)
+        atid = int(appointment_type_id)
+    except (TypeError, ValueError):
+        return ()
+
+    if did == DISC_SYNCHRO_ID:
+        sync_id = _nqs_synchronized_segment_discipline_type_id()
+        return (sync_id,) if sync_id is not None else ()
+
+    resolved = _resolve_discipline_ids(did, atid) or [did]
+    out: set[int] = set()
+    for d in resolved:
+        if d == SINGLES_DISCIPLINE_ID:
+            out.add(NQS_SEGMENT_DISCIPLINE_TYPE_SINGLES)
+        elif d == DISC_PAIRS_ID:
+            out.add(NQS_SEGMENT_DISCIPLINE_TYPE_PAIRS)
+        elif d == DISC_DANCE_ID:
+            out.add(NQS_SEGMENT_DISCIPLINE_TYPE_ICE_DANCE)
+        elif d == DISC_SINGLES_PAIRS_ID:
+            out.add(NQS_SEGMENT_DISCIPLINE_TYPE_SINGLES)
+            out.add(NQS_SEGMENT_DISCIPLINE_TYPE_PAIRS)
+        elif d == DISC_SYNCHRO_ID:
+            sync_id = _nqs_synchronized_segment_discipline_type_id()
+            if sync_id is not None:
+                out.add(sync_id)
+    return tuple(sorted(out))
+
+
+def count_official_segment_competitions_batch(
+    official_ids: list[int],
+    *,
+    season_year_codes: list[int] | None = None,
+    appointment_type_id: int | None = None,
+    segment_discipline_type_ids: tuple[int, ...] | None = None,
+) -> dict[int, int]:
+    """
+    Distinct ``public.competition`` rows per directory official from ``segment_official``
+    (same attribution as :func:`get_official_segment_official_activity_detail`).
+
+    Includes qualifying and nonqualifying competitions whose ``competition.year`` is one
+    of ``season_year_codes`` (USFS YYXX codes, default
+    :data:`OTHER_COMPS_SEGMENT_SEASON_CODES`).
+
+    When ``appointment_type_id`` / ``segment_discipline_type_ids`` are set, only
+    ``segment_official`` rows matching those protocol role and segment disciplines count.
+    An empty ``segment_discipline_type_ids`` tuple returns all zeros (no matching segments).
+    """
+    out: dict[int, int] = {int(oid): 0 for oid in official_ids}
+    if not official_ids or not activity_database_is_postgresql():
+        return out
+
+    codes = list(season_year_codes or other_comps_segment_season_year_codes())
+    if not codes:
+        return out
+
+    if segment_discipline_type_ids is not None and not segment_discipline_type_ids:
+        return out
+
+    role_clauses = ""
+    bind_params = [
+        bindparam("official_ids", expanding=True),
+        bindparam("season_year_codes", expanding=True),
+    ]
+    if appointment_type_id is not None:
+        role_clauses += "              AND so.appointment_type_id = :appointment_type_id\n"
+        bind_params.append(bindparam("appointment_type_id"))
+    if segment_discipline_type_ids:
+        role_clauses += (
+            "              AND s.discipline_type_id IN :segment_discipline_type_ids\n"
+        )
+        bind_params.append(bindparam("segment_discipline_type_ids", expanding=True))
+
+    stmt = (
+        text(
+            f"""
+            SELECT attrib.directory_official_id AS official_id,
+                   COUNT(DISTINCT c.id) AS n_competitions
+            FROM public.segment_official so
+            INNER JOIN public.segment s ON s.id = so.segment_id
+            INNER JOIN public.competition c ON c.id = s.competition_id
+            CROSS JOIN LATERAL (
+              SELECT COALESCE(
+                CASE WHEN so.official_id IN :official_ids THEN so.official_id END,
+                (
+                  SELECT MIN(jol.official_id)
+                  FROM public.judge_official_link jol
+                  INNER JOIN public.judge j ON j.id = jol.judge_id
+                  WHERE jol.status = 'linked'
+                    AND jol.official_id IN :official_ids
+                    AND jol.official_id IS NOT NULL
+                    AND so.official_name IS NOT NULL
+                    AND lower(btrim(j.name)) = lower(btrim(so.official_name))
+                )
+              ) AS directory_official_id
+            ) AS attrib
+            WHERE attrib.directory_official_id IS NOT NULL
+              AND c.year ~ '^[0-9]+$'
+              AND c.year::integer IN :season_year_codes
+{role_clauses}            GROUP BY attrib.directory_official_id
+            """
+        )
+        .bindparams(*bind_params)
+    )
+    params: dict[str, Any] = {
+        "official_ids": [int(x) for x in official_ids],
+        "season_year_codes": [int(x) for x in codes],
+    }
+    if appointment_type_id is not None:
+        params["appointment_type_id"] = int(appointment_type_id)
+    if segment_discipline_type_ids:
+        params["segment_discipline_type_ids"] = list(segment_discipline_type_ids)
+
+    try:
+        with Session(engine) as session:
+            rows = session.execute(stmt, params).all()
+    except Exception:
+        return out
+    for oid, cnt in rows:
+        out[int(oid)] = int(cnt or 0)
+    return out
+
+
 def get_official_segment_official_competitions(official_id: int) -> pd.DataFrame:
     """
     Unique competitions for this official in ``segment_official`` (summary only).
@@ -3220,147 +3338,6 @@ def _json_safe_qualifying_value(value: object) -> object:
     return str(value)
 
 
-def load_qualifying_availability_workbook(
-    path: str,
-    *,
-    sheet_name: str | None = None,
-    only_complete_responses: bool = True,
-    allow_missing_completion_status: bool = False,
-    completion_status_column: str | None = None,
-    commit: bool = True,
-    engine=None,
-) -> dict[str, Any]:
-    """
-    Read a qualifying availability workbook and update
-    ``official_qualifying_availability`` and ``official_qualifying_supplemental``.
-
-    **Availability:** Only **explicitly available** answers are stored. A row in
-    ``official_qualifying_availability`` means that official said yes for that
-    ``competition_key``. Empty cells, “no”, **“does not apply”**, and anything else
-    not classified as available **remove** any existing row for that (official,
-    competition), so **absence of a row** means not available / not responded / N/A
-    (same as never uploaded).
-
-    Rows are matched to ``officials`` via normalized ``mbr_number``. Unmatched
-    numbers are skipped and listed under ``unmatched_member_numbers``.
-    """
-    db_engine = engine or get_engine()
-    load_kw: dict[str, Any] = dict(
-        only_complete_responses=only_complete_responses,
-        allow_missing_completion_status=allow_missing_completion_status,
-        completion_status_column=completion_status_column,
-    )
-    if sheet_name is not None:
-        load_kw["sheet_name"] = sheet_name
-    df = load_original_sheet(path, **load_kw)
-
-    long = melt_competition_availability(df)
-    sup_df = build_respondent_supplemental_snapshot(df)
-    ethics_col_set = set(conflicts_ethics_related_columns(df))
-
-    result: dict[str, Any] = {
-        "availability_stored": 0,
-        "availability_cleared": 0,
-        "supplemental_officials_updated": 0,
-        "availability_rows_skipped_empty_member": 0,
-        "supplemental_rows_skipped_empty_member": 0,
-        "unmatched_member_numbers": [],
-    }
-    unmatched: set[str] = set()
-
-    with Session(db_engine) as session:
-        mbr_to_id: dict[str, int] = {}
-        for oid, mbr in session.execute(select(Officials.id, Officials.mbr_number)).all():
-            key = normalize_member_number_value(mbr)
-            if key:
-                mbr_to_id[key] = oid
-
-        for _, row in long.iterrows():
-            mbr = normalize_member_number_value(row["member_number"])
-            if not mbr:
-                result["availability_rows_skipped_empty_member"] += 1
-                continue
-            oid = mbr_to_id.get(mbr)
-            if oid is None:
-                unmatched.add(mbr)
-                continue
-            comp_key = str(row["competition_prompt"])
-            raw = row["raw_availability"]
-            code = normalize_qualifying_availability_cell(raw)
-            raw_text = None
-            if not pd.isna(raw):
-                raw_text = str(raw).strip() or None
-            existing = session.scalar(
-                select(OfficialQualifyingAvailability).where(
-                    and_(
-                        OfficialQualifyingAvailability.official_id == oid,
-                        OfficialQualifyingAvailability.competition_key == comp_key,
-                    )
-                )
-            )
-            if code == "available":
-                if existing:
-                    existing.availability = "available"
-                    existing.raw_availability = raw_text
-                else:
-                    session.add(
-                        OfficialQualifyingAvailability(
-                            official_id=oid,
-                            competition_key=comp_key,
-                            availability="available",
-                            raw_availability=raw_text,
-                        )
-                    )
-                result["availability_stored"] += 1
-            else:
-                if existing:
-                    session.delete(existing)
-                    result["availability_cleared"] += 1
-
-        supplemental_ids: set[int] = set()
-        for _, srow in sup_df.iterrows():
-            mbr = normalize_member_number_value(srow["member_number"])
-            if not mbr:
-                result["supplemental_rows_skipped_empty_member"] += 1
-                continue
-            oid = mbr_to_id.get(mbr)
-            if oid is None:
-                unmatched.add(mbr)
-                continue
-            payload: dict[str, Any] = {}
-            hints: dict[str, Any] = {}
-            for col in srow.index:
-                if col == "member_number":
-                    continue
-                col_s = str(col)
-                val = _json_safe_qualifying_value(srow[col])
-                payload[col_s] = val
-                if col_s in ethics_col_set:
-                    hints[col_s] = val
-
-            existing_sup = session.get(OfficialQualifyingSupplemental, oid)
-            if existing_sup:
-                existing_sup.supplemental_json = payload
-                existing_sup.ethics_hints_json = hints if hints else None
-            else:
-                session.add(
-                    OfficialQualifyingSupplemental(
-                        official_id=oid,
-                        supplemental_json=payload,
-                        ethics_hints_json=hints if hints else None,
-                    )
-                )
-            if oid not in supplemental_ids:
-                supplemental_ids.add(oid)
-                result["supplemental_officials_updated"] += 1
-
-        result["unmatched_member_numbers"] = sorted(unmatched)
-        if commit:
-            session.commit()
-
-    return result
-
-
 def _cli_main() -> None:
     import argparse
 
@@ -3384,6 +3361,29 @@ def _cli_main() -> None:
         action="store_true",
         help="Run SELECT 1 against the current DATABASE_URL and exit.",
     )
+    parser.add_argument(
+        "--load-qualifying-availability",
+        metavar="XLSX",
+        help=(
+            "Ingest a 2027-style qualifying availability workbook "
+            "(qualifying_availability_form tables; migration 008)."
+        ),
+    )
+    parser.add_argument(
+        "--qualifying-label",
+        default=None,
+        help="Form label in DB (default: workbook filename).",
+    )
+    parser.add_argument(
+        "--qualifying-sheet",
+        default=None,
+        help="Worksheet name (default: original, else first sheet).",
+    )
+    parser.add_argument(
+        "--allow-partial-responses",
+        action="store_true",
+        help="Include form rows that are not marked Complete.",
+    )
     args = parser.parse_args()
     if args.ping_database:
         with Session(engine) as session:
@@ -3398,6 +3398,34 @@ def _cli_main() -> None:
         )
         load_history(write_to_database=True)
         print("load_history finished.", flush=True)
+        return
+    if args.load_qualifying_availability:
+        try:
+            from activityAnalysis.qualifying_form_store import load_qualifying_form_workbook
+            from activityAnalysis.qualifying_availability_ingest import (
+                resolve_workbook_sheet_name,
+            )
+        except ModuleNotFoundError:
+            from qualifying_form_store import load_qualifying_form_workbook
+            from qualifying_availability_ingest import resolve_workbook_sheet_name
+        sheet = resolve_workbook_sheet_name(
+            args.load_qualifying_availability, args.qualifying_sheet
+        )
+        print(f"Using worksheet: {sheet!r}", flush=True)
+        stats = load_qualifying_form_workbook(
+            args.load_qualifying_availability,
+            label=args.qualifying_label,
+            sheet_name=sheet,
+            only_complete_responses=not args.allow_partial_responses,
+            allow_missing_completion_status=args.allow_partial_responses,
+        )
+        for k, v in stats.items():
+            if k == "unmatched_member_numbers":
+                print(f"{k}: {len(v)}", flush=True)
+                if v:
+                    print("  sample:", ", ".join(v[:15]), flush=True)
+            else:
+                print(f"{k}: {v}", flush=True)
         return
     parser.print_help()
 

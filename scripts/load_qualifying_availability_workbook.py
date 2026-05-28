@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Load a qualifying-season availability Excel export into ``officials_analysis`` tables
-``official_qualifying_availability`` and ``official_qualifying_supplemental``.
+Load a 2027-style qualifying availability Excel export into ``officials_analysis``
+qualifying form tables (full row JSON per official).
 
 Uses the same ``DATABASE_URL`` as the activity tracker (see ``load_activity_data``).
-Apply migration ``activityAnalysis/migrations/007_official_qualifying_tables.sql`` on
+Apply migration ``activityAnalysis/migrations/008_qualifying_availability_form.sql`` on
 PostgreSQL before the first run.
 
 Example:
@@ -13,6 +13,7 @@ Example:
 
 Optional flags:
 
+    python scripts/load_qualifying_availability_workbook.py file.xlsx --qualifying-label "2027 SPD ..."
     python scripts/load_qualifying_availability_workbook.py file.xlsx --sheet original
     python scripts/load_qualifying_availability_workbook.py file.xlsx --allow-missing-status
     python scripts/load_qualifying_availability_workbook.py file.xlsx --include-incomplete
@@ -31,18 +32,23 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from activityAnalysis.load_activity_data import load_qualifying_availability_workbook
+from activityAnalysis.qualifying_form_store import load_qualifying_form_workbook
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Load qualifying availability Excel into official_qualifying_* tables."
+        description="Load qualifying availability Excel into qualifying_availability_* tables."
     )
     parser.add_argument("excel_path", help="Path to .xlsx export")
     parser.add_argument(
+        "--qualifying-label",
+        default=None,
+        help="Form label stored in DB (default: workbook filename)",
+    )
+    parser.add_argument(
         "--sheet",
         default=None,
-        help="Worksheet name (default: original)",
+        help="Worksheet name (default: original, else first sheet)",
     )
     parser.add_argument(
         "--allow-missing-status",
@@ -70,8 +76,9 @@ def main() -> None:
         print(f"File not found: {args.excel_path}", file=sys.stderr)
         sys.exit(1)
 
-    summary = load_qualifying_availability_workbook(
+    summary = load_qualifying_form_workbook(
         args.excel_path,
+        label=args.qualifying_label,
         sheet_name=args.sheet,
         only_complete_responses=not args.include_incomplete,
         allow_missing_completion_status=args.allow_missing_status,

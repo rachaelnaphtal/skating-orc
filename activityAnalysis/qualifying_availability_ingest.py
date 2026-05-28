@@ -22,13 +22,18 @@ named **Status**. By default :func:`load_original_sheet` keeps only rows marked 
 abandoned form sessions are not loaded. Use ``only_complete_responses=False`` or
 ``allow_missing_completion_status=True`` when the export has no such column.
 
-This module only handles **ingest and column discovery**; per-event eligibility rules,
-appointments SQL, and UI live in your reporting layer.
+**Storage:** :func:`activityAnalysis.qualifying_form_store.load_qualifying_form_workbook`
+persists full rows in ``qualifying_official_form_response.response_json``, competitions,
+and normalized availability. Reporting uses directory ``appointments`` plus per-competition
+criteria in ``qualifying_competition_criteria``.
+
+This module handles **ingest and column discovery** only.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -36,6 +41,41 @@ DEFAULT_SHEET = "original"
 
 # Availability columns look like event titles with a year and a pipe separator.
 _COMPETITION_COL_HINT = re.compile(r"20\d{2}.+\|.+\|")
+
+
+def resolve_workbook_sheet_name(path: str, sheet_name: str | None = None) -> str:
+    """
+    Pick the data sheet for a qualifying export.
+
+    Uses ``sheet_name`` when present; else ``original`` (Google Form default);
+    else the first workbook sheet (e.g. ``Sheet 1``).
+    """
+    xl = pd.ExcelFile(path)
+    if sheet_name and sheet_name in xl.sheet_names:
+        return sheet_name
+    if DEFAULT_SHEET in xl.sheet_names:
+        return DEFAULT_SHEET
+    if not xl.sheet_names:
+        raise ValueError(f"No worksheets in {path!r}")
+    return xl.sheet_names[0]
+
+
+def parse_qualifying_competition_prompt(competition_key: str) -> dict[str, str | None]:
+    """Split a form column header into title, location, dates, and a 4-digit year."""
+    text = str(competition_key).strip().rstrip("?")
+    parts = [p.strip() for p in text.split("|")]
+    title = parts[0] if parts else text
+    location = parts[1] if len(parts) > 1 else None
+    dates = parts[2] if len(parts) > 2 else None
+    ym = re.search(r"(20\d{2})", text)
+    year = ym.group(1) if ym else None
+    return {
+        "title": title,
+        "location": location,
+        "dates": dates,
+        "year": year,
+        "competition_key": text,
+    }
 
 
 def find_completion_status_column(df: pd.DataFrame) -> str | None:
@@ -64,11 +104,265 @@ def is_complete_response_status(value: object) -> bool:
     s = str(value).strip().lower()
     if not s:
         return False
+    if s.startswith("incomplete"):
+        return False
     if s == "complete":
         return True
     # “Complete (…)” or similar
-    if s.startswith("complete") and not s.startswith("incomplete"):
+    if s.startswith("complete"):
         return True
+    return False
+
+
+def find_completion_status_key(column_names: Iterable[str]) -> str | None:
+    """Like :func:`find_completion_status_column` but for an iterable of header names."""
+    return find_completion_status_column(pd.DataFrame(columns=list(column_names)))
+
+
+def _header_is_opt_out_all_qualifying(header: str) -> bool:
+    """Column G–style prompt: not available / not interested for all qualifying events."""
+    cl = header.strip().lower()
+    if not cl:
+        return False
+    if "check the box" in cl and "not" in cl:
+        return True
+    if "not interested" in cl and ("qualifying" in cl or "officiating" in cl):
+        return True
+    if "not available" in cl and (
+        "anything" in cl
+        or "any of" in cl
+        or "all of" in cl
+        or ("all" in cl and "qualifying" in cl)
+    ):
+        return True
+    return False
+
+
+def find_not_interested_all_qualifying_column(df: pd.DataFrame) -> str | None:
+    """
+    Checkbox in column G (typical): “NOT interested in officiating ALL … qualifying …”.
+    """
+    str_cols = [c for c in df.columns if isinstance(c, str)]
+    for c in str_cols:
+        if _header_is_opt_out_all_qualifying(c):
+            return str(c)
+    # Fallback: Excel column G (0-based index 6) when the header matches opt-out wording.
+    if len(str_cols) > 6 and _header_is_opt_out_all_qualifying(str_cols[6]):
+        return str_cols[6]
+    return None
+
+
+def find_not_interested_all_qualifying_key(column_names: Iterable[str]) -> str | None:
+    return find_not_interested_all_qualifying_column(
+        pd.DataFrame(columns=list(column_names))
+    )
+
+
+def is_affirmative_checkbox(value: object) -> bool:
+    """True when a yes/no or checkbox cell is checked / answered Yes."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return value != 0
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    s = str(value).strip().lower()
+    if not s:
+        return False
+    if s in ("1.0", "1.00"):
+        return True
+    return s in ("yes", "y", "true", "1", "checked", "x")
+
+
+def is_opt_out_all_qualifying_value(value: object) -> bool:
+    """
+    True when the global opt-out checkbox (column G) is checked.
+
+    Google Forms may export TRUE, Yes, or the full question text—not only “yes”.
+    """
+    if is_affirmative_checkbox(value):
+        return True
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    s = str(value).strip().lower()
+    if not s or s in ("no", "n", "false", "0", "unchecked"):
+        return False
+    if _header_is_opt_out_all_qualifying(s):
+        return True
+    if "not interested" in s and ("qualifying" in s or "all" in s or "officiating" in s):
+        return True
+    if "not available" in s and (
+        "anything" in s or "any of" in s or "all" in s or "qualifying" in s
+    ):
+        return True
+    if "opt out" in s or "opt-out" in s or "optout" in s:
+        if "qualifying" in s or "officiating" in s or "all" in s:
+            return True
+    if "would like to opt out" in s:
+        return True
+    return False
+
+
+def response_json_is_complete(response_json: dict[str, Any]) -> bool:
+    """False when the stored row has an explicit incomplete *Status* / completion column."""
+    key = find_completion_status_key(response_json.keys())
+    if not key:
+        return True
+    return is_complete_response_status(response_json.get(key))
+
+
+def _header_is_qualifying_notes_column(header: str) -> bool:
+    """Supplemental note fields on the qualifying availability form."""
+    cl = header.strip().lower()
+    if "additional information" in cl and "committee" in cl:
+        if "not officiate" in cl or "qualifying season" in cl:
+            return True
+    if "anything else we should know" in cl and "availability" in cl:
+        return True
+    if "regrading" in cl and "committee" in cl and "additional" in cl:
+        return True
+    return False
+
+
+# Short headers for “rank your roles” grid (not “Judge - Singles and Pairs” checkboxes).
+_FORM_ROLE_PRIORITY_HEADERS = frozenset(
+    {
+        "Judge",
+        "Referee",
+        "Technical Controller",
+        "Technical Specialist",
+        "Scoring Official",
+        "Scoring Official.1",  # pandas duplicate when the sheet has two “Scoring Official” cols
+        "Scoring System Technician",
+        "Music Coordinator",
+        "Music Technician",
+        "Announcer",
+    }
+)
+
+# Form label → ``appointment_types.name`` in the directory.
+_FORM_PRIORITY_TO_APPOINTMENT_NAME: dict[str, str] = {
+    "Judge": "Competition Judge",
+    "Referee": "Referee",
+    "Technical Controller": "Technical Controller",
+    "Technical Specialist": "Technical Specialist",
+    "Scoring Official": "Scoring Official",
+    "Scoring Official.1": "Scoring Official",
+    "Scoring System Technician": "Scoring System Technician",
+    "Music Coordinator": "Music Coordinator",
+    "Music Technician": "Music Technician",
+    "Announcer": "Announcer",
+}
+
+# Short labels for the report column (comma-separated, priority order).
+_FORM_PRIORITY_DISPLAY_LABEL: dict[str, str] = {
+    "Judge": "judge",
+    "Referee": "referee",
+    "Technical Controller": "technical controller",
+    "Technical Specialist": "technical specialist",
+    "Scoring Official": "scoring official",
+    "Scoring Official.1": "scoring official",
+    "Scoring System Technician": "scoring system technician",
+    "Music Coordinator": "music coordinator",
+    "Music Technician": "music technician",
+    "Announcer": "announcer",
+}
+
+
+def _header_is_role_priority_column(header: str) -> bool:
+    return header.strip() in _FORM_ROLE_PRIORITY_HEADERS
+
+
+def _parse_role_priority_rank(value: object) -> int | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        rank = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= rank <= 15:
+        return rank
+    return None
+
+
+def extract_qualifying_role_priority(
+    response_json: dict[str, Any],
+    *,
+    held_appointment_type_ids: set[int],
+    appointment_name_to_id: dict[str, int],
+) -> str:
+    """
+    Comma-separated role preference order (e.g. ``judge, referee``) from the form rank
+    grid. Only includes roles the official holds as an **active** directory appointment.
+    """
+    ranked: list[tuple[int, str]] = []
+    seen_labels: set[str] = set()
+    for key, val in response_json.items():
+        if not isinstance(key, str) or not _header_is_role_priority_column(key):
+            continue
+        rank = _parse_role_priority_rank(val)
+        if rank is None:
+            continue
+        appt_name = _FORM_PRIORITY_TO_APPOINTMENT_NAME.get(key.strip())
+        if not appt_name:
+            continue
+        at_id = appointment_name_to_id.get(appt_name.strip().casefold())
+        if at_id is None or int(at_id) not in held_appointment_type_ids:
+            continue
+        label = _FORM_PRIORITY_DISPLAY_LABEL.get(key.strip(), appt_name.casefold())
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        ranked.append((rank, label))
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    return ", ".join(label for _, label in ranked)
+
+
+def extract_qualifying_form_notes(response_json: dict[str, Any]) -> str:
+    """Concatenate committee / availability note columns from a stored form row."""
+    parts: list[str] = []
+    for key in sorted(response_json.keys()):
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        if not _header_is_qualifying_notes_column(key):
+            continue
+        val = response_json.get(key)
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            continue
+        text = str(val).strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def row_opts_out_all_qualifying(row: pd.Series) -> bool:
+    """True if any column in the row is the global opt-out prompt with a Yes/checked value."""
+    for col in row.index:
+        if isinstance(col, str) and _header_is_opt_out_all_qualifying(col):
+            if is_opt_out_all_qualifying_value(row[col]):
+                return True
+    # Column G (index 6): checked cell even when the header string is truncated oddly.
+    str_cols = [c for c in row.index if isinstance(c, str)]
+    if len(str_cols) > 6:
+        col_g = str_cols[6]
+        if not _COMPETITION_COL_HINT.search(col_g):
+            if is_opt_out_all_qualifying_value(row.get(col_g)):
+                return True
+    return False
+
+
+def response_json_not_interested_all(response_json: dict[str, Any]) -> bool:
+    """True when they checked NOT interested / not available for all qualifying."""
+    if response_json.get("_not_interested_all_qualifying") is True:
+        return True
+    for key, val in response_json.items():
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        if _header_is_opt_out_all_qualifying(key):
+            if is_opt_out_all_qualifying_value(val):
+                return True
     return False
 
 
@@ -112,7 +406,8 @@ def load_original_sheet(
     When ``only_complete_responses`` is True (default), drops rows that are not
     *Complete* per :func:`filter_complete_responses`.
     """
-    df = pd.read_excel(path, sheet_name=sheet_name, header=0)
+    resolved = resolve_workbook_sheet_name(path, sheet_name)
+    df = pd.read_excel(path, sheet_name=resolved, header=0)
     if only_complete_responses:
         df = filter_complete_responses(
             df,
@@ -129,6 +424,88 @@ def find_member_number_column(df: pd.DataFrame) -> str | None:
         if "Member Number" in c or "mbr" in c.lower():
             return str(c)
     return None
+
+
+def find_timestamp_column(df: pd.DataFrame) -> str | None:
+    """Google Form exports usually include a *Timestamp* column."""
+    exact = {
+        "timestamp",
+        "submitted",
+        "submission time",
+        "response timestamp",
+        "date submitted",
+    }
+    for c in df.columns:
+        if not isinstance(c, str):
+            continue
+        if c.strip().lower() in exact:
+            return str(c)
+    for c in df.columns:
+        if not isinstance(c, str):
+            continue
+        if "timestamp" in c.lower():
+            return str(c)
+    return None
+
+
+def dedupe_form_responses_by_member(
+    df: pd.DataFrame,
+    *,
+    member_column: str,
+    timestamp_column: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    When the same member number appears more than once, keep the **most recent** row.
+
+    Uses ``timestamp_column`` (or autodetected Timestamp) when present; otherwise
+    keeps the last row in sheet order (later rows win).
+    """
+    mcol = member_column
+    ts_col = timestamp_column or find_timestamp_column(df)
+    keys = df[mcol].map(normalize_member_number_value)
+    empty = keys.isna() | (keys == "")
+
+    dup_keys = keys[~empty][keys[~empty].duplicated(keep=False)]
+    if dup_keys.empty:
+        return df, {
+            "duplicate_rows_dropped": 0,
+            "duplicate_member_numbers": [],
+            "dedupe_by": None,
+        }
+
+    empty_df = df.loc[empty]
+    valid = df.loc[~empty].copy()
+    valid["_mbr_key"] = keys[~empty]
+
+    dedupe_by = "sheet_order"
+    if ts_col and ts_col in valid.columns:
+        valid["_sort_ts"] = pd.to_datetime(valid[ts_col], errors="coerce")
+        valid = valid.sort_values(["_mbr_key", "_sort_ts"], kind="mergesort")
+        dedupe_by = "timestamp"
+    else:
+        valid = valid.reset_index().rename(columns={"index": "_orig_idx"})
+        valid = valid.sort_values(["_mbr_key", "_orig_idx"], kind="mergesort")
+
+    before = len(valid)
+    deduped_valid = valid.drop_duplicates(subset=["_mbr_key"], keep="last")
+    dropped = before - len(deduped_valid)
+
+    drop_cols = [c for c in ("_mbr_key", "_sort_ts", "_orig_idx") if c in deduped_valid.columns]
+    deduped_valid = deduped_valid.drop(columns=drop_cols)
+
+    parts = [deduped_valid]
+    if not empty_df.empty:
+        parts.append(empty_df)
+    out = pd.concat(parts, ignore_index=True)
+
+    dup_members = sorted(
+        {str(k) for k in dup_keys.unique() if k and not pd.isna(k)}
+    )
+    return out, {
+        "duplicate_rows_dropped": dropped,
+        "duplicate_member_numbers": dup_members,
+        "dedupe_by": dedupe_by,
+    }
 
 
 def find_email_column(df: pd.DataFrame) -> str | None:

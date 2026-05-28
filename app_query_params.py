@@ -14,6 +14,8 @@ Example (activity tracker)::
     ?report=competition&competition=99
     ?report=nqs&level=sectional,national
     ?report=appointments&achieved_from=2024-01-01&achieved_to=2024-12-31&active_only=1
+    ?report=availability&form=1&competition=3&appointment=judge&discipline=synchronized
+        &level=any&show_available=1&show_no_reply=0&show_unavailable=0
 """
 
 from __future__ import annotations
@@ -707,6 +709,7 @@ ACTIVITY_REPORT_SLUG_TO_LABEL = {
     "nqs": "NQS detailed activity",
     "synchro": "Synchro Activity",
     "appointments": "Appointments by achieved date",
+    "availability": "Qualifying availability",
 }
 ACTIVITY_LABEL_TO_REPORT_SLUG = {
     v: k for k, v in ACTIVITY_REPORT_SLUG_TO_LABEL.items()
@@ -717,8 +720,11 @@ _ACTIVITY_REPORT_OPTIONS = tuple(ACTIVITY_REPORT_SLUG_TO_LABEL.values())
 
 def init_activity_tracker_from_query() -> None:
     """Apply ``?report=`` / ``?page=`` once per URL change (see ``query_params_changed``)."""
+    slug = qp_get("report") or qp_get("page")
+    if slug == "qualifying":
+        slug = "availability"  # legacy deep links
     apply_page_slug(
-        qp_get("report") or qp_get("page"),
+        slug,
         ACTIVITY_REPORT_SLUG_TO_LABEL,
         "activity_report_mode",
         _ACTIVITY_REPORT_OPTIONS,
@@ -847,13 +853,103 @@ def apply_activity_level_filter_from_query(
     )
 
 
+QUALIFYING_ANY_LEVEL_LABEL = "(Any level)"
+QUALIFYING_ALL_LABEL = "(All)"
+
+
+def apply_activity_qualifying_form_from_query(form_options: list[int]) -> None:
+    """``?form=`` / ``?qualifying_form=`` → ``qualifying_form_select``."""
+    apply_int_select_param_aliases(
+        ("form", "qualifying_form", "qualifying_form_id"),
+        "qualifying_form_select",
+        form_options,
+    )
+
+
+def apply_activity_qualifying_competition_from_query(comp_options: list[int]) -> None:
+    """``?competition=`` → ``qualifying_competition_select`` (qualifying report only)."""
+    apply_int_select_param_aliases(
+        ("competition", "qualifying_competition", "qualifying_competition_id"),
+        "qualifying_competition_select",
+        comp_options,
+    )
+
+
+def apply_activity_qualifying_level_from_query(level_options: list[str]) -> bool:
+    """``?level=any`` or a slug matching a configured criterion level."""
+    raw = qp_get("level")
+    if not raw:
+        return False
+    token = raw.strip().lower()
+    if token == "all":
+        if QUALIFYING_ALL_LABEL in level_options:
+            import streamlit as st
+
+            st.session_state["qual_report_lvl"] = QUALIFYING_ALL_LABEL
+            return True
+        return False
+    if token == "any":
+        if QUALIFYING_ANY_LEVEL_LABEL in level_options:
+            import streamlit as st
+
+            st.session_state["qual_report_lvl"] = QUALIFYING_ANY_LEVEL_LABEL
+            return True
+        return False
+    return apply_choice_param(
+        "level",
+        "qual_report_lvl",
+        level_options,
+        slug_map=slug_map_for_labels(level_options),
+    )
+
+
+def apply_activity_qualifying_report_filters_from_query(
+    *,
+    appointment_options: list[str],
+    discipline_options: list[str],
+    level_options: list[str],
+) -> None:
+    """
+    Report filter selectboxes for qualifying availability (run before widgets).
+
+    Applies ``appointment``, ``discipline``, ``level``, and availability toggles.
+    """
+    if appointment_options:
+        apply_choice_param(
+            "appointment",
+            "qual_report_at",
+            appointment_options,
+            slug_map=slug_map_for_labels(appointment_options),
+        )
+    if discipline_options:
+        apply_choice_param(
+            "discipline",
+            "qual_report_disc",
+            discipline_options,
+            slug_map=slug_map_for_labels(discipline_options),
+        )
+    if level_options:
+        apply_activity_qualifying_level_from_query(level_options)
+    apply_bool_param("show_available", "qual_report_show_available")
+    apply_bool_param("show_no_reply", "qual_report_show_no_reply")
+    apply_bool_param("show_unavailable", "qual_report_show_unavailable")
+    # Legacy URL param
+    apply_bool_param("only_available", "qual_report_show_available")
+
+
 _ACTIVITY_OPTIONAL_QUERY_KEYS = (
     "official",
     "official_id",
     "competition",
     "competition_id",
+    "form",
+    "qualifying_form",
+    "qualifying_form_id",
+    "qualifying_competition",
+    "qualifying_competition_id",
     "official_type",
     "discipline",
+    "appointment",
     "competition_group",
     "show_other_roles",
     "include_lower_levels",
@@ -861,6 +957,10 @@ _ACTIVITY_OPTIONAL_QUERY_KEYS = (
     "achieved_from",
     "achieved_to",
     "active_only",
+    "only_available",
+    "show_available",
+    "show_no_reply",
+    "show_unavailable",
 )
 
 _REPORT_ASSIGNMENTS = ACTIVITY_REPORT_SLUG_TO_LABEL["assignments"]
@@ -868,6 +968,7 @@ _REPORT_REFEREE = ACTIVITY_REPORT_SLUG_TO_LABEL["referee"]
 _REPORT_NQS = ACTIVITY_REPORT_SLUG_TO_LABEL["nqs"]
 _REPORT_SYNCHRO = ACTIVITY_REPORT_SLUG_TO_LABEL["synchro"]
 _REPORT_APPOINTMENTS = ACTIVITY_REPORT_SLUG_TO_LABEL["appointments"]
+_REPORT_AVAILABILITY = ACTIVITY_REPORT_SLUG_TO_LABEL["availability"]
 
 
 def _param_or_none(value: Any) -> Any:
@@ -876,7 +977,17 @@ def _param_or_none(value: Any) -> Any:
     return value
 
 
-def sync_activity_tracker_query_params(report_mode: str) -> None:
+def _official_id_from_query() -> int | None:
+    return qp_get_int("official") or qp_get_int("official_id")
+
+
+def _competition_id_from_query() -> int | None:
+    return qp_get_int("competition") or qp_get_int("competition_id")
+
+
+def sync_activity_tracker_query_params(
+    report_mode: str, *, url_changed: bool = False
+) -> None:
     import streamlit as st
 
     params: dict[str, Any] = {k: None for k in _ACTIVITY_OPTIONAL_QUERY_KEYS}
@@ -885,10 +996,18 @@ def sync_activity_tracker_query_params(report_mode: str) -> None:
         params["report"] = slug
 
     if report_mode == REPORT_PERSON_ASSIGNMENTS_LABEL:
-        oid = st.session_state.get("per_person_official_select")
+        # Early sync runs before the Official selectbox; keep URL ``official`` on
+        # deep-link loads instead of overwriting with stale session state.
+        if url_changed:
+            oid = _official_id_from_query()
+        else:
+            oid = st.session_state.get("per_person_official_select")
         params["official"] = int(oid) if oid is not None else None
     elif report_mode == REPORT_COMPETITION_ASSIGNMENTS_LABEL:
-        cid = st.session_state.get("per_competition_select")
+        if url_changed:
+            cid = _competition_id_from_query()
+        else:
+            cid = st.session_state.get("per_competition_select")
         params["competition"] = int(cid) if cid is not None else None
     elif report_mode in _ACTIVITY_CHAMPIONSHIP_FILTER_REPORTS:
         appt = st.session_state.get("activity_official_type")
@@ -936,6 +1055,35 @@ def sync_activity_tracker_query_params(report_mode: str) -> None:
         active = st.session_state.get("appt_achieved_active_only")
         if active is not None:
             params["active_only"] = "1" if active else "0"
+    elif report_mode == _REPORT_AVAILABILITY:
+        fid = st.session_state.get("qualifying_form_select")
+        params["form"] = int(fid) if fid is not None else None
+        cid = st.session_state.get("qualifying_competition_select")
+        params["competition"] = int(cid) if cid is not None else None
+        appt = st.session_state.get("qual_report_at")
+        params["appointment"] = (
+            label_to_query_slug(str(appt)) if appt else None
+        )
+        disc = st.session_state.get("qual_report_disc")
+        params["discipline"] = (
+            label_to_query_slug(str(disc)) if disc else None
+        )
+        lvl = st.session_state.get("qual_report_lvl")
+        if lvl == QUALIFYING_ALL_LABEL:
+            params["level"] = "all"
+        elif lvl == QUALIFYING_ANY_LEVEL_LABEL:
+            params["level"] = "any"
+        elif lvl:
+            params["level"] = label_to_query_slug(str(lvl))
+        sa = st.session_state.get("qual_report_show_available")
+        if sa is not None:
+            params["show_available"] = "1" if sa else "0"
+        sn = st.session_state.get("qual_report_show_no_reply")
+        if sn is not None:
+            params["show_no_reply"] = "1" if sn else "0"
+        su = st.session_state.get("qual_report_show_unavailable")
+        if su is not None:
+            params["show_unavailable"] = "1" if su else "0"
 
     sync_query_params(**{k: _param_or_none(v) for k, v in params.items()})
 

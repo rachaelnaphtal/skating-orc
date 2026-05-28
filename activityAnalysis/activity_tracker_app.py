@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import tempfile
 
 import streamlit as st
 
@@ -553,6 +554,7 @@ REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
 REPORT_NQS_DETAILED = "NQS detailed activity"
 REPORT_SYNCHRO_ACTIVITY = "Synchro Activity"
 REPORT_APPOINTMENTS_BY_ACHIEVED_DATE = "Appointments by achieved date"
+REPORT_QUALIFYING_AVAILABILITY = "Qualifying availability"
 
 # Shown as column header help when the NQS pivot includes season column 2122.
 NQS_COLUMN_2122_HELP = (
@@ -569,6 +571,7 @@ _ACTIVITY_REPORT_OPTIONS = [
     REPORT_NQS_DETAILED,
     REPORT_SYNCHRO_ACTIVITY,
     REPORT_APPOINTMENTS_BY_ACHIEVED_DATE,
+    REPORT_QUALIFYING_AVAILABILITY,
 ]
 
 if (
@@ -584,15 +587,18 @@ if _activity_url_changed:
     init_activity_tracker_from_query()
 
 
-def _sync_activity_tracker_url() -> None:
+def _sync_activity_tracker_url(*, url_changed: bool | None = None) -> None:
     """Write current filters to the browser URL (safe to call more than once per run)."""
-    sync_activity_tracker_query_params(report_mode)
+    sync_activity_tracker_query_params(
+        report_mode,
+        url_changed=_activity_url_changed if url_changed is None else url_changed,
+    )
     mark_query_params_applied(_ACTIVITY_QP_FLAG)
 
 
 def _activity_stop() -> None:
     """Sync URL then halt (most reports exit before the bottom of the script)."""
-    _sync_activity_tracker_url()
+    _sync_activity_tracker_url(url_changed=False)
     st.stop()
 
 
@@ -1769,8 +1775,7 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         return (label if label else "\uffff", int(oid))
 
     oid_list = sorted(id_to_name.keys(), key=_per_person_sort_key)
-    if _activity_url_changed:
-        apply_activity_entity_ids_from_query(official_options=oid_list)
+    apply_activity_entity_ids_from_query(official_options=oid_list)
     pick_oid = st.selectbox(
         "Official",
         options=oid_list,
@@ -1906,8 +1911,7 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
         for _, row in comps_df.iterrows()
     }
     cid_list = [int(x) for x in comps_df["competition_id"].tolist()]
-    if _activity_url_changed:
-        apply_activity_entity_ids_from_query(competition_options=cid_list)
+    apply_activity_entity_ids_from_query(competition_options=cid_list)
     pick_cid = st.selectbox(
         "Competition",
         options=cid_list,
@@ -1937,6 +1941,22 @@ if report_mode == REPORT_COMPETITION_ASSIGNMENTS:
         )
     _activity_stop()
 
+
+if report_mode == REPORT_QUALIFYING_AVAILABILITY:
+    from activityAnalysis.qualifying_availability_page import render_qualifying_availability_page
+    try:
+        render_qualifying_availability_page(
+            cache_ttl_sec=_ACTIVITY_CACHE_TTL_SEC,
+            activity_url_changed=_activity_url_changed,
+            on_stop=_activity_stop,
+        )
+    except ModuleNotFoundError:
+        from qualifying_availability_page import render_qualifying_availability_page
+        render_qualifying_availability_page(
+            cache_ttl_sec=_ACTIVITY_CACHE_TTL_SEC,
+            activity_url_changed=_activity_url_changed,
+            on_stop=_activity_stop,
+        )
 
 if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
     synchro = report_mode == REPORT_SYNCHRO_ACTIVITY

@@ -92,11 +92,8 @@ class Officials(Base):
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='official')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='official')
-    qualifying_supplemental: Mapped[Optional['OfficialQualifyingSupplemental']] = relationship(
-        'OfficialQualifyingSupplemental', back_populates='official', uselist=False
-    )
-    qualifying_availability: Mapped[List['OfficialQualifyingAvailability']] = relationship(
-        'OfficialQualifyingAvailability', back_populates='official'
+    qualifying_form_responses: Mapped[List['QualifyingOfficialFormResponse']] = relationship(
+        'QualifyingOfficialFormResponse', back_populates='official'
     )
 
 
@@ -182,52 +179,50 @@ class Assignment(Base):
     official: Mapped['Officials'] = relationship('Officials', back_populates='assignment')
 
 
-class OfficialQualifyingSupplemental(Base):
-    """
-    Latest qualifying-season form context per official (conflicts, disclosures,
-    self-reported roles, etc.) as JSON keyed by original column headers.
-    """
+class QualifyingAvailabilityForm(Base):
+    """One uploaded qualifying availability workbook (e.g. 2027 SPD synchro adults)."""
 
-    __tablename__ = 'official_qualifying_supplemental'
+    __tablename__ = 'qualifying_availability_form'
     __table_args__ = (
-        ForeignKeyConstraint(
-            ['official_id'],
-            ['officials_analysis.officials.id'],
-            name='official_qualifying_supplemental_official_id_fkey',
-        ),
-        PrimaryKeyConstraint('official_id', name='official_qualifying_supplemental_pkey'),
+        PrimaryKeyConstraint('id', name='qualifying_availability_form_pkey'),
         {'schema': 'officials_analysis'},
     )
 
-    official_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    supplemental_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    ethics_hints_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    label: Mapped[str] = mapped_column(Text)
+    source_filename: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    loaded_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=text('now()')
     )
 
-    official: Mapped['Officials'] = relationship('Officials', back_populates='qualifying_supplemental')
+    competitions: Mapped[List['QualifyingAvailabilityCompetition']] = relationship(
+        'QualifyingAvailabilityCompetition', back_populates='form', cascade='all, delete-orphan'
+    )
+    responses: Mapped[List['QualifyingOfficialFormResponse']] = relationship(
+        'QualifyingOfficialFormResponse', back_populates='form', cascade='all, delete-orphan'
+    )
 
 
-class OfficialQualifyingAvailability(Base):
-    """
-    Per-competition **yes** from the qualifying form: a row exists only when the
-    official explicitly indicated availability. No row ⇒ not available / no response.
-    ``availability`` is ``available`` when stored; ``raw_availability`` keeps the sheet cell.
-    """
+class QualifyingAvailabilityCompetition(Base):
+    """A per-competition column from the form (availability prompt header)."""
 
-    __tablename__ = 'official_qualifying_availability'
+    __tablename__ = 'qualifying_availability_competition'
     __table_args__ = (
         ForeignKeyConstraint(
-            ['official_id'],
-            ['officials_analysis.officials.id'],
-            name='official_qualifying_availability_official_id_fkey',
+            ['form_id'],
+            ['officials_analysis.qualifying_availability_form.id'],
+            name='qualifying_availability_competition_form_id_fkey',
+            ondelete='CASCADE',
         ),
-        PrimaryKeyConstraint('id', name='official_qualifying_availability_pkey'),
+        PrimaryKeyConstraint('id', name='qualifying_availability_competition_pkey'),
         UniqueConstraint(
-            'official_id',
-            'competition_key',
-            name='official_qualifying_availability_official_competition_key',
+            'form_id',
+            'prompt_key',
+            name='qualifying_availability_competition_form_prompt_key',
         ),
         {'schema': 'officials_analysis'},
     )
@@ -237,12 +232,153 @@ class OfficialQualifyingAvailability(Base):
         Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
         primary_key=True,
     )
-    official_id: Mapped[int] = mapped_column(Integer)
-    competition_key: Mapped[str] = mapped_column(Text)
-    availability: Mapped[str] = mapped_column(Text)
-    raw_availability: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(
-        DateTime(True), server_default=text('now()')
+    form_id: Mapped[int] = mapped_column(Integer)
+    prompt_key: Mapped[str] = mapped_column(Text)
+    title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    event_dates: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    season_year: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text('0'))
+    competition_group: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    form: Mapped['QualifyingAvailabilityForm'] = relationship(
+        'QualifyingAvailabilityForm', back_populates='competitions'
+    )
+    criteria: Mapped[List['QualifyingCompetitionCriteria']] = relationship(
+        'QualifyingCompetitionCriteria', back_populates='competition', cascade='all, delete-orphan'
     )
 
-    official: Mapped['Officials'] = relationship('Officials', back_populates='qualifying_availability')
+
+class QualifyingCompetitionCriteria(Base):
+    """Directory appointment type × discipline × optional level relevant to a form competition."""
+
+    __tablename__ = 'qualifying_competition_criteria'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['competition_id'],
+            ['officials_analysis.qualifying_availability_competition.id'],
+            name='qualifying_competition_criteria_competition_id_fkey',
+            ondelete='CASCADE',
+        ),
+        ForeignKeyConstraint(
+            ['appointment_type_id'],
+            ['officials_analysis.appointment_types.id'],
+            name='qualifying_competition_criteria_appointment_type_id_fkey',
+        ),
+        ForeignKeyConstraint(
+            ['discipline_id'],
+            ['officials_analysis.disciplines.id'],
+            name='qualifying_competition_criteria_discipline_id_fkey',
+        ),
+        ForeignKeyConstraint(
+            ['level_id'],
+            ['officials_analysis.levels.id'],
+            name='qualifying_competition_criteria_level_id_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='qualifying_competition_criteria_pkey'),
+        UniqueConstraint(
+            'competition_id',
+            'appointment_type_id',
+            'discipline_id',
+            'level_id',
+            name='qualifying_competition_criteria_unique',
+            postgresql_nulls_not_distinct=True,
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    competition_id: Mapped[int] = mapped_column(Integer)
+    appointment_type_id: Mapped[int] = mapped_column(Integer)
+    discipline_id: Mapped[int] = mapped_column(Integer)
+    level_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    competition: Mapped['QualifyingAvailabilityCompetition'] = relationship(
+        'QualifyingAvailabilityCompetition', back_populates='criteria'
+    )
+    appointment_type: Mapped['AppointmentTypes'] = relationship('AppointmentTypes')
+    discipline: Mapped['Disciplines'] = relationship('Disciplines')
+    level: Mapped[Optional['Levels']] = relationship('Levels')
+
+
+class QualifyingOfficialFormResponse(Base):
+    """Entire form row for one official (all columns in ``response_json``)."""
+
+    __tablename__ = 'qualifying_official_form_response'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['form_id'],
+            ['officials_analysis.qualifying_availability_form.id'],
+            name='qualifying_official_form_response_form_id_fkey',
+            ondelete='CASCADE',
+        ),
+        ForeignKeyConstraint(
+            ['official_id'],
+            ['officials_analysis.officials.id'],
+            name='qualifying_official_form_response_official_id_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='qualifying_official_form_response_pkey'),
+        UniqueConstraint(
+            'form_id',
+            'official_id',
+            name='qualifying_official_form_response_form_official_unique',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    form_id: Mapped[int] = mapped_column(Integer)
+    official_id: Mapped[int] = mapped_column(Integer)
+    member_number: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+    form: Mapped['QualifyingAvailabilityForm'] = relationship(
+        'QualifyingAvailabilityForm', back_populates='responses'
+    )
+    official: Mapped['Officials'] = relationship('Officials', back_populates='qualifying_form_responses')
+
+
+class QualifyingOfficialCompetitionAvailability(Base):
+    """Per-competition availability extracted from the form (for reporting)."""
+
+    __tablename__ = 'qualifying_official_competition_availability'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['form_id'],
+            ['officials_analysis.qualifying_availability_form.id'],
+            name='qualifying_official_comp_avail_form_id_fkey',
+            ondelete='CASCADE',
+        ),
+        ForeignKeyConstraint(
+            ['official_id'],
+            ['officials_analysis.officials.id'],
+            name='qualifying_official_comp_avail_official_id_fkey',
+        ),
+        ForeignKeyConstraint(
+            ['competition_id'],
+            ['officials_analysis.qualifying_availability_competition.id'],
+            name='qualifying_official_comp_avail_competition_id_fkey',
+            ondelete='CASCADE',
+        ),
+        PrimaryKeyConstraint(
+            'form_id',
+            'official_id',
+            'competition_id',
+            name='qualifying_official_competition_availability_pkey',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    form_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    official_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competition_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    availability_code: Mapped[str] = mapped_column(Text)
+    raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
