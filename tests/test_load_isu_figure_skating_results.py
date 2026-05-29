@@ -5,7 +5,9 @@ from scripts.load_isu_figure_skating_results import (
     extract_detailed_results_url,
     is_fsm_results_url,
     normalize_results_base_url,
+    parse_event_levels_arg,
     season_year_from_title,
+    seasons_for_calendar_year,
 )
 
 
@@ -45,6 +47,26 @@ def test_choose_default_seasons_uses_latest_started_seasons():
         "2025/2026",
         "2024/2025",
     ]
+
+
+def test_seasons_for_calendar_year_uses_overlapping_isu_seasons():
+    seasons = [
+        {"title": "2026/2027"},
+        {"title": "2025/2026"},
+        {"title": "2024/2025"},
+        {"title": "2023/2024"},
+    ]
+
+    assert seasons_for_calendar_year(seasons, 2025) == [
+        "2025/2026",
+        "2024/2025",
+    ]
+
+
+def test_parse_event_levels_arg():
+    assert parse_event_levels_arg(None) == ("ISU",)
+    assert parse_event_levels_arg("ISU,International") == ("ISU", "International")
+    assert parse_event_levels_arg("All") == ("ISU", "International")
 
 
 def test_extract_detailed_results_url_from_anchor():

@@ -242,7 +242,7 @@ python scripts/discover_usfs_ijs_competitions.py \
 
 **Script:** `load_isu_figure_skating_results.py`
 
-Uses the ISU event API to enumerate figure skating ISU events, follows each ISU event detail page, extracts the **Detailed Results** URL, and writes a CSV. It can also load the discovered result pages through the normal `downloadResults.scrape()` database path.
+Uses the ISU event API to enumerate figure skating events, follows each ISU event detail page, extracts the **Detailed Results** URL, and writes a CSV. It can query ISU events, international events, or both, and can also load the discovered result pages through the normal `downloadResults.scrape()` database path.
 
 **Discover URLs only** (defaults to the latest two ISU seasons whose start date has passed):
 
@@ -258,6 +258,17 @@ python scripts/load_isu_figure_skating_results.py \
   --seasons 2025/2026,2024/2025 \
   -o isu_figure_skating_detailed_results.csv
 ```
+
+**Calendar year with international competitions too:**
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  --year 2025 \
+  --event-levels ISU,International \
+  -o figure_skating_results_2025.csv
+```
+
+`--year` filters by event start date and queries the two overlapping ISU seasons, e.g. `2024/2025` and `2025/2026` for calendar year 2025. Use `--event-levels International` for only international competitions, or `--event-levels All` as shorthand for `ISU,International`.
 
 **Preview database loads without writing:**
 
@@ -280,7 +291,7 @@ python scripts/load_isu_figure_skating_results.py \
 
 Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Add `--officials-analysis-competition-type-id ID` if these competitions should be linked to an existing `officials_analysis.competition_type`; otherwise loaded rows keep that link empty and default `qualifying` / `nqs` flags.
 
-CSV columns include `season`, `season_year`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
+CSV columns include `season`, `season_year`, `event_level`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
 
 ---
 

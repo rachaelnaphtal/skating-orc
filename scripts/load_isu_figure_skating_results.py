@@ -15,7 +15,11 @@ Examples:
   # Discover explicit seasons, but only print what would be loaded.
   python scripts/load_isu_figure_skating_results.py --seasons 2025/2026,2024/2025 --dry-run
 
-  # Discover and load every found competition into the database.
+  # Discover ISU + international competitions whose start date is in 2025.
+  python scripts/load_isu_figure_skating_results.py --year 2025 \
+      --event-levels ISU,International -o figure_results_2025.csv
+
+  # Discover and load every found ISU competition into the database.
   python scripts/load_isu_figure_skating_results.py --load --quiet
 """
 
@@ -43,11 +47,13 @@ if _REPO_ROOT not in sys.path:
 ISU_API_BASE = "https://api.isu-skating.com/api"
 ISU_SITE_BASE = "https://isu.org"
 DISCIPLINE_TITLE = "FIGURE SKATING"
-EVENT_LEVEL = "ISU"
+DEFAULT_EVENT_LEVELS = ("ISU",)
+EVENT_LEVEL_CHOICES = ("ISU", "International")
 
 CSV_FIELDS = (
     "season",
     "season_year",
+    "event_level",
     "isu_event_id",
     "event_name",
     "event_sub_type_name",
@@ -69,6 +75,7 @@ CSV_FIELDS = (
 class ResultRow:
     season: str
     season_year: str
+    event_level: str
     isu_event_id: str
     event_name: str
     event_sub_type_name: str
@@ -88,6 +95,7 @@ class ResultRow:
         return {
             "season": self.season,
             "season_year": self.season_year,
+            "event_level": self.event_level,
             "isu_event_id": self.isu_event_id,
             "event_name": self.event_name,
             "event_sub_type_name": self.event_sub_type_name,
@@ -236,23 +244,59 @@ def choose_default_seasons(seasons: Iterable[dict], today: date | None = None) -
     return [title for _, title in started[:2]]
 
 
-def parse_seasons_arg(raw: str | None, session: requests.Session, timeout: float) -> list[str]:
+def seasons_for_calendar_year(seasons: Iterable[dict], year: int) -> list[str]:
+    """Return ISU season labels likely to contain events starting in a calendar year."""
+    candidates = {f"{year - 1}/{year}", f"{year}/{year + 1}"}
+    available = [str(item.get("title") or "").strip() for item in seasons]
+    selected = [title for title in available if title in candidates]
+    if selected:
+        return selected
+    return sorted(candidates)
+
+
+def parse_seasons_arg(
+    raw: str | None,
+    session: requests.Session,
+    timeout: float,
+    year: int | None = None,
+) -> list[str]:
     if raw and raw.strip():
         return [part.strip() for part in raw.split(",") if part.strip()]
+    if year is not None:
+        return seasons_for_calendar_year(fetch_available_seasons(session, timeout), year)
     seasons = choose_default_seasons(fetch_available_seasons(session, timeout))
     if not seasons:
         raise RuntimeError("No started ISU seasons found; pass --seasons explicitly.")
     return seasons
 
 
+def parse_event_levels_arg(raw: str | None) -> tuple[str, ...]:
+    if not raw or not raw.strip():
+        return DEFAULT_EVENT_LEVELS
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if any(part.lower() == "all" for part in parts):
+        return EVENT_LEVEL_CHOICES
+    invalid = [part for part in parts if part not in EVENT_LEVEL_CHOICES]
+    if invalid:
+        raise SystemExit(
+            f"Invalid --event-levels value(s): {invalid!r}; "
+            f"allowed: {', '.join(EVENT_LEVEL_CHOICES)} or All"
+        )
+    return tuple(dict.fromkeys(parts))
+
+
 def fetch_events_for_season(
-    session: requests.Session, season: str, pagesize: int, timeout: float
+    session: requests.Session,
+    season: str,
+    event_level: str,
+    pagesize: int,
+    timeout: float,
 ) -> list[dict]:
     payload = {
         "pagesize": pagesize,
         "discipline_title": DISCIPLINE_TITLE,
         "season": season,
-        "event_level": EVENT_LEVEL,
+        "event_level": event_level,
     }
     r = session.post(f"{ISU_API_BASE}/event/mobile-list", json=payload, timeout=timeout)
     r.raise_for_status()
@@ -298,6 +342,8 @@ def collect_result_rows(
     session: requests.Session,
     seasons: Iterable[str],
     *,
+    event_levels: Iterable[str],
+    year: int | None,
     pagesize: int,
     timeout: float,
     delay: float,
@@ -310,50 +356,64 @@ def collect_result_rows(
     seen = 0
     fetched_at = _utc_now()
     for season in seasons:
-        events = fetch_events_for_season(session, season, pagesize, timeout)
-        if not quiet:
-            print(f"{season}: {len(events)} figure skating ISU events", file=sys.stderr)
-        for event in events:
-            if seen < start_offset:
-                seen += 1
-                continue
-            if limit is not None and len(rows) >= limit:
-                return rows
-            seen += 1
-
-            name = str(event.get("name") or "").strip()
-            detail_url = event_detail_page_url(event)
-            results_url, error = detailed_results_url_for_event(session, event, timeout)
-            status = "found" if results_url else "missing"
-            normalized = normalize_results_base_url(results_url)
+        for event_level in event_levels:
+            events = fetch_events_for_season(
+                session, season, event_level, pagesize, timeout
+            )
             if not quiet:
-                print(f"{status}: {season} | {name}", file=sys.stderr)
-
-            if results_url or include_missing:
-                rows.append(
-                    ResultRow(
-                        season=season,
-                        season_year=season_year_from_title(season),
-                        isu_event_id=str(event.get("event_id") or ""),
-                        event_name=name,
-                        event_sub_type_name=str(
-                            event.get("event_sub_type_name") or ""
-                        ).strip(),
-                        display_date=str(event.get("display_date") or "").strip(),
-                        start_date=_date_from_iso(event.get("from_date")),
-                        end_date=_date_from_iso(event.get("to_date")),
-                        location=event_location(event),
-                        isu_event_url=detail_url,
-                        detailed_results_url=results_url,
-                        normalized_results_url=normalized,
-                        is_fsm=is_fsm_results_url(results_url),
-                        status=status,
-                        error=error,
-                        fetched_at_utc=fetched_at,
-                    )
+                print(
+                    f"{season} {event_level}: {len(events)} figure skating events",
+                    file=sys.stderr,
                 )
-            if delay:
-                time.sleep(delay)
+            for event in events:
+                start_date = _date_from_iso(event.get("from_date"))
+                parsed_start = _parse_iso_date(start_date)
+                if year is not None:
+                    if parsed_start is None or parsed_start.year != year:
+                        continue
+                if seen < start_offset:
+                    seen += 1
+                    continue
+                if limit is not None and len(rows) >= limit:
+                    return rows
+                seen += 1
+
+                name = str(event.get("name") or "").strip()
+                detail_url = event_detail_page_url(event)
+                results_url, error = detailed_results_url_for_event(
+                    session, event, timeout
+                )
+                status = "found" if results_url else "missing"
+                normalized = normalize_results_base_url(results_url)
+                if not quiet:
+                    print(f"{status}: {season} {event_level} | {name}", file=sys.stderr)
+
+                if results_url or include_missing:
+                    rows.append(
+                        ResultRow(
+                            season=season,
+                            season_year=season_year_from_title(season),
+                            event_level=event_level,
+                            isu_event_id=str(event.get("event_id") or ""),
+                            event_name=name,
+                            event_sub_type_name=str(
+                                event.get("event_sub_type_name") or ""
+                            ).strip(),
+                            display_date=str(event.get("display_date") or "").strip(),
+                            start_date=start_date,
+                            end_date=_date_from_iso(event.get("to_date")),
+                            location=event_location(event),
+                            isu_event_url=detail_url,
+                            detailed_results_url=results_url,
+                            normalized_results_url=normalized,
+                            is_fsm=is_fsm_results_url(results_url),
+                            status=status,
+                            error=error,
+                            fetched_at_utc=fetched_at,
+                        )
+                    )
+                if delay:
+                    time.sleep(delay)
     return rows
 
 
@@ -433,6 +493,7 @@ def load_rows(
         for row in planned:
             print(
                 f"DRY RUN load {row.season_year} | "
+                f"{row.event_level} | "
                 f"{'FSM' if row.is_fsm else 'classic'} | "
                 f"{row.normalized_results_url} | {row.event_name}"
             )
@@ -532,8 +593,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--seasons",
         help=(
             "Comma-separated ISU seasons, e.g. 2025/2026,2024/2025. "
-            "Default: latest two seasons whose start date has passed."
+            "Default: latest two seasons whose start date has passed, or seasons "
+            "overlapping --year when --year is passed."
         ),
+    )
+    p.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Calendar year to collect; filters events by start date.",
+    )
+    p.add_argument(
+        "--event-levels",
+        default=",".join(DEFAULT_EVENT_LEVELS),
+        help="Comma-separated event levels: ISU, International, or All (default: ISU).",
     )
     p.add_argument(
         "--output",
@@ -591,10 +664,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     session = _session()
     try:
-        seasons = parse_seasons_arg(args.seasons, session, args.timeout)
+        seasons = parse_seasons_arg(args.seasons, session, args.timeout, args.year)
+        event_levels = parse_event_levels_arg(args.event_levels)
         rows = collect_result_rows(
             session,
             seasons,
+            event_levels=event_levels,
+            year=args.year,
             pagesize=args.pagesize,
             timeout=args.timeout,
             delay=args.delay,
