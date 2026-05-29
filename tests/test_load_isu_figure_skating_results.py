@@ -6,7 +6,9 @@ from scripts.load_isu_figure_skating_results import (
     is_fsm_results_url,
     normalize_results_base_url,
     parse_event_levels_arg,
+    parse_seasons_arg,
     season_year_from_title,
+    season_title_from_compact_code,
     seasons_for_calendar_year,
 )
 
@@ -33,6 +35,19 @@ def test_is_fsm_results_url_only_classic_for_index_asp():
 def test_season_year_from_title():
     assert season_year_from_title("2025/2026") == "2526"
     assert season_year_from_title("bad") == ""
+
+
+def test_season_title_from_compact_code():
+    assert season_title_from_compact_code("2526") == "2025/2026"
+    assert season_title_from_compact_code("9900") == "1999/2000"
+    assert season_title_from_compact_code("2025/2026") == "2025/2026"
+
+
+def test_parse_seasons_arg_accepts_compact_codes_without_network():
+    assert parse_seasons_arg("2526,2425", session=None, timeout=30) == [
+        "2025/2026",
+        "2024/2025",
+    ]
 
 
 def test_choose_default_seasons_uses_latest_started_seasons():

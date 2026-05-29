@@ -13,7 +13,7 @@ Examples:
   python scripts/load_isu_figure_skating_results.py -o isu_figure_results.csv
 
   # Discover explicit seasons, but only print what would be loaded.
-  python scripts/load_isu_figure_skating_results.py --seasons 2025/2026,2024/2025 --dry-run
+  python scripts/load_isu_figure_skating_results.py --seasons 2526,2425 --dry-run
 
   # Discover ISU + international competitions whose start date is in 2025.
   python scripts/load_isu_figure_skating_results.py --year 2025 \
@@ -160,6 +160,18 @@ def season_year_from_title(season: str) -> str:
     return f"{parts[0][-2:]}{parts[1][-2:]}"
 
 
+def season_title_from_compact_code(season: str) -> str:
+    """Convert repo-style compact seasons like ``2526`` to ISU API labels."""
+    s = (season or "").strip()
+    if not (len(s) == 4 and s.isdigit()):
+        return s
+    start_yy = int(s[:2])
+    end_yy = int(s[2:])
+    start_year = 1900 + start_yy if start_yy > end_yy and start_yy >= 90 else 2000 + start_yy
+    end_year = 2000 + end_yy
+    return f"{start_year}/{end_year}"
+
+
 def normalize_results_base_url(url: str) -> str:
     u = (url or "").strip()
     if not u:
@@ -261,7 +273,11 @@ def parse_seasons_arg(
     year: int | None = None,
 ) -> list[str]:
     if raw and raw.strip():
-        return [part.strip() for part in raw.split(",") if part.strip()]
+        return [
+            season_title_from_compact_code(part)
+            for part in (p.strip() for p in raw.split(","))
+            if part
+        ]
     if year is not None:
         return seasons_for_calendar_year(fetch_available_seasons(session, timeout), year)
     seasons = choose_default_seasons(fetch_available_seasons(session, timeout))
@@ -592,7 +608,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--seasons",
         help=(
-            "Comma-separated ISU seasons, e.g. 2025/2026,2024/2025. "
+            "Comma-separated seasons, e.g. 2526,2425 or 2025/2026,2024/2025. "
             "Default: latest two seasons whose start date has passed, or seasons "
             "overlapping --year when --year is passed."
         ),

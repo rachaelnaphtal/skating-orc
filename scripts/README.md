@@ -255,9 +255,11 @@ python scripts/load_isu_figure_skating_results.py \
 
 ```bash
 python scripts/load_isu_figure_skating_results.py \
-  --seasons 2025/2026,2024/2025 \
+  --seasons 2526,2425 \
   -o isu_figure_skating_detailed_results.csv
 ```
+
+Compact seasons like `2526` are expanded to the ISU API label `2025/2026`; full labels like `2025/2026` also work.
 
 **Calendar year with international competitions too:**
 
