@@ -193,6 +193,18 @@ def test_extract_names_accepts_title_without_trailing_period():
     assert entries[0].full_name == "Carlson Henrika"
 
 
+def test_extract_names_accepts_title_without_comma():
+    entries = _extract_name_entries_from_line("Muff Steve Mr.")
+    assert len(entries) == 1
+    assert entries[0].full_name == "Muff Steve"
+
+
+def test_extract_names_accepts_period_before_ms():
+    entries = _extract_name_entries_from_line("Reataza-Svärd Alexandra. Ms.")
+    assert len(entries) == 1
+    assert entries[0].full_name == "Reataza-Svärd Alexandra"
+
+
 def test_parsed_rows_use_western_order_full_name():
     rows = parse_isu_official_text(
         "USA - UNITED STATES\nISU Judge\nSherr Karin, Ms.",

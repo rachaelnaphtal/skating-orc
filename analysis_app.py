@@ -45,6 +45,7 @@ from event_regex_presets import (
     LEVEL_CHOICES,
     effective_event_regex,
 )
+from scrape_storage import scrape_storage_kwargs_for_load, scrape_storage_summary
 from app_query_params import (
     apply_analysis_filters_for_page,
     init_analysis_app_from_query,
@@ -4519,6 +4520,12 @@ elif page == "Load Competition":
                 # use_html = st.checkbox("Use HTML mode", value=True)
                 # isFSM = st.checkbox("Is FSM competition", value=False)
 
+            st.caption(
+                f"Scrape scratch files (FSM judge-detail PDFs): **{scrape_storage_summary()}**. "
+                "Set ``USE_GCP=1`` on Heroku to use GCS (requires ``GCS_CONNECTION`` / "
+                "``GCS_PRIVATE_KEY`` in ``setup.sh``)."
+            )
+
             st.markdown("---")
 
             if st.button("Run", type="primary"):
@@ -4547,7 +4554,6 @@ elif page == "Load Competition":
                         report_name=report_name.strip(),
                         event_regex=event_regex,
                         only_rule_errors=only_rule_errors,
-                        use_gcp=False,
                         write_excel=False,
                         write_to_database=True,
                         year=year.strip(),
@@ -4560,6 +4566,7 @@ elif page == "Load Competition":
                         international=load_international,
                         officials_analysis_competition_type_id=load_oa_competition_type_id,
                         update_officials_competition_type=True,
+                        **scrape_storage_kwargs_for_load(report_name.strip()),
                     )
 
                     status_area = st.empty()

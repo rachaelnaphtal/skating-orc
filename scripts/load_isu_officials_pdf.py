@@ -37,9 +37,9 @@ from isu_official_names import full_name_from_first_last
 
 
 FEDERATION_RE = re.compile(r"^([A-Z]{3})\s*[-–]\s+(.+?)\s*$")
-# ISU PDFs usually use ", Ms." but some lines omit the final period (e.g. "Carlson Henrika, Ms").
+# ISU PDF title markers vary: ", Ms." / ", Ms" / " Steve Mr." / "Alexandra. Ms."
 TITLE_RE = re.compile(
-    r",\s*(?:Mr|Ms|Mrs|Miss)\.?(?=\s|$)",
+    r"(?:,\s*|\.\s+|\s+)(?:Mr|Ms|Mrs|Miss)\.?(?=\s|$)",
     re.IGNORECASE,
 )
 
