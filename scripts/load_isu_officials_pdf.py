@@ -37,7 +37,11 @@ from isu_official_names import full_name_from_first_last
 
 
 FEDERATION_RE = re.compile(r"^([A-Z]{3})\s*[-–]\s+(.+?)\s*$")
-TITLE_RE = re.compile(r",\s*(?:Mr|Ms|Mrs|Miss)\.", re.IGNORECASE)
+# ISU PDFs usually use ", Ms." but some lines omit the final period (e.g. "Carlson Henrika, Ms").
+TITLE_RE = re.compile(
+    r",\s*(?:Mr|Ms|Mrs|Miss)\.?(?=\s|$)",
+    re.IGNORECASE,
+)
 
 HEADER_PREFIXES = (
     "SINGLE & PAIR SKATING",

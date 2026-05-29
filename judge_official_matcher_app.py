@@ -173,7 +173,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
     st.caption(
         "Links protocol names to the **USFS directory** (`officials_analysis.officials`) and/or "
         "the **ISU roster** (`officials_analysis.isu_official`). US matches are tried first at "
-        "scrape time; ISU is used when there is no US link. Load ISU lists with "
+        "scrape time; ISU is used when there is no US link. International judges: use **Link ISU**, "
+        "not **Outside** (outside only means “not in the US directory”). Load ISU lists with "
         "`scripts/load_isu_officials_pdf.py`."
     )
 
@@ -223,8 +224,7 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
 
     if not judges:
         st.info(
-            "No judges need linking — everyone has a US linked row, an ISU roster link, "
-            "or is marked **outside** the directory."
+            "No judges need linking — everyone has a US **linked** row or an ISU roster link."
         )
         st.stop()
 

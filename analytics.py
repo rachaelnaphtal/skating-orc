@@ -23,6 +23,8 @@ from models import (
     Skater,
     PcsType,
     JudgeOfficialLink,
+    JudgeIsuOfficialLink,
+    IsuOfficial,
     SegmentOfficial,
     AppointmentTypes,
     Officials,
@@ -56,6 +58,53 @@ def _normalize_person_name_key(s: str) -> str:
     t = re.sub(r"[-_/.,;:+]+", " ", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
+
+
+def _union_find_parent(parent: dict[int, int], x: int) -> int:
+    parent.setdefault(x, x)
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+def _union_find_union(parent: dict[int, int], a: int, b: int) -> None:
+    ra, rb = _union_find_parent(parent, a), _union_find_parent(parent, b)
+    if ra != rb:
+        parent[rb] = ra
+
+
+def _union_find_clusters(parent: dict[int, int], judge_ids: set[int]) -> list[list[int]]:
+    """Connected components of size 2+ from union-find ``parent`` map."""
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for jid in judge_ids:
+        buckets[_union_find_parent(parent, jid)].append(jid)
+    return [sorted(v) for v in buckets.values() if len(v) >= 2]
+
+
+def _identity_label_for_merged_jids(
+    jids: list[int],
+    judge_map: dict[int, tuple[str, str]],
+    *,
+    directory_name: str,
+    fallback_suffix: str,
+) -> str:
+    names = sorted({judge_map[j][0] for j in jids}, key=str.lower)
+    dn_key = _normalize_person_name_key(directory_name)
+    by_norm: dict[str, str] = {}
+    for n in names:
+        nk = _normalize_person_name_key(n)
+        if nk == dn_key:
+            continue
+        prev = by_norm.get(nk)
+        if prev is None or len(n.strip()) > len(prev.strip()):
+            by_norm[nk] = n
+    alias_names = sorted(by_norm.values(), key=str.lower)
+    if directory_name:
+        if alias_names:
+            return f"{directory_name} · " + " · ".join(alias_names)
+        return directory_name
+    return " · ".join(names) + fallback_suffix
 
 
 def _panel_role_summary_label(role: str) -> str:
@@ -234,9 +283,11 @@ class JudgeAnalytics:
 
     def get_judge_analysis_identity_groups(self) -> list:
         """
-        Select-box rows for UI: judges linked to the same officials_analysis.official
-        (status linked, official_id set) with 2+ judge records are merged into one option.
-        Each group has ``label`` and ``judge_ids`` (list).
+        Select-box rows for UI: merge protocol ``judge`` rows that share a US directory
+        link (``judge_official_link``) and/or an ISU roster link (``judge_isu_official_link``).
+
+        Each group has ``label``, ``judge_ids``, and optional ``official_id`` /
+        ``isu_official_id``.
         """
         judges = (
             self.session.query(Judge.id, Judge.name, Judge.location)
@@ -244,6 +295,12 @@ class JudgeAnalytics:
             .all()
         )
         judge_map = {r.id: (r.name, r.location or "") for r in judges}
+        if not judge_map:
+            return []
+
+        parent: dict[int, int] = {jid: jid for jid in judge_map}
+        us_jid_to_oid: dict[int, int] = {}
+        isu_jid_to_ioid: dict[int, int] = {}
 
         linked_rows = (
             self.session.query(JudgeOfficialLink.judge_id, JudgeOfficialLink.official_id)
@@ -251,44 +308,76 @@ class JudgeAnalytics:
             .filter(JudgeOfficialLink.official_id.isnot(None))
             .all()
         )
-        by_official = defaultdict(list)
+        by_official: dict[int, list[int]] = defaultdict(list)
         for jid, oid in linked_rows:
             jid = int(jid)
             if jid in judge_map:
-                by_official[int(oid)].append(jid)
-
-        multi_assigned = set()
-        merged_groups = []
-        for oid in sorted(by_official.keys()):
-            jids = sorted(set(by_official[oid]))
-            if len(jids) < 2:
+                oid = int(oid)
+                by_official[oid].append(jid)
+                us_jid_to_oid[jid] = oid
+        for jids in by_official.values():
+            uniq = sorted(set(jids))
+            if len(uniq) < 2:
                 continue
-            multi_assigned.update(jids)
-            names = sorted({judge_map[j][0] for j in jids}, key=str.lower)
-            off = self.session.get(Officials, oid)
-            directory_name = (off.full_name or "").strip() if off else ""
-            dn_key = _normalize_person_name_key(directory_name)
-            # Dedupe by normalized spelling so Official vs Judge minor punctuation mismatches
-            # do not repeat (e.g. "Einstein" hyphen vs space).
-            by_norm = {}
-            for n in names:
-                nk = _normalize_person_name_key(n)
-                if nk == dn_key:
-                    continue
-                prev = by_norm.get(nk)
-                if prev is None or len(n.strip()) > len(prev.strip()):
-                    by_norm[nk] = n
-            alias_names = sorted(by_norm.values(), key=str.lower)
+            for other in uniq[1:]:
+                _union_find_union(parent, uniq[0], other)
 
-            if directory_name:
-                if alias_names:
-                    label = f"{directory_name} · " + " · ".join(alias_names)
-                else:
-                    label = directory_name
-            else:
-                label = " · ".join(names) + " (same directory official)"
+        try:
+            isu_rows = self.session.query(
+                JudgeIsuOfficialLink.judge_id, JudgeIsuOfficialLink.isu_official_id
+            ).all()
+        except Exception:
+            isu_rows = []
+        by_isu: dict[int, list[int]] = defaultdict(list)
+        for jid, ioid in isu_rows:
+            jid = int(jid)
+            if jid in judge_map:
+                ioid = int(ioid)
+                by_isu[ioid].append(jid)
+                isu_jid_to_ioid[jid] = ioid
+        for jids in by_isu.values():
+            uniq = sorted(set(jids))
+            if len(uniq) < 2:
+                continue
+            for other in uniq[1:]:
+                _union_find_union(parent, uniq[0], other)
+
+        multi_assigned: set[int] = set()
+        merged_groups: list[dict] = []
+        for jids in sorted(
+            _union_find_clusters(parent, set(judge_map.keys())),
+            key=lambda ids: judge_map[ids[0]][0].lower(),
+        ):
+            multi_assigned.update(jids)
+            us_oids = {us_jid_to_oid[j] for j in jids if j in us_jid_to_oid}
+            isu_oids = {isu_jid_to_ioid[j] for j in jids if j in isu_jid_to_ioid}
+            official_id = None
+            isu_official_id = None
+            directory_name = ""
+            fallback_suffix = " (same linked identity)"
+            if len(us_oids) == 1:
+                official_id = next(iter(us_oids))
+                off = self.session.get(Officials, official_id)
+                directory_name = (off.full_name or "").strip() if off else ""
+                fallback_suffix = " (same directory official)"
+            if not directory_name and len(isu_oids) == 1:
+                isu_official_id = next(iter(isu_oids))
+                isu = self.session.get(IsuOfficial, isu_official_id)
+                directory_name = (isu.full_name or "").strip() if isu else ""
+                fallback_suffix = " (same ISU roster official)"
+            label = _identity_label_for_merged_jids(
+                jids,
+                judge_map,
+                directory_name=directory_name,
+                fallback_suffix=fallback_suffix,
+            )
             merged_groups.append(
-                {"label": label, "judge_ids": jids, "official_id": oid}
+                {
+                    "label": label,
+                    "judge_ids": jids,
+                    "official_id": official_id,
+                    "isu_official_id": isu_official_id,
+                }
             )
 
         singleton_labels_seen = set()
@@ -304,7 +393,12 @@ class JudgeAnalytics:
                 singleton_labels_seen.add(base)
                 label = base
             singleton_groups.append(
-                {"label": label, "judge_ids": [jid], "official_id": None}
+                {
+                    "label": label,
+                    "judge_ids": [jid],
+                    "official_id": None,
+                    "isu_official_id": isu_jid_to_ioid.get(jid),
+                }
             )
 
         all_groups = merged_groups + singleton_groups
@@ -312,7 +406,7 @@ class JudgeAnalytics:
         return all_groups
 
     def get_judge_id_to_identity_label(self) -> dict[int, str]:
-        """Map each scoring ``judge.id`` to a display label (merges directory-linked aliases)."""
+        """Map each scoring ``judge.id`` to a display label (US / ISU linked aliases merged)."""
         out: dict[int, str] = {}
         for group in self.get_judge_analysis_identity_groups():
             label = group["label"]

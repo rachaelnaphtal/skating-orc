@@ -1,5 +1,6 @@
 from scripts.load_isu_officials_pdf import (
     PdfLine,
+    _extract_name_entries_from_line,
     _extract_names_from_line,
     infer_communication_ref,
     merge_csv_values,
@@ -184,6 +185,12 @@ def test_split_surname_first_name_keeps_lowercase_particles():
         "Katherine Evelyn",
         "du Preez",
     )
+
+
+def test_extract_names_accepts_title_without_trailing_period():
+    entries = _extract_name_entries_from_line("Carlson Henrika, Ms")
+    assert len(entries) == 1
+    assert entries[0].full_name == "Carlson Henrika"
 
 
 def test_parsed_rows_use_western_order_full_name():

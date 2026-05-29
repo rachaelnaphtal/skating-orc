@@ -266,7 +266,8 @@ def fetch_judges_needing_link(conn: Connection, limit: int | None = None) -> lis
     """
     Judges without an ISU link who still need matcher attention.
 
-    Excludes US ``linked`` and ``outside_directory`` rows (outside judges are done).
+    Includes ``outside_directory`` rows (US “outside” does not mean ISU is done).
+    Excludes only US ``linked`` judges who already have their US mapping.
     """
     lim_sql = " LIMIT :lim" if limit is not None else ""
     q = text(
@@ -276,10 +277,7 @@ def fetch_judges_needing_link(conn: Connection, limit: int | None = None) -> lis
         LEFT JOIN judge_official_link l ON l.judge_id = j.id
         LEFT JOIN judge_isu_official_link il ON il.judge_id = j.id
         WHERE il.judge_id IS NULL
-          AND (
-              l.judge_id IS NULL
-              OR l.status NOT IN ('linked', 'outside_directory')
-          )
+          AND COALESCE(l.status, '') <> 'linked'
         ORDER BY lower(j.name), j.id
         {lim_sql}
         """
@@ -397,6 +395,16 @@ def upsert_isu_link(
 ) -> None:
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM judge_official_link
+                WHERE judge_id = :jid
+                  AND status = 'outside_directory'
+                """
+            ),
+            {"jid": judge_id},
+        )
         conn.execute(
             text(
                 """
