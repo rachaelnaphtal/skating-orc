@@ -426,6 +426,33 @@ def cmd_list_outside(engine: Engine, limit: int) -> None:
         print(f"judge_id={r['judge_id']} name={r['name']!r} note={r['note']!r} ({r['updated_at']})")
 
 
+def cmd_load_isu_pdf(
+    engine: Engine,
+    source: str,
+    *,
+    season: str,
+    communication_ref: str | None,
+    output: str | None,
+    limit: int | None,
+    dry_run: bool,
+) -> None:
+    """Parse and load an ISU officials PDF using ``load_isu_officials_pdf.py``."""
+    from scripts import load_isu_officials_pdf as isu_loader
+
+    rows = isu_loader.parse_pdf_source(
+        source,
+        season=season,
+        communication_ref=communication_ref or "",
+        limit=limit,
+    )
+    if output:
+        isu_loader.write_csv(output, rows)
+        print(f"Wrote {len(rows)} parsed ISU officials to {output}.")
+    count = isu_loader.load_rows(rows, dry_run=dry_run, engine=engine)
+    action = "planned" if dry_run else "loaded"
+    print(f"{action} {count if not dry_run else len(rows)} ISU officials.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Link judges to officials directory (admin CLI).")
     p.add_argument(
@@ -498,6 +525,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bm.add_argument("--dry-run", action="store_true")
     p_bm.add_argument("--fail-fast", action="store_true")
 
+    p_isu = sub.add_parser(
+        "load-isu-pdf",
+        help="Parse/load an ISU officials communication PDF into the ISU roster table.",
+    )
+    p_isu.add_argument("source", help="ISU officials PDF URL or local PDF path")
+    p_isu.add_argument("--season", required=True, help="Roster season, e.g. 2526")
+    p_isu.add_argument("--communication-ref", default=None, help="Communication number, e.g. 2735")
+    p_isu.add_argument("-o", "--output", default=None, help="Optional parsed CSV output path")
+    p_isu.add_argument("--limit", type=int, default=None, help="Limit parsed rows for testing")
+    p_isu.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse and print planned rows without writing to the database.",
+    )
+
     return p
 
 
@@ -535,6 +577,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif cmd == "batch-mark-outside":
         cmd_batch_mark_outside(
             engine, args.csv_path, dry_run=args.dry_run, fail_fast=args.fail_fast
+        )
+    elif cmd == "load-isu-pdf":
+        cmd_load_isu_pdf(
+            engine,
+            args.source,
+            season=args.season,
+            communication_ref=args.communication_ref,
+            output=args.output,
+            limit=args.limit,
+            dry_run=args.dry_run,
         )
     else:  # pragma: no cover
         parser.error(f"Unknown command {cmd!r}")

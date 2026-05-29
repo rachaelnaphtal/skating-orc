@@ -350,6 +350,46 @@ The parser treats federation lines like `AUS - AUSTRALIA` as headers and strips 
 
 ---
 
+## ISU officials PDF load
+
+**Script:** `load_isu_officials_pdf.py`
+
+Loads ISU officials communication PDFs into `officials_analysis.isu_official` for judge-name matching.
+
+```bash
+python scripts/load_isu_officials_pdf.py \
+  "https://isu-d8g8b4b7ece7aphs.a03.azurefd.net/isudamcontainer/CMS/Corporate-Site/Governance/Transparency/ISU-Communications/2735-List-Officials-FS-ID-SYS-2025-26-updated-Oct-7-1759824945-0716.pdf" \
+  --season 2526 \
+  --load
+```
+
+Preview without writing:
+
+```bash
+python scripts/load_isu_officials_pdf.py list-officials.pdf --season 2526 --dry-run --limit 20
+```
+
+The same loader is also available through the judge/official admin CLI, which uses the same database engine as the matcher:
+
+```bash
+python scripts/judge_official_admin.py load-isu-pdf list-officials.pdf --season 2526 --dry-run --limit 20
+```
+
+The parser uses PDF word geometry to read each page by country block and column. It treats federation lines like `AUS - AUSTRALIA` as headers and strips section headers such as `SINGLE & PAIR SKATING`, `REFEREE & JUDGE`, `ISU Judge`, and `International Technical Specialist` before extracting names. Only segments ending in title markers like `, Ms.` or `, Mr.` are loaded as officials.
+
+ISU officials are stored as one canonical row per `federation_code` + normalized name, not one row per season. Loading another season updates the same official row and appends the new season / communication number, so judge and segment links keep pointing at a stable `isu_official.id`.
+
+The loader stores federation on each official row and stores each roster appointment as its own row in `officials_analysis.isu_official_appointment`:
+
+- `federation_code` and `federation_name`
+- `discipline`, e.g. `Single & Pair Skating`, `Ice Dance`, `Synchronized Skating`
+- `appointment_type`, e.g. `Judge`, `Referee`, `Technical Controller`, `Technical Specialist`, `Data & Replay Operator`
+- `level`, e.g. `ISU`, `International`
+
+If an official appears in several sections of the PDF, the official still has one canonical `isu_official.id`, but each discipline / appointment / level combination gets its own appointment row. Reloading the same season replaces that official's appointment rows for the season.
+
+---
+
 ## Help
 
 ```bash

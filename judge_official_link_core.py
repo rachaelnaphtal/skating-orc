@@ -51,6 +51,7 @@ DDL_JUDGE_ISU_OFFICIAL_LINK = """
 CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     federation_code TEXT NOT NULL,
+    federation_name TEXT,
     full_name TEXT NOT NULL,
     first_name TEXT,
     last_name TEXT,
@@ -60,8 +61,29 @@ CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT isu_official_roster_unique
-        UNIQUE (federation_code, name_normalized, season)
+        UNIQUE (federation_code, name_normalized)
 );
+
+ALTER TABLE officials_analysis.isu_official
+    ADD COLUMN IF NOT EXISTS federation_name TEXT;
+
+CREATE TABLE IF NOT EXISTS officials_analysis.isu_official_appointment (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    isu_official_id INTEGER NOT NULL
+        REFERENCES officials_analysis.isu_official (id) ON DELETE CASCADE,
+    discipline TEXT NOT NULL DEFAULT '',
+    appointment_type TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT '',
+    season TEXT NOT NULL,
+    communication_ref TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT isu_official_appointment_unique
+        UNIQUE (isu_official_id, discipline, appointment_type, level, season)
+);
+
+CREATE INDEX IF NOT EXISTS idx_isu_official_appointment_isu_official_id
+    ON officials_analysis.isu_official_appointment (isu_official_id);
 
 CREATE TABLE IF NOT EXISTS public.isu_official_name_alias (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
