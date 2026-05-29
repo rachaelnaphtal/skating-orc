@@ -856,9 +856,6 @@ def render_qualifying_availability_page(
         )
         st.caption(
             f"**Total comps (2 yr)** counts distinct competitions from IJS protocol data "
-            f"(``segment_official``) with USFS season **{codes}**{cal_part} on "
-            "``competition.year``, same source as **Additional Qualifying / "
-            "Nonqualifying Activity** on the per-person report. "
             + (
                 "**Total comps (2 yr, in role)** uses the same seasons but only panels "
                 "matching the selected appointment type and discipline. "
