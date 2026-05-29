@@ -46,6 +46,10 @@ Vladimirov Vladislav, Mr.
         ("AND", "Lopez Camara Monica"),
         ("ARM", "Vladimirov Vladislav"),
     ]
+    assert rows[0].federation_name == "ANDORRA"
+    assert rows[0].disciplines == "Single & Pair Skating"
+    assert rows[0].appointment_types == "Judge"
+    assert rows[0].levels == "International"
     assert all("JUDGE" not in r.full_name.upper() for r in rows)
     assert all("SKATING" not in r.full_name.upper() for r in rows)
 
@@ -58,6 +62,25 @@ def test_parse_text_handles_name_on_federation_header_line():
     assert [(r.federation_code, r.full_name) for r in rows] == [
         ("AUT", "Stratieva Aseniya")
     ]
+    assert rows[0].federation_name == "AUSTRIA"
+
+
+def test_parse_text_aggregates_levels_and_appointment_types():
+    text = """
+AUS - AUSTRALIA
+SINGLE & PAIR SKATING
+ISU Judge
+Andrew Rebecca, Ms.
+International Referee
+Andrew Rebecca, Ms.
+"""
+
+    rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
+
+    assert len(rows) == 1
+    assert rows[0].appointment_types == "Judge,Referee"
+    assert rows[0].levels == "ISU,International"
+    assert rows[0].disciplines == "Single & Pair Skating"
 
 
 def test_parse_text_extracts_multiple_names_from_one_line():

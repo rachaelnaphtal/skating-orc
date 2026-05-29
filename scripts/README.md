@@ -337,6 +337,15 @@ The parser treats federation lines like `AUS - AUSTRALIA` as headers and strips 
 
 ISU officials are stored as one canonical row per `federation_code` + normalized name, not one row per season. Loading another season updates the same official row and appends the new season / communication number, so judge and segment links keep pointing at a stable `isu_official.id`.
 
+The loader stores federation and roster context on each official row:
+
+- `federation_code` and `federation_name`
+- `disciplines`, e.g. `Single & Pair Skating`, `Ice Dance`, `Synchronized Skating`
+- `appointment_types`, e.g. `Judge`, `Referee`, `Technical Controller`, `Technical Specialist`, `Data & Replay Operator`
+- `levels`, e.g. `ISU`, `International`
+
+If an official appears in several sections of the PDF, these metadata fields are comma-separated and de-duplicated on the canonical row.
+
 ---
 
 ## Help

@@ -51,17 +51,27 @@ DDL_JUDGE_ISU_OFFICIAL_LINK = """
 CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     federation_code TEXT NOT NULL,
+    federation_name TEXT,
     full_name TEXT NOT NULL,
     first_name TEXT,
     last_name TEXT,
     name_normalized TEXT NOT NULL,
     season TEXT NOT NULL,
     communication_ref TEXT,
+    disciplines TEXT,
+    appointment_types TEXT,
+    levels TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT isu_official_roster_unique
         UNIQUE (federation_code, name_normalized)
 );
+
+ALTER TABLE officials_analysis.isu_official
+    ADD COLUMN IF NOT EXISTS federation_name TEXT,
+    ADD COLUMN IF NOT EXISTS disciplines TEXT,
+    ADD COLUMN IF NOT EXISTS appointment_types TEXT,
+    ADD COLUMN IF NOT EXISTS levels TEXT;
 
 CREATE TABLE IF NOT EXISTS public.isu_official_name_alias (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -177,6 +187,16 @@ def fetch_isu_official_choices(conn: Connection) -> dict[int, str]:
             """
             SELECT id,
                 TRIM(full_name) || ' [' || TRIM(federation_code) || ']'
+                || CASE
+                    WHEN levels IS NOT NULL AND TRIM(levels) <> ''
+                    THEN ' · ' || TRIM(levels)
+                    ELSE ''
+                END
+                || CASE
+                    WHEN appointment_types IS NOT NULL AND TRIM(appointment_types) <> ''
+                    THEN ' · ' || TRIM(appointment_types)
+                    ELSE ''
+                END
                 || ' · ' || TRIM(season) AS label
             FROM officials_analysis.isu_official
             WHERE full_name IS NOT NULL AND TRIM(full_name) <> ''

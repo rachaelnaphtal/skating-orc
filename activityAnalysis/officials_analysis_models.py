@@ -118,12 +118,16 @@ class IsuOfficial(Base):
         primary_key=True,
     )
     federation_code: Mapped[str] = mapped_column(Text)
+    federation_name: Mapped[Optional[str]] = mapped_column(Text)
     full_name: Mapped[str] = mapped_column(Text)
     first_name: Mapped[Optional[str]] = mapped_column(Text)
     last_name: Mapped[Optional[str]] = mapped_column(Text)
     name_normalized: Mapped[str] = mapped_column(Text)
     season: Mapped[str] = mapped_column(Text)
     communication_ref: Mapped[Optional[str]] = mapped_column(Text)
+    disciplines: Mapped[Optional[str]] = mapped_column(Text)
+    appointment_types: Mapped[Optional[str]] = mapped_column(Text)
+    levels: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=text('now()')
     )
