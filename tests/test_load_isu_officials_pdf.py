@@ -1,7 +1,9 @@
 from scripts.load_isu_officials_pdf import (
+    PdfLine,
     _extract_names_from_line,
     infer_communication_ref,
     merge_csv_values,
+    parse_isu_official_lines,
     parse_isu_official_text,
     split_surname_first_name,
 )
@@ -81,6 +83,30 @@ Andrew Rebecca, Ms.
     assert rows[0].appointment_types == "Judge,Referee"
     assert rows[0].levels == "ISU,International"
     assert rows[0].disciplines == "Single & Pair Skating"
+
+
+def test_geometry_lines_keep_column_context_for_appointments():
+    lines = [
+        PdfLine(1, 10, 0, "AUS - AUSTRALIA", "AUS", "AUSTRALIA"),
+        PdfLine(1, 20, 0, "SINGLE & PAIR SKATING", "AUS", "AUSTRALIA"),
+        PdfLine(1, 30, 0, "TECHNICAL SPECIALIST - SINGLE", "AUS", "AUSTRALIA"),
+        PdfLine(1, 40, 0, "ISU Technical Specialist", "AUS", "AUSTRALIA"),
+        PdfLine(1, 50, 0, "Burley Robyn, Ms.", "AUS", "AUSTRALIA"),
+        PdfLine(1, 20, 1, "SYNCHRONIZED SKATING", "AUS", "AUSTRALIA"),
+        PdfLine(1, 30, 1, "REFEREE & JUDGE", "AUS", "AUSTRALIA"),
+        PdfLine(1, 40, 1, "ISU Referee", "AUS", "AUSTRALIA"),
+        PdfLine(1, 50, 1, "Andrew Rebecca, Ms.", "AUS", "AUSTRALIA"),
+        PdfLine(1, 60, 1, "ISU Judge", "AUS", "AUSTRALIA"),
+        PdfLine(1, 70, 1, "Andrew Rebecca, Ms.", "AUS", "AUSTRALIA"),
+    ]
+
+    rows = parse_isu_official_lines(lines, season="2526", communication_ref="2735")
+    by_name = {row.full_name: row for row in rows}
+
+    assert by_name["Burley Robyn"].appointment_types == "Technical Specialist"
+    assert by_name["Andrew Rebecca"].appointment_types == "Referee,Judge"
+    assert "Technical Specialist" not in by_name["Andrew Rebecca"].appointment_types
+    assert by_name["Andrew Rebecca"].disciplines == "Synchronized Skating"
 
 
 def test_parse_text_extracts_multiple_names_from_one_line():

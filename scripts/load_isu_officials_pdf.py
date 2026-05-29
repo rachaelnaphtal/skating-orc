@@ -120,6 +120,16 @@ class NameEntry:
     level: str
 
 
+@dataclass(frozen=True)
+class PdfLine:
+    page: int
+    top: float
+    column: int
+    text: str
+    federation_code: str
+    federation_name: str
+
+
 def normalize_name(value: str | None) -> str:
     return " ".join((value or "").lower().split()).strip()
 
@@ -257,6 +267,130 @@ def _append_unique(values: list[str], value: str) -> None:
         values.append(clean)
 
 
+def _row_from_parsed_data(row_data: dict[str, object]) -> IsuOfficialRow:
+    return IsuOfficialRow(
+        federation_code=str(row_data["federation_code"]),
+        federation_name=str(row_data["federation_name"]),
+        full_name=str(row_data["full_name"]),
+        first_name=str(row_data["first_name"]),
+        last_name=str(row_data["last_name"]),
+        name_normalized=str(row_data["name_normalized"]),
+        season=str(row_data["season"]),
+        communication_ref=str(row_data["communication_ref"]),
+        disciplines=",".join(row_data["disciplines"]),  # type: ignore[arg-type]
+        appointment_types=",".join(row_data["appointment_types"]),  # type: ignore[arg-type]
+        levels=",".join(row_data["levels"]),  # type: ignore[arg-type]
+    )
+
+
+def _record_entry(
+    parsed: dict[tuple[str, str, str], dict[str, object]],
+    *,
+    federation_code: str,
+    federation_name: str,
+    entry: NameEntry,
+    season: str,
+    communication_ref: str,
+) -> None:
+    normalized = normalize_name(entry.full_name)
+    key = (federation_code, normalized, season)
+    if key not in parsed:
+        first, last = split_surname_first_name(entry.full_name)
+        parsed[key] = {
+            "federation_code": federation_code,
+            "federation_name": federation_name,
+            "full_name": entry.full_name,
+            "first_name": first,
+            "last_name": last,
+            "name_normalized": normalized,
+            "season": season,
+            "communication_ref": communication_ref,
+            "disciplines": [],
+            "appointment_types": [],
+            "levels": [],
+        }
+    row_data = parsed[key]
+    _append_unique(row_data["disciplines"], entry.discipline)  # type: ignore[arg-type]
+    _append_unique(
+        row_data["appointment_types"], entry.appointment_type  # type: ignore[arg-type]
+    )
+    _append_unique(row_data["levels"], entry.level)  # type: ignore[arg-type]
+
+
+def parse_isu_official_lines(
+    lines: list[PdfLine], *, season: str, communication_ref: str
+) -> list[IsuOfficialRow]:
+    parsed: dict[tuple[str, str, str], dict[str, object]] = {}
+    state: dict[tuple[int, int], dict[str, str]] = {}
+
+    for pdf_line in sorted(lines, key=lambda item: (item.page, item.column, item.top)):
+        line = _clean_line(pdf_line.text)
+        if not line:
+            continue
+
+        fed_match = _split_federation_header(line)
+        if fed_match:
+            _code, _fed_name, tail = fed_match
+            line = tail
+            if not line:
+                continue
+
+        if not pdf_line.federation_code:
+            continue
+
+        state_key = (pdf_line.page, pdf_line.column)
+        current = state.setdefault(
+            state_key,
+            {
+                "federation_code": pdf_line.federation_code,
+                "federation_name": pdf_line.federation_name,
+                "discipline": "",
+                "appointment_type": "",
+                "level": "",
+            },
+        )
+        if current["federation_code"] != pdf_line.federation_code:
+            current.update(
+                {
+                    "federation_code": pdf_line.federation_code,
+                    "federation_name": pdf_line.federation_name,
+                    "discipline": "",
+                    "appointment_type": "",
+                    "level": "",
+                }
+            )
+
+        line_discipline = _line_discipline(line)
+        if line_discipline:
+            current["discipline"] = line_discipline
+        line_appointment_type = _line_appointment_group(line)
+        if line_appointment_type:
+            current["appointment_type"] = line_appointment_type
+        role_line_text, role_appointment_type, role_level = _role_prefix(line)
+        if not role_line_text and (role_appointment_type or role_level):
+            current["appointment_type"] = role_appointment_type or current["appointment_type"]
+            current["level"] = role_level or current["level"]
+            continue
+
+        entries = _extract_name_entries_from_line(
+            line,
+            discipline=current["discipline"],
+            appointment_type=current["appointment_type"],
+            level=current["level"],
+        )
+        for entry in entries:
+            _record_entry(
+                parsed,
+                federation_code=pdf_line.federation_code,
+                federation_name=pdf_line.federation_name,
+                entry=entry,
+                season=season,
+                communication_ref=communication_ref,
+            )
+
+    return [_row_from_parsed_data(row_data) for row_data in parsed.values()]
+
+
 def parse_isu_official_text(
     text: str, *, season: str, communication_ref: str
 ) -> list[IsuOfficialRow]:
@@ -304,48 +438,16 @@ def parse_isu_official_text(
             level=current_level,
         )
         for entry in entries:
-            normalized = normalize_name(entry.full_name)
-            key = (federation_code, normalized, season)
-            if key not in parsed:
-                first, last = split_surname_first_name(entry.full_name)
-                parsed[key] = {
-                    "federation_code": federation_code,
-                    "federation_name": federation_name,
-                    "full_name": entry.full_name,
-                    "first_name": first,
-                    "last_name": last,
-                    "name_normalized": normalized,
-                    "season": season,
-                    "communication_ref": communication_ref,
-                    "disciplines": [],
-                    "appointment_types": [],
-                    "levels": [],
-                }
-            row_data = parsed[key]
-            _append_unique(row_data["disciplines"], entry.discipline)  # type: ignore[arg-type]
-            _append_unique(
-                row_data["appointment_types"], entry.appointment_type  # type: ignore[arg-type]
+            _record_entry(
+                parsed,
+                federation_code=federation_code,
+                federation_name=federation_name,
+                entry=entry,
+                season=season,
+                communication_ref=communication_ref,
             )
-            _append_unique(row_data["levels"], entry.level)  # type: ignore[arg-type]
 
-    rows: list[IsuOfficialRow] = []
-    for row_data in parsed.values():
-        rows.append(
-            IsuOfficialRow(
-                federation_code=str(row_data["federation_code"]),
-                federation_name=str(row_data["federation_name"]),
-                full_name=str(row_data["full_name"]),
-                first_name=str(row_data["first_name"]),
-                last_name=str(row_data["last_name"]),
-                name_normalized=str(row_data["name_normalized"]),
-                season=str(row_data["season"]),
-                communication_ref=str(row_data["communication_ref"]),
-                disciplines=",".join(row_data["disciplines"]),  # type: ignore[arg-type]
-                appointment_types=",".join(row_data["appointment_types"]),  # type: ignore[arg-type]
-                levels=",".join(row_data["levels"]),  # type: ignore[arg-type]
-            )
-        )
-    return rows
+    return [_row_from_parsed_data(row_data) for row_data in parsed.values()]
 
 
 def read_pdf_bytes(source: str) -> bytes:
@@ -354,6 +456,92 @@ def read_pdf_bytes(source: str) -> bytes:
         r.raise_for_status()
         return r.content
     return Path(source).read_bytes()
+
+
+def _words_to_lines(words: list[dict], *, page: int, width: float) -> list[dict[str, object]]:
+    buckets: dict[tuple[int, int], list[dict]] = {}
+    midpoint = width / 2
+    for word in words:
+        column = 0 if float(word["x0"]) < midpoint else 1
+        top_key = round(float(word["top"]) / 3)
+        buckets.setdefault((column, top_key), []).append(word)
+
+    lines: list[dict[str, object]] = []
+    for (column, _top_key), bucket in buckets.items():
+        ordered = sorted(bucket, key=lambda item: float(item["x0"]))
+        lines.append(
+            {
+                "page": page,
+                "top": min(float(item["top"]) for item in ordered),
+                "column": column,
+                "text": _clean_line(" ".join(str(item["text"]) for item in ordered)),
+            }
+        )
+    return sorted(lines, key=lambda item: (int(item["column"]), float(item["top"])))
+
+
+def _assign_federations_to_lines(
+    page_lines: list[dict[str, object]],
+    *,
+    carry_federation_code: str,
+    carry_federation_name: str,
+) -> tuple[list[PdfLine], str, str]:
+    headers: list[tuple[float, str, str]] = []
+    for line in page_lines:
+        fed_match = _split_federation_header(str(line["text"]))
+        if fed_match:
+            code, name, _tail = fed_match
+            headers.append((float(line["top"]), code, name))
+    headers.sort(key=lambda item: item[0])
+
+    out: list[PdfLine] = []
+    current_code = carry_federation_code
+    current_name = carry_federation_name
+    for line in sorted(page_lines, key=lambda item: (float(item["top"]), int(item["column"]))):
+        line_top = float(line["top"])
+        for header_top, code, name in headers:
+            if header_top <= line_top:
+                current_code = code
+                current_name = name
+            else:
+                break
+        out.append(
+            PdfLine(
+                page=int(line["page"]),
+                top=line_top,
+                column=int(line["column"]),
+                text=str(line["text"]),
+                federation_code=current_code,
+                federation_name=current_name,
+            )
+        )
+
+    if headers:
+        _last_top, current_code, current_name = headers[-1]
+    return out, current_code, current_name
+
+
+def pdf_lines(pdf_bytes: bytes) -> list[PdfLine]:
+    """Extract PDF text as column-aware lines with page/country metadata."""
+    lines: list[PdfLine] = []
+    carry_code = ""
+    carry_name = ""
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words(
+                x_tolerance=1,
+                y_tolerance=3,
+                keep_blank_chars=False,
+                use_text_flow=False,
+            )
+            page_lines = _words_to_lines(words, page=page_number, width=float(page.width))
+            assigned, carry_code, carry_name = _assign_federations_to_lines(
+                page_lines,
+                carry_federation_code=carry_code,
+                carry_federation_name=carry_name,
+            )
+            lines.extend(assigned)
+    return lines
 
 
 def pdf_text(pdf_bytes: bytes) -> str:
@@ -587,8 +775,8 @@ def parse_pdf_source(
     communication_ref: str = "",
     limit: int | None = None,
 ) -> list[IsuOfficialRow]:
-    rows = parse_isu_official_text(
-        pdf_text(read_pdf_bytes(source)),
+    rows = parse_isu_official_lines(
+        pdf_lines(read_pdf_bytes(source)),
         season=season,
         communication_ref=communication_ref or infer_communication_ref(source),
     )

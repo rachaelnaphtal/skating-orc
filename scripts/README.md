@@ -333,7 +333,7 @@ The same loader is also available through the judge/official admin CLI, which us
 python scripts/judge_official_admin.py load-isu-pdf list-officials.pdf --season 2526 --dry-run --limit 20
 ```
 
-The parser treats federation lines like `AUS - AUSTRALIA` as headers and strips section headers such as `SINGLE & PAIR SKATING`, `REFEREE & JUDGE`, `ISU Judge`, and `International Technical Specialist` before extracting names. Only segments ending in title markers like `, Ms.` or `, Mr.` are loaded as officials.
+The parser uses PDF word geometry to read each page by country block and column. It treats federation lines like `AUS - AUSTRALIA` as headers and strips section headers such as `SINGLE & PAIR SKATING`, `REFEREE & JUDGE`, `ISU Judge`, and `International Technical Specialist` before extracting names. Only segments ending in title markers like `, Ms.` or `, Mr.` are loaded as officials.
 
 ISU officials are stored as one canonical row per `federation_code` + normalized name, not one row per season. Loading another season updates the same official row and appends the new season / communication number, so judge and segment links keep pointing at a stable `isu_official.id`.
 
