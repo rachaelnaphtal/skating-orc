@@ -6,7 +6,15 @@ from scripts.load_isu_officials_pdf import (
     parse_isu_official_lines,
     parse_isu_official_text,
     split_surname_first_name,
+    write_csv,
 )
+
+
+def appointment_tuples(row):
+    return {
+        (appointment.discipline, appointment.appointment_type, appointment.level)
+        for appointment in row.appointments
+    }
 
 
 def test_extract_names_strips_headers_on_same_line():
@@ -49,9 +57,9 @@ Vladimirov Vladislav, Mr.
         ("ARM", "Vladimirov Vladislav"),
     ]
     assert rows[0].federation_name == "ANDORRA"
-    assert rows[0].disciplines == "Single & Pair Skating"
-    assert rows[0].appointment_types == "Judge"
-    assert rows[0].levels == "International"
+    assert appointment_tuples(rows[0]) == {
+        ("Single & Pair Skating", "Judge", "International")
+    }
     assert all("JUDGE" not in r.full_name.upper() for r in rows)
     assert all("SKATING" not in r.full_name.upper() for r in rows)
 
@@ -67,7 +75,7 @@ def test_parse_text_handles_name_on_federation_header_line():
     assert rows[0].federation_name == "AUSTRIA"
 
 
-def test_parse_text_aggregates_levels_and_appointment_types():
+def test_parse_text_keeps_separate_appointment_rows():
     text = """
 AUS - AUSTRALIA
 SINGLE & PAIR SKATING
@@ -80,9 +88,31 @@ Andrew Rebecca, Ms.
     rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
 
     assert len(rows) == 1
-    assert rows[0].appointment_types == "Judge,Referee"
-    assert rows[0].levels == "ISU,International"
-    assert rows[0].disciplines == "Single & Pair Skating"
+    assert appointment_tuples(rows[0]) == {
+        ("Single & Pair Skating", "Judge", "ISU"),
+        ("Single & Pair Skating", "Referee", "International"),
+    }
+
+
+def test_write_csv_outputs_one_row_per_appointment(tmp_path):
+    text = """
+AUS - AUSTRALIA
+SINGLE & PAIR SKATING
+ISU Judge
+Andrew Rebecca, Ms.
+International Referee
+Andrew Rebecca, Ms.
+"""
+    rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
+    out = tmp_path / "isu.csv"
+
+    write_csv(str(out), rows)
+
+    lines = out.read_text().splitlines()
+    assert len(lines) == 3
+    assert "discipline,appointment_type,level" in lines[0]
+    assert "Single & Pair Skating,Judge,ISU" in lines[1]
+    assert "Single & Pair Skating,Referee,International" in lines[2]
 
 
 def test_geometry_lines_keep_column_context_for_appointments():
@@ -103,10 +133,13 @@ def test_geometry_lines_keep_column_context_for_appointments():
     rows = parse_isu_official_lines(lines, season="2526", communication_ref="2735")
     by_name = {row.full_name: row for row in rows}
 
-    assert by_name["Burley Robyn"].appointment_types == "Technical Specialist"
-    assert by_name["Andrew Rebecca"].appointment_types == "Referee,Judge"
-    assert "Technical Specialist" not in by_name["Andrew Rebecca"].appointment_types
-    assert by_name["Andrew Rebecca"].disciplines == "Synchronized Skating"
+    assert appointment_tuples(by_name["Burley Robyn"]) == {
+        ("Single & Pair Skating", "Technical Specialist", "ISU")
+    }
+    assert appointment_tuples(by_name["Andrew Rebecca"]) == {
+        ("Synchronized Skating", "Referee", "ISU"),
+        ("Synchronized Skating", "Judge", "ISU"),
+    }
 
 
 def test_parse_text_extracts_multiple_names_from_one_line():
@@ -169,3 +202,5 @@ def test_isu_roster_schema_is_canonical_across_seasons():
     ddl = judge_official_link_core.DDL_JUDGE_ISU_OFFICIAL_LINK
     assert "UNIQUE (federation_code, name_normalized)" in ddl
     assert "UNIQUE (federation_code, name_normalized, season)" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS officials_analysis.isu_official_appointment" in ddl
+    assert "UNIQUE (isu_official_id, discipline, appointment_type, level, season)" in ddl

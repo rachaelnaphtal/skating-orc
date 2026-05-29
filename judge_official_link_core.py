@@ -58,9 +58,6 @@ CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
     name_normalized TEXT NOT NULL,
     season TEXT NOT NULL,
     communication_ref TEXT,
-    disciplines TEXT,
-    appointment_types TEXT,
-    levels TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT isu_official_roster_unique
@@ -68,10 +65,25 @@ CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
 );
 
 ALTER TABLE officials_analysis.isu_official
-    ADD COLUMN IF NOT EXISTS federation_name TEXT,
-    ADD COLUMN IF NOT EXISTS disciplines TEXT,
-    ADD COLUMN IF NOT EXISTS appointment_types TEXT,
-    ADD COLUMN IF NOT EXISTS levels TEXT;
+    ADD COLUMN IF NOT EXISTS federation_name TEXT;
+
+CREATE TABLE IF NOT EXISTS officials_analysis.isu_official_appointment (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    isu_official_id INTEGER NOT NULL
+        REFERENCES officials_analysis.isu_official (id) ON DELETE CASCADE,
+    discipline TEXT NOT NULL DEFAULT '',
+    appointment_type TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT '',
+    season TEXT NOT NULL,
+    communication_ref TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT isu_official_appointment_unique
+        UNIQUE (isu_official_id, discipline, appointment_type, level, season)
+);
+
+CREATE INDEX IF NOT EXISTS idx_isu_official_appointment_isu_official_id
+    ON officials_analysis.isu_official_appointment (isu_official_id);
 
 CREATE TABLE IF NOT EXISTS public.isu_official_name_alias (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -187,16 +199,6 @@ def fetch_isu_official_choices(conn: Connection) -> dict[int, str]:
             """
             SELECT id,
                 TRIM(full_name) || ' [' || TRIM(federation_code) || ']'
-                || CASE
-                    WHEN levels IS NOT NULL AND TRIM(levels) <> ''
-                    THEN ' · ' || TRIM(levels)
-                    ELSE ''
-                END
-                || CASE
-                    WHEN appointment_types IS NOT NULL AND TRIM(appointment_types) <> ''
-                    THEN ' · ' || TRIM(appointment_types)
-                    ELSE ''
-                END
                 || ' · ' || TRIM(season) AS label
             FROM officials_analysis.isu_official
             WHERE full_name IS NOT NULL AND TRIM(full_name) <> ''

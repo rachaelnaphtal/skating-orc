@@ -337,14 +337,14 @@ The parser uses PDF word geometry to read each page by country block and column.
 
 ISU officials are stored as one canonical row per `federation_code` + normalized name, not one row per season. Loading another season updates the same official row and appends the new season / communication number, so judge and segment links keep pointing at a stable `isu_official.id`.
 
-The loader stores federation and roster context on each official row:
+The loader stores federation on each official row and stores each roster appointment as its own row in `officials_analysis.isu_official_appointment`:
 
 - `federation_code` and `federation_name`
-- `disciplines`, e.g. `Single & Pair Skating`, `Ice Dance`, `Synchronized Skating`
-- `appointment_types`, e.g. `Judge`, `Referee`, `Technical Controller`, `Technical Specialist`, `Data & Replay Operator`
-- `levels`, e.g. `ISU`, `International`
+- `discipline`, e.g. `Single & Pair Skating`, `Ice Dance`, `Synchronized Skating`
+- `appointment_type`, e.g. `Judge`, `Referee`, `Technical Controller`, `Technical Specialist`, `Data & Replay Operator`
+- `level`, e.g. `ISU`, `International`
 
-If an official appears in several sections of the PDF, these metadata fields are comma-separated and de-duplicated on the canonical row.
+If an official appears in several sections of the PDF, the official still has one canonical `isu_official.id`, but each discipline / appointment / level combination gets its own appointment row. Reloading the same season replaces that official's appointment rows for the season.
 
 ---
 

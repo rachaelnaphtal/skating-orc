@@ -98,6 +98,15 @@ APPOINTMENT_GROUP_HEADERS = {
 
 
 @dataclass(frozen=True)
+class IsuAppointmentRow:
+    discipline: str
+    appointment_type: str
+    level: str
+    season: str
+    communication_ref: str
+
+
+@dataclass(frozen=True)
 class IsuOfficialRow:
     federation_code: str
     federation_name: str
@@ -107,9 +116,7 @@ class IsuOfficialRow:
     name_normalized: str
     season: str
     communication_ref: str
-    disciplines: str
-    appointment_types: str
-    levels: str
+    appointments: tuple[IsuAppointmentRow, ...]
 
 
 @dataclass(frozen=True)
@@ -268,6 +275,7 @@ def _append_unique(values: list[str], value: str) -> None:
 
 
 def _row_from_parsed_data(row_data: dict[str, object]) -> IsuOfficialRow:
+    appointments = tuple(row_data["appointments"])  # type: ignore[arg-type]
     return IsuOfficialRow(
         federation_code=str(row_data["federation_code"]),
         federation_name=str(row_data["federation_name"]),
@@ -277,9 +285,7 @@ def _row_from_parsed_data(row_data: dict[str, object]) -> IsuOfficialRow:
         name_normalized=str(row_data["name_normalized"]),
         season=str(row_data["season"]),
         communication_ref=str(row_data["communication_ref"]),
-        disciplines=",".join(row_data["disciplines"]),  # type: ignore[arg-type]
-        appointment_types=",".join(row_data["appointment_types"]),  # type: ignore[arg-type]
-        levels=",".join(row_data["levels"]),  # type: ignore[arg-type]
+        appointments=appointments,
     )
 
 
@@ -305,23 +311,27 @@ def _record_entry(
             "name_normalized": normalized,
             "season": season,
             "communication_ref": communication_ref,
-            "disciplines": [],
-            "appointment_types": [],
-            "levels": [],
+            "appointments": [],
         }
     row_data = parsed[key]
-    _append_unique(row_data["disciplines"], entry.discipline)  # type: ignore[arg-type]
-    _append_unique(
-        row_data["appointment_types"], entry.appointment_type  # type: ignore[arg-type]
+    appointment = IsuAppointmentRow(
+        discipline=entry.discipline,
+        appointment_type=entry.appointment_type,
+        level=entry.level,
+        season=season,
+        communication_ref=communication_ref,
     )
-    _append_unique(row_data["levels"], entry.level)  # type: ignore[arg-type]
+    appointments = row_data["appointments"]  # type: ignore[assignment]
+    if appointment not in appointments:
+        appointments.append(appointment)
 
 
 def parse_isu_official_lines(
     lines: list[PdfLine], *, season: str, communication_ref: str
 ) -> list[IsuOfficialRow]:
     parsed: dict[tuple[str, str, str], dict[str, object]] = {}
-    state: dict[tuple[int, int], dict[str, str]] = {}
+    state: dict[int, dict[str, str]] = {}
+    federation_discipline_defaults: dict[str, str] = {}
 
     for pdf_line in sorted(lines, key=lambda item: (item.page, item.column, item.top)):
         line = _clean_line(pdf_line.text)
@@ -338,23 +348,28 @@ def parse_isu_official_lines(
         if not pdf_line.federation_code:
             continue
 
-        state_key = (pdf_line.page, pdf_line.column)
-        current = state.setdefault(
-            state_key,
-            {
-                "federation_code": pdf_line.federation_code,
-                "federation_name": pdf_line.federation_name,
-                "discipline": "",
-                "appointment_type": "",
-                "level": "",
-            },
-        )
+        state_key = pdf_line.column
+        current = state.setdefault(state_key, {})
+        if not current:
+            current.update(
+                {
+                    "federation_code": pdf_line.federation_code,
+                    "federation_name": pdf_line.federation_name,
+                    "discipline": federation_discipline_defaults.get(
+                        pdf_line.federation_code, ""
+                    ),
+                    "appointment_type": "",
+                    "level": "",
+                }
+            )
         if current["federation_code"] != pdf_line.federation_code:
             current.update(
                 {
                     "federation_code": pdf_line.federation_code,
                     "federation_name": pdf_line.federation_name,
-                    "discipline": "",
+                    "discipline": federation_discipline_defaults.get(
+                        pdf_line.federation_code, ""
+                    ),
                     "appointment_type": "",
                     "level": "",
                 }
@@ -363,6 +378,7 @@ def parse_isu_official_lines(
         line_discipline = _line_discipline(line)
         if line_discipline:
             current["discipline"] = line_discipline
+            federation_discipline_defaults[pdf_line.federation_code] = line_discipline
         line_appointment_type = _line_appointment_group(line)
         if line_appointment_type:
             current["appointment_type"] = line_appointment_type
@@ -568,9 +584,9 @@ def write_csv(path: str, rows: list[IsuOfficialRow]) -> None:
         "name_normalized",
         "season",
         "communication_ref",
-        "disciplines",
-        "appointment_types",
-        "levels",
+        "discipline",
+        "appointment_type",
+        "level",
     ]
     if path == "-":
         out = sys.stdout
@@ -582,7 +598,31 @@ def write_csv(path: str, rows: list[IsuOfficialRow]) -> None:
         writer = csv.DictWriter(out, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow(row.__dict__)
+            appointments = row.appointments or (
+                IsuAppointmentRow(
+                    discipline="",
+                    appointment_type="",
+                    level="",
+                    season=row.season,
+                    communication_ref=row.communication_ref,
+                ),
+            )
+            for appointment in appointments:
+                writer.writerow(
+                    {
+                        "federation_code": row.federation_code,
+                        "federation_name": row.federation_name,
+                        "full_name": row.full_name,
+                        "first_name": row.first_name,
+                        "last_name": row.last_name,
+                        "name_normalized": row.name_normalized,
+                        "season": appointment.season,
+                        "communication_ref": appointment.communication_ref,
+                        "discipline": appointment.discipline,
+                        "appointment_type": appointment.appointment_type,
+                        "level": appointment.level,
+                    }
+                )
         out.flush()
     finally:
         if close:
@@ -640,6 +680,46 @@ def _repoint_duplicate_isu_official_refs(conn, *, keeper_id: int, duplicate_ids:
             ),
             {"keeper_id": keeper_id, "duplicate_id": duplicate_id},
         )
+        conn.execute(
+            text(
+                """
+                INSERT INTO officials_analysis.isu_official_appointment (
+                    isu_official_id,
+                    discipline,
+                    appointment_type,
+                    level,
+                    season,
+                    communication_ref
+                )
+                SELECT
+                    :keeper_id,
+                    discipline,
+                    appointment_type,
+                    level,
+                    season,
+                    communication_ref
+                FROM officials_analysis.isu_official_appointment
+                WHERE isu_official_id = :duplicate_id
+                ON CONFLICT (isu_official_id, discipline, appointment_type, level, season)
+                DO UPDATE SET
+                    communication_ref = COALESCE(
+                        EXCLUDED.communication_ref,
+                        officials_analysis.isu_official_appointment.communication_ref
+                    ),
+                    last_modified = NOW()
+                """
+            ),
+            {"keeper_id": keeper_id, "duplicate_id": duplicate_id},
+        )
+        conn.execute(
+            text(
+                """
+                DELETE FROM officials_analysis.isu_official_appointment
+                WHERE isu_official_id = :duplicate_id
+                """
+            ),
+            {"duplicate_id": duplicate_id},
+        )
         if has_segment_isu_official_id:
             conn.execute(
                 text(
@@ -675,13 +755,7 @@ def load_rows(
             existing = conn.execute(
                 text(
                     """
-                    SELECT
-                        id,
-                        season,
-                        communication_ref,
-                        disciplines,
-                        appointment_types,
-                        levels
+                    SELECT id, season, communication_ref
                     FROM officials_analysis.isu_official
                     WHERE federation_code = :federation_code
                       AND name_normalized = :name_normalized
@@ -707,9 +781,6 @@ def load_rows(
                             last_name = :last_name,
                             season = :season,
                             communication_ref = :communication_ref,
-                            disciplines = :disciplines,
-                            appointment_types = :appointment_types,
-                            levels = :levels,
                             last_modified = NOW()
                         WHERE id = :id
                         """
@@ -721,17 +792,11 @@ def load_rows(
                         "communication_ref": merge_csv_values(
                             keeper["communication_ref"], row.communication_ref
                         ),
-                        "disciplines": merge_csv_values(
-                            keeper["disciplines"], row.disciplines
-                        ),
-                        "appointment_types": merge_csv_values(
-                            keeper["appointment_types"], row.appointment_types
-                        ),
-                        "levels": merge_csv_values(keeper["levels"], row.levels),
                     },
                 )
+                official_id = int(keeper["id"])
             else:
-                conn.execute(
+                result = conn.execute(
                     text(
                         """
                         INSERT INTO officials_analysis.isu_official (
@@ -742,10 +807,7 @@ def load_rows(
                             last_name,
                             name_normalized,
                             season,
-                            communication_ref,
-                            disciplines,
-                            appointment_types,
-                            levels
+                            communication_ref
                         )
                         VALUES (
                             :federation_code,
@@ -755,14 +817,58 @@ def load_rows(
                             :last_name,
                             :name_normalized,
                             :season,
-                            :communication_ref,
-                            :disciplines,
-                            :appointment_types,
-                            :levels
+                            :communication_ref
                         )
+                        RETURNING id
                         """
                     ),
                     row.__dict__,
+                )
+                official_id = int(result.scalar_one())
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM officials_analysis.isu_official_appointment
+                    WHERE isu_official_id = :official_id
+                      AND season = :season
+                    """
+                ),
+                {"official_id": official_id, "season": row.season},
+            )
+            for appointment in row.appointments:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO officials_analysis.isu_official_appointment (
+                            isu_official_id,
+                            discipline,
+                            appointment_type,
+                            level,
+                            season,
+                            communication_ref
+                        )
+                        VALUES (
+                            :isu_official_id,
+                            :discipline,
+                            :appointment_type,
+                            :level,
+                            :season,
+                            :communication_ref
+                        )
+                        ON CONFLICT (isu_official_id, discipline, appointment_type, level, season)
+                        DO UPDATE SET
+                            communication_ref = EXCLUDED.communication_ref,
+                            last_modified = NOW()
+                        """
+                    ),
+                    {
+                        "isu_official_id": official_id,
+                        "discipline": appointment.discipline,
+                        "appointment_type": appointment.appointment_type,
+                        "level": appointment.level,
+                        "season": appointment.season,
+                        "communication_ref": appointment.communication_ref,
+                    },
                 )
             count += 1
     return count
