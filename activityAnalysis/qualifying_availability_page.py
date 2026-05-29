@@ -665,35 +665,37 @@ def render_qualifying_availability_page(
     if loc_bits:
         st.caption(" · ".join(loc_bits))
 
-    group_keys = list(QUALIFYING_COMPETITION_GROUP_OPTIONS.keys())
-    stored_group = str(comp_row.get("competition_group") or "").strip().lower()
-    if stored_group not in group_keys[1:]:
-        stored_group = ""
-    group_index = group_keys.index(stored_group) if stored_group in group_keys else 0
-    pick_group = st.selectbox(
-        "Competition type (for assignment history)",
-        options=group_keys,
-        format_func=lambda k: QUALIFYING_COMPETITION_GROUP_OPTIONS[k],
-        index=group_index,
-        key=f"qual_comp_group_{pick_comp_id}",
-        help=(
-            "S/P/D uses US Championships (type 4) and SPD sectionals (1–3); "
-            "Synchronized uses US Synchro Championships (8) and synchro sectionals (5–7, 9)."
-        ),
-    )
-    if pick_group != stored_group:
-        save_competition_group(pick_comp_id, pick_group or None)
-        _comps.clear()
-        st.rerun()
-
     dir_combos = _dir_combos()
     crit_df = _criteria(pick_comp_id)
     crit_combos = _criteria_to_combinations(crit_df)
 
-    with st.expander("Competition criteria (directory appointments)", expanded=False):
-        st.markdown(
+    with st.expander("Competition setup", expanded=False):
+        group_keys = list(QUALIFYING_COMPETITION_GROUP_OPTIONS.keys())
+        stored_group = str(comp_row.get("competition_group") or "").strip().lower()
+        if stored_group not in group_keys[1:]:
+            stored_group = ""
+        group_index = group_keys.index(stored_group) if stored_group in group_keys else 0
+        pick_group = st.selectbox(
+            "Assignment history scope",
+            options=group_keys,
+            format_func=lambda k: QUALIFYING_COMPETITION_GROUP_OPTIONS[k],
+            index=group_index,
+            key=f"qual_comp_group_{pick_comp_id}",
+            help=(
+                "Which past US competitions count for **Last champs / sectionals** "
+                "and related assignment columns. S/P/D → US Champs + SPD sectionals; "
+                "Synchronized → US Synchro Champs + synchro sectionals."
+            ),
+        )
+        if pick_group != stored_group:
+            save_competition_group(pick_comp_id, pick_group or None)
+            _comps.clear()
+            st.rerun()
+
+        st.markdown("**Directory criteria**")
+        st.caption(
             "Add combinations that exist as **active** directory appointments. "
-            "The report only offers filters from criteria you configure here."
+            "Report filters are limited to criteria you configure here."
         )
         if dir_combos.empty:
             st.warning("No active appointments in the directory — cannot suggest criteria.")
@@ -940,7 +942,7 @@ def render_qualifying_availability_page(
 
     if not (meta.get("competition_group") or "").strip():
         st.warning(
-            "Set **Competition type (for assignment history)** above to populate "
+            "Set **Assignment history scope** under **Competition setup** to populate "
             "the **Last champs / sectionals** columns."
         )
     if in_role_at_id is None:

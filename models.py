@@ -317,6 +317,51 @@ class Officials(Base):
     segment_official: Mapped[List['SegmentOfficial']] = relationship('SegmentOfficial', back_populates='official')
 
 
+class IsuOfficial(Base):
+    """ISU Communication roster (separate from USFS ``officials``)."""
+
+    __tablename__ = 'isu_official'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='isu_official_pkey'),
+        UniqueConstraint(
+            'federation_code',
+            'name_normalized',
+            'season',
+            name='isu_official_roster_unique',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    federation_code: Mapped[str] = mapped_column(Text)
+    full_name: Mapped[str] = mapped_column(Text)
+    first_name: Mapped[Optional[str]] = mapped_column(Text)
+    last_name: Mapped[Optional[str]] = mapped_column(Text)
+    name_normalized: Mapped[str] = mapped_column(Text)
+    season: Mapped[str] = mapped_column(Text)
+    communication_ref: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+    last_modified: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+    isu_official_name_alias: Mapped[List['IsuOfficialNameAlias']] = relationship(
+        'IsuOfficialNameAlias', back_populates='isu_official'
+    )
+    judge_isu_official_link: Mapped[List['JudgeIsuOfficialLink']] = relationship(
+        'JudgeIsuOfficialLink', back_populates='isu_official'
+    )
+    segment_official: Mapped[List['SegmentOfficial']] = relationship(
+        'SegmentOfficial', back_populates='isu_official'
+    )
+
+
 class PcsType(Base):
     __tablename__ = 'pcs_type'
     __table_args__ = (
@@ -443,6 +488,10 @@ class IsuOfficialNameAlias(Base):
     note: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
 
+    isu_official: Mapped['IsuOfficial'] = relationship(
+        'IsuOfficial', back_populates='isu_official_name_alias'
+    )
+
 
 class JudgeIsuOfficialLink(Base):
     __tablename__ = 'judge_isu_official_link'
@@ -462,6 +511,10 @@ class JudgeIsuOfficialLink(Base):
     isu_official_id: Mapped[int] = mapped_column(Integer)
     note: Mapped[Optional[str]] = mapped_column(Text)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+
+    isu_official: Mapped['IsuOfficial'] = relationship(
+        'IsuOfficial', back_populates='judge_isu_official_link'
+    )
 
 
 class OfficialNameAlias(Base):
@@ -557,6 +610,9 @@ class SegmentOfficial(Base):
 
     appointment_type: Mapped[Optional['AppointmentTypes']] = relationship('AppointmentTypes', back_populates='segment_official')
     official: Mapped[Optional['Officials']] = relationship('Officials', back_populates='segment_official')
+    isu_official: Mapped[Optional['IsuOfficial']] = relationship(
+        'IsuOfficial', back_populates='segment_official'
+    )
     segment: Mapped['Segment'] = relationship('Segment', back_populates='segment_official')
 
 

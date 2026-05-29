@@ -244,6 +244,13 @@ python scripts/discover_usfs_ijs_competitions.py \
 
 Uses the ISU event API to enumerate figure skating events, follows each ISU event detail page, extracts the **Detailed Results** URL, and writes a CSV. It can query ISU events, international events, or both, and can also load the discovered result pages through the normal `downloadResults.scrape()` database path.
 
+**Before `--load`:** apply migrations **012** (international flag) and **013** (ISU official directory + `segment_official.isu_official_id`):
+
+```bash
+psql "$DATABASE_URL" -f activityAnalysis/migrations/012_public_competition_international.sql
+psql "$DATABASE_URL" -f activityAnalysis/migrations/013_isu_official_directory.sql
+```
+
 **Discover URLs only** (defaults to the latest two ISU seasons whose start date has passed):
 
 ```bash

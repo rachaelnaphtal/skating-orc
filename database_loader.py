@@ -110,6 +110,7 @@ class DatabaseLoader:
     def __init__(self, session: Session, *, defer_commits: bool = False):
         self.session = session
         self.defer_commits = defer_commits
+        self._isu_official_schema_ready: bool | None = None
 
     def commit(self) -> None:
         """Flush pending ORM work and commit (used at end of batch scrapes)."""
@@ -159,7 +160,7 @@ class DatabaseLoader:
                     official_name, choices_cache
                 )
             isu_oid = None
-            if oid is None:
+            if oid is None and self._isu_official_schema_ready():
                 isu_oid = self._isu_official_id_from_judge_id(judge_id)
                 if isu_oid is None:
                     isu_oid = self._isu_official_id_from_name_alias(official_name)
@@ -455,6 +456,28 @@ class DatabaseLoader:
         if not row or row[0] is None:
             return None
         return int(row[0])
+
+    def _isu_official_schema_ready(self) -> bool:
+        """True when migration 013 objects exist (``officials_analysis.isu_official``)."""
+        if self._isu_official_schema_ready is not None:
+            return self._isu_official_schema_ready
+        try:
+            row = self.session.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'officials_analysis'
+                      AND table_name = 'isu_official'
+                    LIMIT 1
+                    """
+                )
+            ).first()
+            ready = row is not None
+        except Exception:
+            ready = False
+        self._isu_official_schema_ready = ready
+        return ready
 
     def _load_isu_official_choices(self) -> dict[int, str]:
         try:
