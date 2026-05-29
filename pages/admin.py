@@ -11,6 +11,11 @@ import admin_sections as adm
 
 _MAIN_ANALYTICS_SCRIPT = "analysis_app.py"
 
+try:
+    st.set_page_config(page_title="Admin", page_icon="🔧", layout="wide")
+except Exception:
+    pass
+
 
 def _sidebar_nav_home() -> None:
     if st.sidebar.button(

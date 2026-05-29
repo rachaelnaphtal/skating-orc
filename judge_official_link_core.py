@@ -305,22 +305,34 @@ def fetch_unmapped_judges(conn: Connection, limit: int | None = None) -> list[Ro
     return list(conn.execute(q, params).mappings().all())
 
 
-def fetch_judges_needing_link(conn: Connection, limit: int | None = None) -> list[RowMapping]:
+def fetch_judges_needing_link(
+    conn: Connection,
+    limit: int | None = None,
+    *,
+    include_marked_outside: bool = False,
+) -> list[RowMapping]:
     """
-    Judges without an ISU link who still need matcher attention.
+    Judges that still need a matcher decision.
 
-    Includes ``outside_directory`` rows (US “outside” does not mean ISU is done).
-    Excludes only US ``linked`` judges who already have their US mapping.
+    By default excludes US ``linked``, ``outside_directory``, and any ISU link.
+    Set ``include_marked_outside`` to list outside-marked judges (e.g. to link ISU).
     """
     lim_sql = " LIMIT :lim" if limit is not None else ""
+    if include_marked_outside:
+        status_clause = "COALESCE(l.status, '') <> 'linked'"
+    else:
+        status_clause = "COALESCE(l.status, '') NOT IN ('linked', 'outside_directory')"
     q = text(
         f"""
         SELECT j.id, j.name, j.location
         FROM judge j
         LEFT JOIN judge_official_link l ON l.judge_id = j.id
-        LEFT JOIN judge_isu_official_link il ON il.judge_id = j.id
-        WHERE il.judge_id IS NULL
-          AND COALESCE(l.status, '') <> 'linked'
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM judge_isu_official_link il
+            WHERE il.judge_id = j.id
+        )
+          AND {status_clause}
         ORDER BY lower(j.name), j.id
         {lim_sql}
         """

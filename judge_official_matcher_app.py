@@ -12,6 +12,8 @@ Embedded from the main app's Admin page via ``render_judge_official_matcher(embe
 
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 import streamlit as st
 
@@ -49,50 +51,40 @@ def _isu_official_labels_normalized() -> dict[int, str]:
     return core.normalize_name_choices(_isu_official_labels())
 
 
-def _judges_cache_key(judges: list[dict]) -> tuple[tuple[int, str], ...]:
-    return tuple((int(j["id"]), str(j.get("name") or "")) for j in judges)
+def _judges_editor_key(prefix: str, judges: list[dict]) -> str:
+    """Stable widget key so ``st.data_editor`` resets when the loaded judge set changes."""
+    ids = ",".join(str(int(j["id"])) for j in judges)
+    digest = hashlib.md5(ids.encode(), usedforsecurity=False).hexdigest()[:16]
+    return f"{prefix}_{digest}"
 
 
-@st.cache_data(ttl=120)
-def _cached_review_table(
-    judges_key: tuple[tuple[int, str], ...],
-    default_link_min_score: float,
-    default_isu_link_min_score: float,
-) -> pd.DataFrame:
-    judges = [{"id": jid, "name": name} for jid, name in judges_key]
-    labels = _official_labels()
-    isu_labels = _isu_official_labels()
-    _, display_to_id, id_to_display = core.official_select_display_maps(labels)
-    _, isu_display_to_id, isu_id_to_display = core.isu_official_select_display_maps(
-        isu_labels
-    )
-    return _build_review_table(
-        judges,
-        labels,
-        isu_labels,
-        default_link_min_score=default_link_min_score,
-        default_isu_link_min_score=default_isu_link_min_score,
-        id_to_display=id_to_display,
-        isu_id_to_display=isu_id_to_display,
-        us_normalized=_official_labels_normalized(),
-        isu_normalized=_isu_official_labels_normalized(),
+def _embedded_matcher_layout() -> None:
+    """Admin embed: use full content width (main app layout is already wide)."""
+    st.markdown(
+        """
+        <style>
+        section.main .block-container {
+            max-width: 100%;
+            padding-left: 1.25rem;
+            padding-right: 1.25rem;
+        }
+        div[data-testid="stDataEditor"] {
+            width: 100%;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
 
-@st.cache_data(ttl=120)
-def _cached_outside_bulk_table(judges_key: tuple[tuple[int, str], ...]) -> pd.DataFrame:
-    judges = [{"id": jid, "name": name} for jid, name in judges_key]
-    return _build_outside_bulk_table(
-        judges,
-        _official_labels(),
-        us_normalized=_official_labels_normalized(),
-    )
-
-
-def _load_unmapped(limit: int) -> list[dict]:
+def _load_unmapped(limit: int, *, include_marked_outside: bool = False) -> list[dict]:
     eng = _engine()
     with eng.connect() as conn:
-        rows = core.fetch_judges_needing_link(conn, limit=limit)
+        rows = core.fetch_judges_needing_link(
+            conn,
+            limit=limit,
+            include_marked_outside=include_marked_outside,
+        )
     return [dict(r) for r in rows]
 
 
@@ -229,6 +221,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             page_icon="🔗",
             layout="wide",
         )
+    else:
+        _embedded_matcher_layout()
 
     flash = st.session_state.pop("_matcher_flash", None)
     if flash:
@@ -277,13 +271,20 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         85.0,
         1.0,
     )
+    include_outside = st.sidebar.checkbox(
+        "Include judges marked outside",
+        value=False,
+        help="Show outside_directory rows so you can Link ISU (clears the outside mark) "
+        "or clear via: python scripts/judge_official_admin.py clear JUDGE_ID",
+    )
 
-    judges = _load_unmapped(int(max_rows))
+    judges = _load_unmapped(int(max_rows), include_marked_outside=include_outside)
     st.sidebar.metric("Unmapped judges (loaded)", len(judges))
 
     if not judges:
         st.info(
-            "No judges need linking — everyone has a US **linked** row or an ISU roster link."
+            "No judges need linking — everyone is US **linked**, marked **outside**, "
+            "or has an ISU roster link."
         )
         st.stop()
 
@@ -301,7 +302,11 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             "then **Apply outside marks**. (Uncheck mistakes before applying.)"
         )
         with st.spinner("Building table…"):
-            df_out = _cached_outside_bulk_table(_judges_cache_key(judges))
+            df_out = _build_outside_bulk_table(
+                judges,
+                labels,
+                us_normalized=_official_labels_normalized(),
+            )
         edited_out = st.data_editor(
             df_out,
             column_config={
@@ -333,7 +338,7 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             hide_index=True,
             num_rows="fixed",
             width="stretch",
-            key="outside_bulk_editor",
+            key=_judges_editor_key("outside_bulk_editor", judges),
         )
         n_marked = int(edited_out["mark_outside"].fillna(False).astype(bool).sum())
         if st.button(
@@ -404,10 +409,16 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             st.rerun()
 
     with st.spinner("Building match table (fuzzy match against directories)…"):
-        df = _cached_review_table(
-            _judges_cache_key(judges),
-            float(default_link),
-            float(default_isu_link),
+        df = _build_review_table(
+            judges,
+            labels,
+            isu_labels,
+            default_link_min_score=float(default_link),
+            default_isu_link_min_score=float(default_isu_link),
+            id_to_display=id_to_display,
+            isu_id_to_display=isu_id_to_display,
+            us_normalized=_official_labels_normalized(),
+            isu_normalized=_isu_official_labels_normalized(),
         )
     pinned = {str(x) for x in df["us_directory_official"].dropna() if str(x).strip()}
     isu_pinned = {str(x) for x in df["isu_directory_official"].dropna() if str(x).strip()}
@@ -484,7 +495,7 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         hide_index=True,
         num_rows="fixed",
         width="stretch",
-        key="review_editor",
+        key=_judges_editor_key("review_editor", judges),
     )
 
     if st.button("Apply decisions in table", type="secondary"):
@@ -556,8 +567,6 @@ def _clear_matcher_caches() -> None:
     _official_labels_normalized.clear()
     _isu_official_labels.clear()
     _isu_official_labels_normalized.clear()
-    _cached_review_table.clear()
-    _cached_outside_bulk_table.clear()
 
 
 def main() -> None:
