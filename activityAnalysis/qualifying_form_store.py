@@ -31,6 +31,7 @@ try:
     from activityAnalysis.qualifying_availability_ingest import (
         competition_availability_columns,
         dedupe_form_responses_by_member,
+        extract_qualifying_form_conflicts,
         extract_qualifying_form_notes,
         extract_qualifying_role_priority,
         find_completion_status_column,
@@ -65,6 +66,7 @@ except ModuleNotFoundError:
     from qualifying_availability_ingest import (
         competition_availability_columns,
         dedupe_form_responses_by_member,
+        extract_qualifying_form_conflicts,
         extract_qualifying_form_notes,
         extract_qualifying_role_priority,
         find_completion_status_column,
@@ -873,6 +875,52 @@ def _batch_official_active_appointment_lines(
     return out
 
 
+def _batch_official_in_role_appointment_year(
+    session: Session,
+    official_ids: list[int],
+    appointment_type_id: int,
+    discipline_id: int,
+) -> dict[int, int | None]:
+    """
+    Calendar year of the most recent active directory appointment for this role/discipline.
+
+    Uses ``achieved_date`` when set, otherwise ``appointed_date``.
+    """
+    out: dict[int, int | None] = {int(oid): None for oid in official_ids}
+    if not official_ids:
+        return out
+    appt_filters = [
+        Appointments.official_id.in_(list(official_ids)),
+        Appointments.active.is_(True),
+        Appointments.appointment_type_id == int(appointment_type_id),
+    ]
+    disc_ids = _assignment_discipline_ids_for_report(
+        int(discipline_id), int(appointment_type_id)
+    )
+    if disc_ids is not None:
+        appt_filters.append(Appointments.discipline_id.in_(disc_ids))
+    appt_date = func.coalesce(Appointments.achieved_date, Appointments.appointed_date)
+    stmt = (
+        select(
+            Appointments.official_id,
+            func.max(appt_date).label("appointment_date"),
+        )
+        .where(*appt_filters, appt_date.isnot(None))
+        .group_by(Appointments.official_id)
+    )
+    for oid, appt_dt in session.execute(stmt).all():
+        if appt_dt is None:
+            continue
+        if hasattr(appt_dt, "year"):
+            out[int(oid)] = int(appt_dt.year)
+        else:
+            try:
+                out[int(oid)] = int(pd.Timestamp(appt_dt).year)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def _appointment_matches_competition_criterion(
     appointment_type_id: int,
     discipline_id: int | None,
@@ -1032,6 +1080,7 @@ QUALIFYING_REPORT_COLUMN_ORDER: tuple[str, ...] = (
     "Region",
     "Email",
     "Status",
+    "Appointment year",
     "Last champs (in role)",
     "Last sectionals (in role)",
     "Last champs (overall)",
@@ -1040,6 +1089,7 @@ QUALIFYING_REPORT_COLUMN_ORDER: tuple[str, ...] = (
     "Total comps (2 yr, in role)",
     "Directory appointments",
     "Notes",
+    "Conflicts",
     "Role priority",
     "official_id",
 )
@@ -1228,6 +1278,7 @@ def _rows_from_criterion_segment(
     in_role_years: dict[int, tuple[int | None, int | None]],
     other_comp_cache: dict[int, int],
     in_role_other_comp_cache: dict[int, int] | None,
+    in_role_appointment_year_cache: dict[int, int | None] | None,
     held_types_cache: dict[int, set[int]],
     competition_appt_lines_by_official: dict[int, list[str]],
     appointment_name_to_id: dict[str, int],
@@ -1237,9 +1288,11 @@ def _rows_from_criterion_segment(
         oid = int(row.id)
 
         notes = ""
+        conflicts = ""
         role_priority = ""
         if row.form_response_id is not None and form_is_complete:
             notes = extract_qualifying_form_notes(payload)
+            conflicts = extract_qualifying_form_conflicts(payload)
             role_priority = extract_qualifying_role_priority(
                 payload,
                 held_appointment_type_ids=held_types_cache.get(oid, set()),
@@ -1268,7 +1321,10 @@ def _rows_from_criterion_segment(
                 competition_appt_lines_by_official.get(oid, [])
             ),
             "Notes": notes,
+            "Conflicts": conflicts,
         }
+        if in_role_appointment_year_cache is not None:
+            row_out["Appointment year"] = in_role_appointment_year_cache.get(oid)
         if in_role_other_comp_cache is not None:
             row_out["Total comps (2 yr, in role)"] = in_role_other_comp_cache.get(
                 oid, 0
@@ -1320,7 +1376,11 @@ def _merge_report_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         existing["Notes"] = _merge_notes_cells(
             existing.get("Notes"), row.get("Notes")
         )
+        existing["Conflicts"] = _merge_notes_cells(
+            existing.get("Conflicts"), row.get("Conflicts")
+        )
         for col in (
+            "Appointment year",
             "Last champs (in role)",
             "Last sectionals (in role)",
             "Last champs (overall)",
@@ -1445,10 +1505,17 @@ def build_qualifying_availability_report(
             season_year_codes=season_codes,
         )
         in_role_other_comp_cache: dict[int, int] | None = None
+        in_role_appointment_year_cache: dict[int, int | None] | None = None
         if (
             in_role_appointment_type_id is not None
             and in_role_discipline_id is not None
         ):
+            in_role_appointment_year_cache = _batch_official_in_role_appointment_year(
+                session,
+                report_oids,
+                int(in_role_appointment_type_id),
+                int(in_role_discipline_id),
+            )
             in_role_other_comp_cache = count_official_segment_competitions_batch(
                 report_oids,
                 season_year_codes=season_codes,
@@ -1458,6 +1525,7 @@ def build_qualifying_availability_report(
                     int(in_role_appointment_type_id),
                 ),
             )
+            meta["show_in_role_columns"] = True
             meta["show_total_comps_in_role"] = True
         held_types_cache = _batch_held_appointment_type_ids(session, report_oids)
         competition_appt_lines = _batch_competition_directory_appointment_lines(
@@ -1474,6 +1542,7 @@ def build_qualifying_availability_report(
                     in_role_years=in_role_years,
                     other_comp_cache=other_comp_cache,
                     in_role_other_comp_cache=in_role_other_comp_cache,
+                    in_role_appointment_year_cache=in_role_appointment_year_cache,
                     held_types_cache=held_types_cache,
                     competition_appt_lines_by_official=competition_appt_lines,
                     appointment_name_to_id=appt_name_to_id,
