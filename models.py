@@ -27,6 +27,7 @@ class Competition(Base):
     dance: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     synchronized: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     nqs: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    international: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     officials_analysis_competition_type_id: Mapped[Optional[int]] = mapped_column(
         Integer,
         ForeignKey(

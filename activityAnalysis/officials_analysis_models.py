@@ -33,6 +33,9 @@ class CompetitionType(Base):
 
     id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
     name: Mapped[str] = mapped_column(String)
+    international: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
 
     competition: Mapped[List['Competition']] = relationship('Competition', back_populates='competition_type')

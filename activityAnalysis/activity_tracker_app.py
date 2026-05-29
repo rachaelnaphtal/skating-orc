@@ -1878,12 +1878,19 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         "full record of activity; non-qualifying competitions in particular are non-exhaustive."
     )
     if panel_detail.empty:
-        qual_detail = panel_detail
-        nonqual_detail = panel_detail
+        intl_detail = qual_detail = nonqual_detail = panel_detail
     else:
-        is_qualifying = panel_detail["qualifying"].fillna(False).astype(bool)
-        qual_detail = panel_detail[is_qualifying]
-        nonqual_detail = panel_detail[~is_qualifying]
+        is_intl = panel_detail["international"].fillna(False).astype(bool)
+        intl_detail = panel_detail[is_intl]
+        domestic = panel_detail[~is_intl]
+        is_qualifying = domestic["qualifying"].fillna(False).astype(bool)
+        qual_detail = domestic[is_qualifying]
+        nonqual_detail = domestic[~is_qualifying]
+    _render_additional_segment_activity_slice(
+        intl_detail,
+        section_subheader="International Activity",
+        expander_widget_key="person_seg_official_intl_exp",
+    )
     _render_additional_segment_activity_slice(
         qual_detail,
         section_subheader="Additional Qualifying Activity",

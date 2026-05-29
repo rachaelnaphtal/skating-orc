@@ -19,6 +19,30 @@ except ImportError:  # pragma: no cover
     suggest_matches = None  # type: ignore[misc, assignment]
 
 
+def coerce_competition_date(value: object) -> datetime.date | None:
+    """Map scrape/metadata values to ``date`` or ``None`` (never empty string)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    s = str(value).strip()
+    if not s:
+        return None
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def coerce_competition_location(value: object) -> str | None:
+    s = str(value or "").strip()
+    return s or None
+
+
 def _normalize_person_name(name: str | None) -> str:
     """Lowercase + collapse whitespace; matches judge_official_link_core.normalize_name."""
     if not name:
@@ -426,6 +450,7 @@ class DatabaseLoader:
         name=None,
         qualifying=None,
         nqs=None,
+        international=None,
         officials_analysis_competition_type_id=None,
         update_officials_competition_type=False,
     ):
@@ -436,13 +461,15 @@ class DatabaseLoader:
             )
         if name is not None:
             existing.name = name
-        existing.location = location
-        existing.start_date = start_date
-        existing.end_date = end_date
+        existing.location = coerce_competition_location(location)
+        existing.start_date = coerce_competition_date(start_date)
+        existing.end_date = coerce_competition_date(end_date)
         if qualifying is not None:
             existing.qualifying = qualifying
         if nqs is not None:
             existing.nqs = nqs
+        if international is not None:
+            existing.international = international
         if update_officials_competition_type:
             existing.officials_analysis_competition_type_id = (
                 officials_analysis_competition_type_id
@@ -490,17 +517,28 @@ class DatabaseLoader:
         segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
         return [segment.name for segment in segments]
 
-    def insert_competition(self, name, url, year, qualifying=None, nqs=None, officials_analysis_competition_type_id=None):
+    def insert_competition(
+        self,
+        name,
+        url,
+        year,
+        qualifying=None,
+        nqs=None,
+        international=None,
+        officials_analysis_competition_type_id=None,
+    ):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
         if not existing:
             q_flag = False if qualifying is None else qualifying
             n_flag = False if nqs is None else nqs
+            i_flag = False if international is None else international
             new = Competition(
                 name=name,
                 results_url=url,
                 year=year,
                 qualifying=q_flag,
                 nqs=n_flag,
+                international=i_flag,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
             self.session.add(new)

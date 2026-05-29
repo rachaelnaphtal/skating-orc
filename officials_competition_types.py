@@ -17,6 +17,17 @@ OFFICIALS_COMPETITION_TYPE_ID_NQS = 10
 OFFICIALS_COMPETITION_TYPE_ID_ADULT_CHAMPIONSHIPS = 12
 OFFICIALS_COMPETITION_TYPE_ID_ADULT_SECTIONAL = 13
 OFFICIALS_COMPETITION_TYPE_ID_COLLEGIATE_CHAMPIONSHIPS = 14
+OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP = 15
+OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION = 16
+OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION = 17
+
+OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL = frozenset(
+    {
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP,
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION,
+        OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION,
+    }
+)
 
 # Analytics competition-scope keys (single select → SQL filter on public.competition link)
 COMPETITION_SCOPE_ALL = "all"
@@ -53,6 +64,9 @@ ADULT_AND_COLLEGIATE_TYPE_IDS = frozenset(
 )
 
 OFFICIALS_COMPETITION_TYPE_DISPLAY_NAMES: dict[int, str] = {
+    17: "International Competition",
+    16: "ISU Competition",
+    15: "ISU Championship",
     14: "Collegiate Championships",
     13: "Adult Sectional",
     12: "Adult Championships",
@@ -88,16 +102,25 @@ def format_officials_competition_type_select_label(
         return f"SPD Sectional — {base}"
     if type_id in SYS_SECTIONAL_TYPE_IDS:
         return f"SYS Sectional — {base}"
+    if type_id in OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL:
+        return f"International — {base}"
     return base
 
 
-def competition_load_flags_from_officials_type_id(type_id: int) -> tuple[bool, bool]:
-    """
-    (qualifying_column, nqs_column) for ``public.competition`` when loading results.
+def officials_competition_type_is_international(type_id: int) -> bool:
+    """True for types with ``officials_analysis.competition_type.international`` (15–17)."""
+    return int(type_id) in OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL
 
-    qualifying=True for all types except nonqualifying (11). NQS=True only for type 10.
-    Adult / Collegiate types (12–14) are qualifying and not NQS, same as other non-11 types.
+
+def competition_load_flags_from_officials_type_id(type_id: int) -> tuple[bool, bool, bool]:
     """
+    (qualifying, nqs, international) for ``public.competition`` when loading results.
+
+    International types (15–17): all false except ``international`` true.
+    Otherwise: qualifying=True except nonqualifying (11); NQS=True only for type 10.
+    """
+    if officials_competition_type_is_international(type_id):
+        return False, False, True
     nqs = type_id == OFFICIALS_COMPETITION_TYPE_ID_NQS
     qualifying = type_id != OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING
-    return qualifying, nqs
+    return qualifying, nqs, False

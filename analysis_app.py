@@ -4452,13 +4452,16 @@ elif page == "Load Competition":
                 key="load_competition_officials_analysis_ct",
             )
             load_oa_competition_type_id = int(load_oa_competition_type_id)
-            load_qualifying, load_nqs = competition_load_flags_from_officials_type_id(
-                load_oa_competition_type_id
+            load_qualifying, load_nqs, load_international = (
+                competition_load_flags_from_officials_type_id(
+                    load_oa_competition_type_id
+                )
             )
             st.caption(
-                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs}. "
-                "Nonqualifying (id **11**) → qualifying false. NQS (id **10**) → nqs true. "
-                "Adult / Collegiate types (**12–14**) → qualifying true, nqs false."
+                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs}, "
+                f"**international**={load_international}. "
+                "International types (**15–17**) → international true, qualifying and nqs false. "
+                "Nonqualifying (id **11**) → qualifying false. NQS (id **10**) → nqs true."
             )
             # pdf_folder = st.text_input(
             #     "PDF output folder (leave blank if not saving PDFs)",
@@ -4554,6 +4557,7 @@ elif page == "Load Competition":
                         isFSM=isFSM,
                         qualifying=load_qualifying,
                         nqs=load_nqs,
+                        international=load_international,
                         officials_analysis_competition_type_id=load_oa_competition_type_id,
                         update_officials_competition_type=True,
                     )

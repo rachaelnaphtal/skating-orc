@@ -165,15 +165,21 @@ def _resolved_oa_type_id(row: dict[str, str], cli_default: int | None) -> int | 
 
 def _flags_for_row(
     row: dict[str, str], oa_id: int
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
+    q0, n0, i0 = competition_load_flags_from_officials_type_id(oa_id)
+    if i0:
+        return False, False, True
     q_raw = row.get("qualifying")
     n_raw = row.get("nqs")
     q = parse_bool_cell(q_raw) if q_raw is not None and str(q_raw).strip() != "" else None
     n = parse_bool_cell(n_raw) if n_raw is not None and str(n_raw).strip() != "" else None
     if q is not None and n is not None:
-        return q, n
-    q0, n0 = competition_load_flags_from_officials_type_id(oa_id)
-    return q if q is not None else q0, n if n is not None else n0
+        return q, n, False
+    return (
+        q if q is not None else q0,
+        n if n is not None else n0,
+        False,
+    )
 
 
 def _parse_csv_choices(arg: str, choices: tuple[str, ...], label: str) -> tuple[str, ...]:
@@ -395,20 +401,16 @@ def main(argv: list[str] | None = None) -> int:
             start_d = parse_mdy_or_iso(str(r.get("start_date", "")))
             end_d = parse_mdy_or_iso(str(r.get("end_date", "")))
 
+            type_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
+            qualifying, nqs, international = competition_load_flags_from_officials_type_id(
+                type_id
+            )
             q_col = r.get("qualifying")
             n_col = r.get("nqs")
-            qualifying = (
-                parse_bool_cell(q_col)
-                if q_col is not None and str(q_col).strip() != ""
-                else args.default_qualifying
-            )
-            nqs = (
-                parse_bool_cell(n_col)
-                if n_col is not None and str(n_col).strip() != ""
-                else args.default_nqs
-            )
-
-            type_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
+            if q_col is not None and str(q_col).strip() != "":
+                qualifying = parse_bool_cell(q_col)
+            if n_col is not None and str(n_col).strip() != "":
+                nqs = parse_bool_cell(n_col)
 
             try:
                 loader.insert_competition(
@@ -417,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
                     sy,
                     qualifying=qualifying,
                     nqs=nqs,
+                    international=international,
                     officials_analysis_competition_type_id=type_id,
                 )
                 loader.updateCompetition(
@@ -427,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                     name=name,
                     qualifying=qualifying,
                     nqs=nqs,
+                    international=international,
                     officials_analysis_competition_type_id=type_id,
                     update_officials_competition_type=type_id is not None,
                 )
@@ -465,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
             sy = _resolved_season_year(r, args.season_year)
             oa_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
             assert oa_id is not None
-            qualifying, nqs = _flags_for_row(r, oa_id)
+            qualifying, nqs, international = _flags_for_row(r, oa_id)
 
             isFSM = is_fsm_results_url(stored_url)
 
@@ -490,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
                 isFSM=isFSM,
                 qualifying=qualifying,
                 nqs=nqs,
+                international=international,
                 officials_analysis_competition_type_id=oa_id,
                 update_officials_competition_type=True,
                 http_session=http_session,
