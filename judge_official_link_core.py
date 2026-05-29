@@ -264,9 +264,9 @@ def fetch_unmapped_judges(conn: Connection, limit: int | None = None) -> list[Ro
 
 def fetch_judges_needing_link(conn: Connection, limit: int | None = None) -> list[RowMapping]:
     """
-    Judges without a US ``linked`` row and without an ISU link row.
+    Judges without an ISU link who still need matcher attention.
 
-    Includes judges with no ``judge_official_link`` row or ``outside_directory`` status.
+    Excludes US ``linked`` and ``outside_directory`` rows (outside judges are done).
     """
     lim_sql = " LIMIT :lim" if limit is not None else ""
     q = text(
@@ -276,7 +276,10 @@ def fetch_judges_needing_link(conn: Connection, limit: int | None = None) -> lis
         LEFT JOIN judge_official_link l ON l.judge_id = j.id
         LEFT JOIN judge_isu_official_link il ON il.judge_id = j.id
         WHERE il.judge_id IS NULL
-          AND (l.judge_id IS NULL OR l.status <> 'linked')
+          AND (
+              l.judge_id IS NULL
+              OR l.status NOT IN ('linked', 'outside_directory')
+          )
         ORDER BY lower(j.name), j.id
         {lim_sql}
         """

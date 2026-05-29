@@ -53,9 +53,11 @@ Vladimirov Vladislav, Mr.
     rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
 
     assert [(r.federation_code, r.full_name) for r in rows] == [
-        ("AND", "Lopez Camara Monica"),
-        ("ARM", "Vladimirov Vladislav"),
+        ("AND", "Camara Monica Lopez"),
+        ("ARM", "Vladislav Vladimirov"),
     ]
+    assert rows[0].first_name == "Camara Monica"
+    assert rows[0].last_name == "Lopez"
     assert rows[0].federation_name == "ANDORRA"
     assert appointment_tuples(rows[0]) == {
         ("Single & Pair Skating", "Judge", "International")
@@ -70,7 +72,7 @@ def test_parse_text_handles_name_on_federation_header_line():
     rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
 
     assert [(r.federation_code, r.full_name) for r in rows] == [
-        ("AUT", "Stratieva Aseniya")
+        ("AUT", "Aseniya Stratieva")
     ]
     assert rows[0].federation_name == "AUSTRIA"
 
@@ -133,10 +135,10 @@ def test_geometry_lines_keep_column_context_for_appointments():
     rows = parse_isu_official_lines(lines, season="2526", communication_ref="2735")
     by_name = {row.full_name: row for row in rows}
 
-    assert appointment_tuples(by_name["Burley Robyn"]) == {
+    assert appointment_tuples(by_name["Robyn Burley"]) == {
         ("Single & Pair Skating", "Technical Specialist", "ISU")
     }
-    assert appointment_tuples(by_name["Andrew Rebecca"]) == {
+    assert appointment_tuples(by_name["Rebecca Andrew"]) == {
         ("Synchronized Skating", "Referee", "ISU"),
         ("Synchronized Skating", "Judge", "ISU"),
     }
@@ -169,9 +171,9 @@ Cunningham, Dion, Mr.
     rows = parse_isu_official_text(text, season="2526", communication_ref="2735")
 
     assert [r.full_name for r in rows] == [
-        "Andrew Rebecca",
-        "Caughley Rachel",
-        "Cunningham, Dion",
+        "Rebecca Andrew",
+        "Rachel Caughley",
+        "Dion Cunningham",
     ]
     assert rows[-1].first_name == "Dion"
     assert rows[-1].last_name == "Cunningham"
@@ -182,6 +184,18 @@ def test_split_surname_first_name_keeps_lowercase_particles():
         "Katherine Evelyn",
         "du Preez",
     )
+
+
+def test_parsed_rows_use_western_order_full_name():
+    rows = parse_isu_official_text(
+        "USA - UNITED STATES\nISU Judge\nSherr Karin, Ms.",
+        season="2526",
+        communication_ref="2735",
+    )
+    assert rows[0].full_name == "Karin Sherr"
+    assert rows[0].first_name == "Karin"
+    assert rows[0].last_name == "Sherr"
+    assert rows[0].name_normalized == "karin sherr"
 
 
 def test_infer_communication_ref_from_url():

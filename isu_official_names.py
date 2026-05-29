@@ -18,6 +18,24 @@ def normalize_person_name(s: str | None) -> str:
     return _WHITESPACE_RE.sub(" ", s.lower().strip())
 
 
+def full_name_from_first_last(
+    first_name: str | None,
+    last_name: str | None,
+    *,
+    raw_fallback: str = "",
+) -> str:
+    """Western display order: given name(s), then family name."""
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    if first and last:
+        return f"{first} {last}"
+    if first:
+        return first
+    if last:
+        return last
+    return (raw_fallback or "").strip()
+
+
 def parse_isu_list_name(raw: str) -> tuple[str, str | None, str | None]:
     """
     Parse an ISU list name into ``(full_name, first_name, last_name)``.
@@ -37,5 +55,5 @@ def parse_isu_list_name(raw: str) -> tuple[str, str | None, str | None]:
 
     last_name = parts[0]
     first_name = " ".join(parts[1:])
-    full_name = f"{first_name} {last_name}".strip()
+    full_name = full_name_from_first_last(first_name, last_name, raw_fallback=text)
     return full_name, first_name or None, last_name or None

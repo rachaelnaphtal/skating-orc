@@ -223,7 +223,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
 
     if not judges:
         st.info(
-            "No judges need linking — everyone has a US linked row or an ISU roster link."
+            "No judges need linking — everyone has a US linked row, an ISU roster link, "
+            "or is marked **outside** the directory."
         )
         st.stop()
 
