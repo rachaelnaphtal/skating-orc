@@ -20,7 +20,9 @@ import judge_official_link_core as core
 
 @st.cache_resource
 def _engine():
-    return core.make_engine()
+    eng = core.make_engine()
+    core.ensure_table(eng)
+    return eng
 
 
 @st.cache_data(ttl=120)
@@ -31,10 +33,60 @@ def _official_labels() -> dict[int, str]:
 
 
 @st.cache_data(ttl=120)
+def _official_labels_normalized() -> dict[int, str]:
+    return core.normalize_name_choices(_official_labels())
+
+
+@st.cache_data(ttl=120)
 def _isu_official_labels() -> dict[int, str]:
     eng = _engine()
     with eng.connect() as conn:
         return core.fetch_isu_official_choices(conn)
+
+
+@st.cache_data(ttl=120)
+def _isu_official_labels_normalized() -> dict[int, str]:
+    return core.normalize_name_choices(_isu_official_labels())
+
+
+def _judges_cache_key(judges: list[dict]) -> tuple[tuple[int, str], ...]:
+    return tuple((int(j["id"]), str(j.get("name") or "")) for j in judges)
+
+
+@st.cache_data(ttl=120)
+def _cached_review_table(
+    judges_key: tuple[tuple[int, str], ...],
+    default_link_min_score: float,
+    default_isu_link_min_score: float,
+) -> pd.DataFrame:
+    judges = [{"id": jid, "name": name} for jid, name in judges_key]
+    labels = _official_labels()
+    isu_labels = _isu_official_labels()
+    _, display_to_id, id_to_display = core.official_select_display_maps(labels)
+    _, isu_display_to_id, isu_id_to_display = core.isu_official_select_display_maps(
+        isu_labels
+    )
+    return _build_review_table(
+        judges,
+        labels,
+        isu_labels,
+        default_link_min_score=default_link_min_score,
+        default_isu_link_min_score=default_isu_link_min_score,
+        id_to_display=id_to_display,
+        isu_id_to_display=isu_id_to_display,
+        us_normalized=_official_labels_normalized(),
+        isu_normalized=_isu_official_labels_normalized(),
+    )
+
+
+@st.cache_data(ttl=120)
+def _cached_outside_bulk_table(judges_key: tuple[tuple[int, str], ...]) -> pd.DataFrame:
+    judges = [{"id": jid, "name": name} for jid, name in judges_key]
+    return _build_outside_bulk_table(
+        judges,
+        _official_labels(),
+        us_normalized=_official_labels_normalized(),
+    )
 
 
 def _load_unmapped(limit: int) -> list[dict]:
@@ -53,12 +105,18 @@ def _build_review_table(
     default_isu_link_min_score: float,
     id_to_display: dict[int, str],
     isu_id_to_display: dict[int, str],
+    us_normalized: dict[int, str] | None = None,
+    isu_normalized: dict[int, str] | None = None,
 ) -> pd.DataFrame:
+    us_norm = us_normalized or core.normalize_name_choices(labels)
+    isu_norm = isu_normalized or core.normalize_name_choices(isu_labels)
     rows_out: list[dict] = []
     for j in judges:
         jid = int(j["id"])
         name = j.get("name") or ""
-        best = core.suggest_matches(name, labels, top=1, min_score=0.0)
+        best = core.suggest_matches(
+            name, labels, top=1, min_score=0.0, normalized_choices=us_norm
+        )
         if best:
             oid, sc, lbl = best[0]
             official_id: int | None = int(oid)
@@ -71,7 +129,9 @@ def _build_review_table(
             us_directory_name = ""
             us_directory_official = ""
 
-        isu_best = core.suggest_matches(name, isu_labels, top=1, min_score=0.0)
+        isu_best = core.suggest_matches(
+            name, isu_labels, top=1, min_score=0.0, normalized_choices=isu_norm
+        )
         if isu_best:
             ioid, isu_sc, isu_lbl = isu_best[0]
             isu_official_id: int | None = int(ioid)
@@ -128,13 +188,18 @@ def _filter_official_select_options(
 def _build_outside_bulk_table(
     judges: list[dict],
     labels: dict[int, str],
+    *,
+    us_normalized: dict[int, str] | None = None,
 ) -> pd.DataFrame:
     """Checkboxes + minimal columns for bulk ``outside_directory`` marking."""
+    us_norm = us_normalized or core.normalize_name_choices(labels)
     rows_out: list[dict] = []
     for j in judges:
         jid = int(j["id"])
         name = j.get("name") or ""
-        best = core.suggest_matches(name, labels, top=1, min_score=0.0)
+        best = core.suggest_matches(
+            name, labels, top=1, min_score=0.0, normalized_choices=us_norm
+        )
         if best:
             _oid, sc, lbl = best[0]
             score = round(float(sc), 1)
@@ -181,14 +246,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
     try:
         eng = _engine()
     except Exception as e:
-        st.error(str(e))
-        st.stop()
-
-    try:
-        core.ensure_table(eng)
-    except Exception as e:
         st.error(
-            f"Could not create or open `judge_official_link` (check DATABASE_URL and permissions): {e}"
+            f"Could not connect or prepare link tables (check DATABASE_URL and permissions): {e}"
         )
         st.stop()
 
@@ -241,7 +300,8 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             "Tick **Outside** for everyone who should stop getting US roster fuzzy matches, "
             "then **Apply outside marks**. (Uncheck mistakes before applying.)"
         )
-        df_out = _build_outside_bulk_table(judges, labels)
+        with st.spinner("Building table…"):
+            df_out = _cached_outside_bulk_table(_judges_cache_key(judges))
         edited_out = st.data_editor(
             df_out,
             column_config={
@@ -293,7 +353,7 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                 )
                 applied += 1
             st.session_state["_matcher_flash"] = f"Marked **{applied}** judge(s) as outside directory."
-            _official_labels.clear()
+            _clear_matcher_caches()
             st.rerun()
         st.stop()
 
@@ -316,12 +376,12 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                     officials=labels,
                     min_score=float(auto_min),
                     limit_judges=int(max_rows),
+                    normalized_officials=_official_labels_normalized(),
                 )
             st.session_state["_matcher_flash"] = (
                 f"US auto-linked **{linked}** judge(s). Skipped: **{skipped}**."
             )
-            _official_labels.clear()
-            _isu_official_labels.clear()
+            _clear_matcher_caches()
             st.rerun()
     with col_b:
         if st.button(
@@ -335,23 +395,20 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                     isu_officials=isu_labels,
                     min_score=float(auto_isu_min),
                     limit_judges=int(max_rows),
+                    normalized_isu_officials=_isu_official_labels_normalized(),
                 )
             st.session_state["_matcher_flash"] = (
                 f"ISU auto-linked **{linked}** judge(s). Skipped: **{skipped}**."
             )
-            _official_labels.clear()
-            _isu_official_labels.clear()
+            _clear_matcher_caches()
             st.rerun()
 
-    df = _build_review_table(
-        judges,
-        labels,
-        isu_labels,
-        default_link_min_score=float(default_link),
-        default_isu_link_min_score=float(default_isu_link),
-        id_to_display=id_to_display,
-        isu_id_to_display=isu_id_to_display,
-    )
+    with st.spinner("Building match table (fuzzy match against directories)…"):
+        df = _cached_review_table(
+            _judges_cache_key(judges),
+            float(default_link),
+            float(default_isu_link),
+        )
     pinned = {str(x) for x in df["us_directory_official"].dropna() if str(x).strip()}
     isu_pinned = {str(x) for x in df["isu_directory_official"].dropna() if str(x).strip()}
     name_filter = st.sidebar.text_input(
@@ -490,9 +547,17 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             for e in errors:
                 st.warning(e)
         st.session_state["_matcher_flash"] = f"Applied **{applied}** row(s) from the table."
-        _official_labels.clear()
-        _isu_official_labels.clear()
+        _clear_matcher_caches()
         st.rerun()
+
+
+def _clear_matcher_caches() -> None:
+    _official_labels.clear()
+    _official_labels_normalized.clear()
+    _isu_official_labels.clear()
+    _isu_official_labels_normalized.clear()
+    _cached_review_table.clear()
+    _cached_outside_bulk_table.clear()
 
 
 def main() -> None:

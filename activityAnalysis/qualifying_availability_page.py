@@ -26,7 +26,6 @@ try:
     from activityAnalysis.qualifying_form_store import (
         QUALIFYING_COMPETITION_GROUP_OPTIONS,
         build_qualifying_availability_report,
-        person_assignments_report_query,
         delete_competition_criterion,
         get_active_directory_appointment_combinations,
         get_competition_criteria,
@@ -53,7 +52,6 @@ except ModuleNotFoundError:
     from qualifying_form_store import (
         QUALIFYING_COMPETITION_GROUP_OPTIONS,
         build_qualifying_availability_report,
-        person_assignments_report_query,
         delete_competition_criterion,
         get_active_directory_appointment_combinations,
         get_competition_criteria,
@@ -211,11 +209,10 @@ def _availability_report_html_table(
             ):
                 oid = int(name_official_ids.iloc[row_idx])
                 label = html.escape(text or f"Official {oid}")
-                href = html.escape(
-                    person_assignments_report_query(oid), quote=True
-                )
                 cells.append(
-                    f'<td><a href="{href}" target="_parent">{label}</a></td>'
+                    f'<td><a href="#" class="qual-person-link" '
+                    f'data-official-id="{oid}" '
+                    f'title="Open per-person assignments in a new tab">{label}</a></td>'
                 )
                 continue
             css = "wrap" if col in _WRAP_REPORT_COLUMNS else ""
@@ -300,9 +297,13 @@ html, body {{
   min-width: 12rem;
   max-width: 36rem;
 }}
-#qual-availability-report a {{
-  color: inherit;
+#qual-availability-report a.qual-person-link {{
+  color: #0066cc;
   text-decoration: underline;
+  cursor: pointer;
+}}
+#qual-availability-report a.qual-person-link:hover {{
+  color: #004499;
 }}
 </style>
 """
@@ -315,6 +316,26 @@ _SORTABLE_TABLE_SCRIPT = """
   const tbody = table.querySelector("tbody");
   const headers = table.querySelectorAll("thead th");
   if (!tbody || !headers.length) return;
+
+  const openPersonReport = (officialId) => {
+    const topWin = window.top || window.parent || window;
+    try {
+      const u = new URL(topWin.location.href);
+      u.searchParams.set("report", "person");
+      u.searchParams.set("official", String(officialId));
+      window.open(u.toString(), "_blank", "noopener,noreferrer");
+    } catch (err) {
+      const q = "?report=person&official=" + encodeURIComponent(String(officialId));
+      window.open(q, "_blank", "noopener,noreferrer");
+    }
+  };
+  tbody.querySelectorAll("a.qual-person-link").forEach((anchor) => {
+    anchor.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const oid = anchor.getAttribute("data-official-id");
+      if (oid) openPersonReport(oid);
+    });
+  });
 
   let nameCol = 0;
   headers.forEach((th, col) => {

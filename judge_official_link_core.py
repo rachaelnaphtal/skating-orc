@@ -10,6 +10,7 @@ Uses PostgreSQL with search_path public,officials_analysis — same as activity 
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -108,6 +109,8 @@ CREATE INDEX IF NOT EXISTS idx_judge_isu_official_link_isu_official_id
     ON judge_isu_official_link (isu_official_id);
 """
 
+_ENSURE_TABLE_LOCK = threading.Lock()
+
 
 def database_url() -> str:
     url = (os.environ.get("DATABASE_URL") or "").strip()
@@ -135,21 +138,61 @@ def make_engine() -> Engine:
     return create_engine(
         url,
         echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=2,
+        pool_timeout=30,
         connect_args={"options": "-csearch_path=public,officials_analysis"},
     )
 
 
+def _table_exists(conn: Connection, *, schema: str, name: str) -> bool:
+    row = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = :schema
+              AND table_name = :name
+            LIMIT 1
+            """
+        ),
+        {"schema": schema, "name": name},
+    ).first()
+    return row is not None
+
+
 def ensure_table(engine: Engine) -> None:
-    """Create US + ISU judge link tables if missing (idempotent)."""
-    with engine.begin() as conn:
-        conn.execute(text(DDL_JUDGE_OFFICIAL_LINK))
-        conn.execute(text(DDL_JUDGE_ISU_OFFICIAL_LINK))
+    """
+    Create US + ISU judge link tables if missing (idempotent).
+
+    Skips DDL when tables already exist so opening the matcher does not re-run
+    heavy ``CREATE TABLE`` / ``ALTER`` against live databases (avoids lock waits).
+    """
+    with _ENSURE_TABLE_LOCK:
+        with engine.connect() as conn:
+            us_ready = _table_exists(conn, schema="public", name="judge_official_link")
+            isu_ready = _table_exists(
+                conn, schema="public", name="judge_isu_official_link"
+            )
+        if us_ready and isu_ready:
+            return
+        with engine.begin() as conn:
+            if not us_ready:
+                conn.execute(text(DDL_JUDGE_OFFICIAL_LINK))
+            if not isu_ready:
+                conn.execute(text(DDL_JUDGE_ISU_OFFICIAL_LINK))
 
 
 def normalize_name(s: str | None) -> str:
     if not s:
         return ""
     return " ".join(s.lower().split()).strip()
+
+
+def normalize_name_choices(choices: dict[int, str]) -> dict[int, str]:
+    """Precompute normalized labels for RapidFuzz (reuse across many protocol names)."""
+    return {int(oid): normalize_name(lbl) for oid, lbl in choices.items()}
 
 
 def official_exists(engine: Engine, official_id: int) -> bool:
@@ -294,6 +337,7 @@ def suggest_matches(
     *,
     top: int = 8,
     min_score: float = 0.0,
+    normalized_choices: dict[int, str] | None = None,
 ) -> list[tuple[int, float, str]]:
     """Return (official_id, score, label) best-first using token_set_ratio."""
     if not choices:
@@ -301,9 +345,10 @@ def suggest_matches(
     query = normalize_name(protocol_name or "")
     if not query:
         return []
+    norm = normalized_choices or normalize_name_choices(choices)
     extracted = process.extract(
         query,
-        {oid: normalize_name(lbl) for oid, lbl in choices.items()},
+        norm,
         scorer=fuzz.token_set_ratio,
         limit=top,
     )
@@ -367,6 +412,7 @@ def auto_link_by_score(
     officials: dict[int, str],
     min_score: float,
     limit_judges: int | None = 5000,
+    normalized_officials: dict[int, str] | None = None,
 ) -> tuple[int, int]:
     """
     For each unmapped judge, if top fuzzy match >= min_score, write link.
@@ -374,10 +420,17 @@ def auto_link_by_score(
     """
     linked = 0
     skipped = 0
+    norm = normalized_officials or normalize_name_choices(officials)
     with engine.connect() as conn:
         judges = fetch_unmapped_judges(conn, limit=limit_judges)
     for j in judges:
-        matches = suggest_matches(j["name"], officials, top=1, min_score=min_score)
+        matches = suggest_matches(
+            j["name"],
+            officials,
+            top=1,
+            min_score=min_score,
+            normalized_choices=norm,
+        )
         if not matches:
             skipped += 1
             continue
@@ -426,6 +479,7 @@ def auto_link_isu_by_score(
     isu_officials: dict[int, str],
     min_score: float,
     limit_judges: int | None = 5000,
+    normalized_isu_officials: dict[int, str] | None = None,
 ) -> tuple[int, int]:
     """
     For judges still needing a link, if top ISU fuzzy match >= min_score, write ISU link.
@@ -433,10 +487,17 @@ def auto_link_isu_by_score(
     """
     linked = 0
     skipped = 0
+    norm = normalized_isu_officials or normalize_name_choices(isu_officials)
     with engine.connect() as conn:
         judges = fetch_judges_needing_link(conn, limit=limit_judges)
     for j in judges:
-        matches = suggest_matches(j["name"], isu_officials, top=1, min_score=min_score)
+        matches = suggest_matches(
+            j["name"],
+            isu_officials,
+            top=1,
+            min_score=min_score,
+            normalized_choices=norm,
+        )
         if not matches:
             skipped += 1
             continue

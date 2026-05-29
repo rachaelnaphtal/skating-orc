@@ -24,6 +24,7 @@ def categorizeElement(element):
         element = element.replace("+SqTwM", "")
         element = element.replace("+MiStM", "")
         element = element.replace("+pSTwM", "")
+        element = element.replace("+SqTwM", "")
         element = element.replace("+fm", "")
         element = element.replace("+d", "")
         # element = element.replace("+SeEe", "")
@@ -92,6 +93,7 @@ def categorizeElement(element):
         "SoSqTw": "Twizzle",
         "SoTw": "Twizzle",
         "SqTw": "Twizzle",
+        "SqTwW": "Twizzle",
         "PiF": "Pivot Figure",
         "DiSt": "Step Sequence",
         "NtCiSt": "Step Sequence",
