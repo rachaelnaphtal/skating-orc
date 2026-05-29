@@ -807,7 +807,6 @@ def load_rows(
     from database_loader import DatabaseLoader
     from downloadResults import scrape
     from ijs_scrape_log import configure as configure_scrape_logging
-    from ijs_scrape_log import print_batch_summary
     from officials_competition_types import competition_load_flags_from_officials_type_id
 
     configure_scrape_logging(quiet=quiet, verbose=verbose, log_file=log_file)
@@ -878,7 +877,6 @@ def load_rows(
                         configure_logging=False,
                     )
                     db_session.commit()
-                    print_batch_summary()
                 loaded += 1
             except Exception as exc:
                 db_session.rollback()

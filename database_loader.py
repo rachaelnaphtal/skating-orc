@@ -110,7 +110,7 @@ class DatabaseLoader:
     def __init__(self, session: Session, *, defer_commits: bool = False):
         self.session = session
         self.defer_commits = defer_commits
-        self._isu_official_schema_ready: bool | None = None
+        self._isu_official_schema_cache: bool | None = None
 
     def commit(self) -> None:
         """Flush pending ORM work and commit (used at end of batch scrapes)."""
@@ -459,8 +459,8 @@ class DatabaseLoader:
 
     def _isu_official_schema_ready(self) -> bool:
         """True when migration 013 objects exist (``officials_analysis.isu_official``)."""
-        if self._isu_official_schema_ready is not None:
-            return self._isu_official_schema_ready
+        if self._isu_official_schema_cache is not None:
+            return self._isu_official_schema_cache
         try:
             row = self.session.execute(
                 text(
@@ -476,7 +476,7 @@ class DatabaseLoader:
             ready = row is not None
         except Exception:
             ready = False
-        self._isu_official_schema_ready = ready
+        self._isu_official_schema_cache = ready
         return ready
 
     def _load_isu_official_choices(self) -> dict[int, str]:
