@@ -327,10 +327,34 @@ CSV columns include `discipline_title`, `season`, `season_year`, `event_level`, 
 
 ---
 
+## ISU officials PDF load
+
+**Script:** `load_isu_officials_pdf.py`
+
+Loads ISU officials communication PDFs into `officials_analysis.isu_official` for judge-name matching.
+
+```bash
+python scripts/load_isu_officials_pdf.py \
+  "https://isu-d8g8b4b7ece7aphs.a03.azurefd.net/isudamcontainer/CMS/Corporate-Site/Governance/Transparency/ISU-Communications/2735-List-Officials-FS-ID-SYS-2025-26-updated-Oct-7-1759824945-0716.pdf" \
+  --season 2526 \
+  --load
+```
+
+Preview without writing:
+
+```bash
+python scripts/load_isu_officials_pdf.py list-officials.pdf --season 2526 --dry-run --limit 20
+```
+
+The parser treats federation lines like `AUS - AUSTRALIA` as headers and strips section headers such as `SINGLE & PAIR SKATING`, `REFEREE & JUDGE`, `ISU Judge`, and `International Technical Specialist` before extracting names. Only segments ending in title markers like `, Ms.` or `, Mr.` are loaded as officials.
+
+---
+
 ## Help
 
 ```bash
 python scripts/discover_usfs_ijs_competitions.py --help
 python scripts/load_discovered_ijs_competitions_csv.py --help
 python scripts/load_isu_figure_skating_results.py --help
+python scripts/load_isu_officials_pdf.py --help
 ```
