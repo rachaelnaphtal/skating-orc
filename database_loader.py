@@ -474,6 +474,8 @@ class DatabaseLoader:
             existing.officials_analysis_competition_type_id = (
                 officials_analysis_competition_type_id
             )
+        if international is not None:
+            existing.international = international
         self._persist()
 
     def refresh_competition_discipline_flags(self, competition_id: int) -> None:

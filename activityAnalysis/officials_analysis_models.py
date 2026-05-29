@@ -18,7 +18,7 @@ class AppointmentTypes(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='appointment_type')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='appointment_type')
@@ -36,7 +36,7 @@ class CompetitionType(Base):
     international: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     competition: Mapped[List['Competition']] = relationship('Competition', back_populates='competition_type')
 
@@ -51,7 +51,7 @@ class Disciplines(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='discipline')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='discipline')
@@ -67,7 +67,7 @@ class Levels(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[Optional[str]] = mapped_column(Text)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='level')
 
@@ -91,7 +91,7 @@ class Officials(Base):
     city: Mapped[Optional[str]] = mapped_column(Text)
     state: Mapped[Optional[str]] = mapped_column(Text)
     region: Mapped[Optional[str]] = mapped_column(Text)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='official')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='official')
@@ -128,7 +128,7 @@ class Appointments(Base):
     appointed_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     achieved_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     mentor: Mapped[Optional[str]] = mapped_column(Text)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointment_type: Mapped[Optional['AppointmentTypes']] = relationship('AppointmentTypes', back_populates='appointments')
     discipline: Mapped[Optional['Disciplines']] = relationship('Disciplines', back_populates='appointments')
@@ -149,7 +149,7 @@ class Competition(Base):
     name: Mapped[str] = mapped_column(String)
     year: Mapped[int] = mapped_column(Integer)
     competition_type_id: Mapped[int] = mapped_column(Integer)
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     competition_type: Mapped['CompetitionType'] = relationship('CompetitionType', back_populates='competition')
     assignment: Mapped[List['Assignment']] = relationship('Assignment', back_populates='competition')
@@ -174,7 +174,7 @@ class Assignment(Base):
     appointment_type_id: Mapped[int] = mapped_column(Integer)
     chief: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
     lower_levels_only: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
-    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('now()'))
+    last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointment_type: Mapped['AppointmentTypes'] = relationship('AppointmentTypes', back_populates='assignment')
     competition: Mapped['Competition'] = relationship('Competition', back_populates='assignment')
@@ -199,7 +199,7 @@ class QualifyingAvailabilityForm(Base):
     label: Mapped[str] = mapped_column(Text)
     source_filename: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     loaded_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime(True), server_default=text('now()')
+        DateTime(True), server_default=text('CURRENT_TIMESTAMP')
     )
 
     competitions: Mapped[List['QualifyingAvailabilityCompetition']] = relationship(

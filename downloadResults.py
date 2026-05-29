@@ -809,6 +809,9 @@ def scrape(
     explicit booleans to set competition flags; ``None`` leaves existing rows unchanged on
     update (new competitions still default both flags to false).
 
+    Optional ``international`` sets ``public.competition.international`` when loading into
+    the DB; ``None`` leaves existing rows unchanged on update.
+
     Optional ``officials_analysis_competition_type_id`` links ``public.competition`` to
     ``officials_analysis.competition_type``. When ``update_officials_competition_type`` is
     true, that value is written on update (including ``None`` to clear the link); when false,

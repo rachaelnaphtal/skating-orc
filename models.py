@@ -39,6 +39,7 @@ class Competition(Base):
     start_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     end_date: Mapped[Optional[datetime.date]] = mapped_column(Date)
     location: Mapped[Optional[str]] = mapped_column(String)
+    international: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
 
     segment: Mapped[List['Segment']] = relationship('Segment', back_populates='competition')
 
