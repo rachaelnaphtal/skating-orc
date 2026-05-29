@@ -234,22 +234,73 @@ def _role_is_panel_judge(role_label: str) -> bool:
     return bool(r) and r.startswith("judge")
 
 
-def get_fsm_judges_and_results_links(page_contents, base_url, session=None):
-    soup = BeautifulSoup(page_contents, "html.parser")
+def _iter_fsm_index_panel_rows(page_contents: str):
+    """
+    Swiss Timing ``index.htm`` rows: category, segment, panel-of-judges, scores PDF.
 
-    panels = []
+    Yields dicts with ``cover_label``, ``panel_href``, ``scores_href`` (relative).
+    """
+    soup = BeautifulSoup(page_contents, "html.parser")
+    current_category = ""
+    seen_panel_href: set[str] = set()
     for tr in soup.find_all("tr"):
         tds = tr.find_all("td")
+        if len(tds) >= 3:
+            ent_a = tds[2].find("a", href=True)
+            if ent_a:
+                ht = (ent_a.get("href") or "").upper()
+                txt = ent_a.get_text(strip=True).lower()
+                if ("CAT" in ht and "EN.HTM" in ht) or "entries" in txt:
+                    cat = tds[0].get_text(strip=True)
+                    if cat:
+                        current_category = cat
         if len(tds) != 5:
             continue
-
         scores_link = _find_judges_scores_pdf_anchor(tds[4])
-        panel_link = tds[2].find("a", href=True)
-
-        if not scores_link or not panel_link:
+        panel_a = None
+        for a in tds[2].find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            if not href:
+                continue
+            ph = href.upper()
+            label = a.get_text(strip=True).lower()
+            if ph.endswith("OF.HTM") or ph.endswith("OF.HTML"):
+                panel_a = a
+                break
+            if "panel" in label and "judge" in label:
+                panel_a = a
+        if not scores_link or not panel_a:
             continue
+        panel_href = (panel_a.get("href") or "").strip()
+        if not panel_href or panel_href in seen_panel_href:
+            continue
+        seen_panel_href.add(panel_href)
+        discipline_col = tds[0].get_text(strip=True)
+        segment_name = tds[1].get_text(strip=True)
+        # Team Event rows: col 0 is e.g. Men Single Skating, col 1 is Short Program;
+        # category from the CAT row is Team Event (not the same as discipline_col).
+        if (
+            current_category
+            and discipline_col
+            and segment_name
+            and discipline_col != current_category
+        ):
+            cover = f"{current_category} - {discipline_col} - {segment_name}"
+        elif current_category and segment_name:
+            cover = f"{current_category} - {segment_name}"
+        else:
+            cover = segment_name or current_category or discipline_col
+        yield {
+            "cover_label": cover,
+            "panel_href": panel_href,
+            "scores_href": (scores_link.get("href") or "").strip(),
+        }
 
-        panel_url = urljoin(base_url, panel_link["href"])
+
+def get_fsm_judges_and_results_links(page_contents, base_url, session=None):
+    panels = []
+    for row in _iter_fsm_index_panel_rows(page_contents):
+        panel_url = urljoin(base_url, row["panel_href"])
         panel_html = get_page_contents(panel_url, session=session)
         segment_official_rows = (
             parse_ijs_segment_officials(panel_html) if panel_html else []
@@ -260,9 +311,10 @@ def get_fsm_judges_and_results_links(page_contents, base_url, session=None):
 
         panels.append({
             "judges": judges,
-            "scores_url": urljoin(base_url, scores_link["href"]),
+            "scores_url": urljoin(base_url, row["scores_href"]),
             "segment_official_rows": segment_official_rows,
             "panel_url": panel_url,
+            "cover_label": row["cover_label"],
         })
 
     return panels
@@ -310,42 +362,12 @@ def iter_fsm_leaderboard_panel_href_and_cover_event(page_contents: str):
     """
     USFS / Swiss Timing leaderboard ``index.htm``: rows with ``Panel of Judges`` and
     ``Judges Scores (pdf)``. Yields ``(panel_of_href, cover_label)`` where
-    ``cover_label`` is ``"{category} - {segment}"`` (e.g. Championship Men - Short Program)
+    ``cover_label`` is ``"{category} - {segment}"`` or, for team events,
+    ``"{category} - {discipline} - {segment}"`` (e.g. Team Event - Men Single Skating - Short Program)
     for alignment with ``ijs_event_label_to_db_segment_name``.
     """
-    soup = BeautifulSoup(page_contents, "html.parser")
-    current_category = ""
-    seen_href: set[str] = set()
-    for tr in soup.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) >= 3:
-            ent_a = tds[2].find("a", href=True)
-            if ent_a:
-                ht = (ent_a.get("href") or "").upper()
-                txt = ent_a.get_text(strip=True).lower()
-                if ("CAT" in ht and "EN.HTM" in ht) or "entries" in txt:
-                    cat = tds[0].get_text(strip=True)
-                    if cat:
-                        current_category = cat
-        if len(tds) != 5:
-            continue
-        scores_link = _find_judges_scores_pdf_anchor(tds[4])
-        panel_a = tds[2].find("a", href=True)
-        if not scores_link or not panel_a:
-            continue
-        href = (panel_a.get("href") or "").strip()
-        if not href or href in seen_href:
-            continue
-        ph = href.upper()
-        if not ph.endswith("OF.HTM") and not ph.endswith("OF.HTML"):
-            continue
-        seen_href.add(href)
-        segment_name = tds[1].get_text(strip=True)
-        if current_category and segment_name:
-            cover = f"{current_category} - {segment_name}"
-        else:
-            cover = segment_name or current_category
-        yield href, cover
+    for row in _iter_fsm_index_panel_rows(page_contents):
+        yield row["panel_href"], row["cover_label"]
 
 
 def _parse_fsm_function_name_officials(soup) -> list[dict]:
@@ -754,15 +776,20 @@ def loadCompetitionInfoFSM(base_url, session=None):
 
 def loadInfoForExistingCompetitions():
     session = get_db_session()
-    database_obj = DatabaseLoader(session)
-    urls = database_obj.getCompetitionUrlsWithNoLocation()
-    from ijs_results_urls import competition_index_fetch_url
+    try:
+        database_obj = DatabaseLoader(session)
+        urls = database_obj.getCompetitionUrlsWithNoLocation()
+        from ijs_results_urls import competition_index_fetch_url
 
-    for url in urls:
-        index_url = competition_index_fetch_url(url)
-        (start_date, end_date, location) = loadCompetitionInfo(index_url)
-        database_obj.updateCompetition(
-            url, location=location, start_date=start_date, end_date=end_date)
+        for url in urls:
+            index_url = competition_index_fetch_url(url)
+            (start_date, end_date, location) = loadCompetitionInfo(index_url)
+            database_obj.updateCompetition(
+                url, location=location, start_date=start_date, end_date=end_date
+            )
+        database_obj.commit()
+    finally:
+        session.close()
 
 
 
@@ -792,6 +819,7 @@ def scrape(
     database_loader=None,
     competition_metadata: Mapping[str, Any] | None = None,
     commit_per_segment: bool = True,
+    rebuild_analytics_caches: bool = True,
     quiet: bool = False,
     verbose: bool = False,
     log_file: str | None = None,
@@ -824,6 +852,10 @@ def scrape(
     Batch loaders may pass ``http_session``, ``db_session``, and ``database_loader`` to reuse
     connections across many competitions. ``competition_metadata`` (``start_date``, ``end_date``,
     ``location``) avoids an extra index fetch when already known (e.g. from discover CSV).
+    When ``rebuild_analytics_caches`` is false, skip judge-excess / element-ranking invalidation
+    and cross-judge shard rebuild at the end (saves time and DB connections; run
+    ``scripts/precompute_cross_judge_cache.py`` separately).
+
     When ``commit_per_segment`` is false, the DB commits once at the end of this scrape
   (``DatabaseLoader(defer_commits=True)``); apps leave the default true.
 
@@ -970,10 +1002,15 @@ def scrape(
                         competition_end_date=competition_end_date,
                     )
                     segment_official_rows = None
+                    segment_db_key = None
                     if write_to_database:
                         segment_official_rows = (
                             event_info_dict.get("segment_official_rows") or None
                         )
+                        cover = (event_info_dict.get("cover_label") or "").strip()
+                        segment_db_key = judgingParsing.ijs_event_label_to_db_segment_name(
+                            cover
+                        ) or None
                     agg_all_element_df, agg_all_pcs_df = handleEventResults(
                         report_name,
                         write_to_database,
@@ -996,6 +1033,7 @@ def scrape(
                         all_element_dict,
                         all_pcs_dict,
                         segment_official_rows=segment_official_rows,
+                        segment_db_key=segment_db_key,
                         segment_stats=segment_stats,
                     )
                     i = i + 1
@@ -1125,7 +1163,7 @@ def scrape(
             )
         if write_to_database and database_obj.defer_commits:
             database_obj.commit()
-        if write_to_database and competition_id:
+        if write_to_database and competition_id and rebuild_analytics_caches:
             from judge_excess_cache import invalidate_judge_excess_cache_for_competition
             from element_ranking_cache import (
                 invalidate_element_ranking_cache_for_competition,
@@ -1236,25 +1274,27 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
                 # write to database
     if write_to_database:
         segment_id = None
-        if event_name not in proccessed_segments:
+        db_segment_name = row_segment_key or event_name
+        if db_segment_name not in proccessed_segments:
             if segment_stats is not None:
                 segment_stats["written"] = segment_stats.get("written", 0) + 1
-            _LOG.debug("Writing segment %s", event_name)
+            _LOG.debug("Writing segment %s", db_segment_name)
             segment_id = database_obj.insert_segment(
-                        event_name, competition_id)
+                        db_segment_name, competition_id)
             database_obj.insert_element_scores(
                         judgesNames, all_element_dict, segment_id, rule_errors)
             database_obj.insert_pcs_scores(
                         judgesNames, all_pcs_dict, segment_id)
+            proccessed_segments.append(db_segment_name)
         else:
             if segment_stats is not None:
                 segment_stats["skipped"] = segment_stats.get("skipped", 0) + 1
             _LOG.debug(
-                "Skipping scores for segment %s (already present)", event_name
+                "Skipping scores for segment %s (already present)", db_segment_name
             )
             # ``insert_segment`` returns existing id when the row is already there (same as
             # insert path); avoids ``get_segment_id`` None if the session/DB view differs.
-            segment_id = database_obj.insert_segment(event_name, competition_id)
+            segment_id = database_obj.insert_segment(db_segment_name, competition_id)
         if segment_id is not None and segment_official_rows:
             database_obj.replace_segment_officials(segment_id, segment_official_rows)
             # print(

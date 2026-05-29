@@ -193,15 +193,21 @@ def season_title_from_compact_code(season: str) -> str:
 
 
 def normalize_results_base_url(url: str) -> str:
-    u = (url or "").strip()
+    """
+    Results entry URL for scrape and ``competition.results_url``.
+
+    Classic pages keep ``/index.asp``. All other URLs (ISU / Swiss Timing) get
+    ``/index.htm`` when no index file is present.
+    """
+    u = (url or "").strip().rstrip("/")
     if not u:
         return ""
     lower = u.lower()
-    for suffix in ("/index.asp", "/index.htm", "/index.html"):
-        if lower.endswith(suffix):
-            u = u[: -len(suffix)]
-            break
-    return u.rstrip("/")
+    if lower.endswith("/index.asp"):
+        return u
+    if lower.endswith("/index.htm") or lower.endswith("/index.html"):
+        return u
+    return f"{u}/index.htm"
 
 
 def is_fsm_results_url(url: str) -> bool:

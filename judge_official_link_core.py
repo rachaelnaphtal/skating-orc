@@ -10,6 +10,7 @@ Uses PostgreSQL with search_path public,officials_analysis — same as activity 
 from __future__ import annotations
 
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -190,6 +191,22 @@ def normalize_name(s: str | None) -> str:
     return " ".join(s.lower().split()).strip()
 
 
+_PROTOCOL_HONORIFIC_RE = re.compile(r"^(?:Mr\.?|Ms\.?)\s*", re.IGNORECASE)
+
+
+def protocol_person_match_key(name: str | None) -> str:
+    """
+    Case-insensitive key for matching protocol / panel names to directory or ISU roster.
+
+    Collapses whitespace, lowercases, and strips a leading ``Mr.`` / ``Ms.`` (optional period).
+    """
+    if not name:
+        return ""
+    s = " ".join(str(name).split())
+    s = _PROTOCOL_HONORIFIC_RE.sub("", s, count=1).strip()
+    return normalize_name(s)
+
+
 def normalize_name_choices(choices: dict[int, str]) -> dict[int, str]:
     """Precompute normalized labels for RapidFuzz (reuse across many protocol names)."""
     return {int(oid): normalize_name(lbl) for oid, lbl in choices.items()}
@@ -354,7 +371,7 @@ def suggest_matches(
     """Return (official_id, score, label) best-first using token_set_ratio."""
     if not choices:
         return []
-    query = normalize_name(protocol_name or "")
+    query = protocol_person_match_key(protocol_name or "")
     if not query:
         return []
     norm = normalized_choices or normalize_name_choices(choices)

@@ -107,6 +107,95 @@ def parse_scores(pdf_path, event_regex="", use_gcp=False, isFSM=False):
                 return process_fsm_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
             return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
 
+def parse_fsm_element_judge_scores(raw: str) -> tuple[list[float | None], int | None]:
+    """
+    Parse the judge-GOE token run from an FSM element line.
+
+    Returns scores and a **0-based** index where a ``-`` column was present, or ``None``.
+    """
+    scores: list[float | None] = []
+    missing_idx: int | None = None
+    for tok in (raw or "").split():
+        if tok in ("-", "–", "—"):
+            if missing_idx is None:
+                missing_idx = len(scores)
+            scores.append(None)
+            continue
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", tok):
+            scores.append(float(tok))
+    return scores, missing_idx
+
+
+def consensus_missing_judge_index(
+    element_rows: list[dict],
+    pcs_rows: list[dict],
+    n_judges: int,
+) -> int | None:
+    """Most common 0-based missing-judge column for this skater (elements + PCS)."""
+    if n_judges < 2:
+        return None
+    votes: list[int] = []
+    for row in element_rows:
+        mp = row.get("Possible Missing Position")
+        if mp is not None:
+            votes.append(int(mp))
+    for row in pcs_rows:
+        mp = row.get("Possible Missing Position")
+        if mp is not None:
+            votes.append(int(mp))
+    if not votes:
+        return None
+    return max(set(votes), key=votes.count)
+
+
+def align_element_scores_to_judges(
+    scores: list,
+    n_judges: int,
+    *,
+    missing_index: int | None,
+    event_name: str,
+    skater: str,
+    element_label: str,
+) -> list:
+    """
+    Expand a short score list to ``n_judges`` slots, inserting ``None`` at the gap.
+
+    ``missing_index`` is 0-based (same as PCS ``Possible Missing Position``).
+    """
+    out = list(scores)
+    if len(out) >= n_judges:
+        return out[:n_judges]
+    gap = n_judges - len(out)
+    if gap == 1 and missing_index is not None:
+        idx = int(missing_index)
+        if 0 <= idx <= len(out):
+            from ijs_scrape_log import note_warning
+
+            note_warning(
+                f"{event_name}: {skater} element {element_label!r} — "
+                f"judge {idx + 1} score missing (panel column gap)"
+            )
+            out.insert(idx, None)
+            return out
+    if gap >= 1:
+        from ijs_scrape_log import note_warning, record_parsing_issue
+
+        note_warning(
+            f"{event_name}: {skater} element {element_label!r} — "
+            f"{n_judges} judges but {len(out)} score columns; "
+            "padding at end (missing judge position unknown)"
+        )
+        for jn in range(len(out) + 1, n_judges + 1):
+            record_parsing_issue(
+                "missing_element_score",
+                event_name,
+                skater=skater,
+                judge_number=jn,
+            )
+        out = out + [None] * gap
+    return out
+
+
 def process_fsm_scores(pdf, event_regex="", use_gcp=False):
     elements_per_skater = {}
     pcs_per_skater = {}
@@ -144,20 +233,18 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
         # Event name (once)
         # -----------------------------
         if event_name == "":
-            if len(lines) >= 3:
-                for i in range(0,4):
-                    if lines[i] == "JUDGES DETAILS PER SKATER":
-                        event_name=lines[i+1]
+            raw_label = fsm_event_label_from_pdf_lines(lines)
+            if raw_label:
+                event_name = ijs_event_label_to_db_segment_name(raw_label)
+            else:
+                for i, line in enumerate(lines[:12]):
+                    if line.upper() == "JUDGES DETAILS PER SKATER" and i + 1 < len(lines):
+                        event_name = ijs_event_label_to_db_segment_name(lines[i + 1])
                         break
-                event_name = (
-                    event_name
-                    .replace("/", "")
-                    .replace(" ", "_")
-                    .replace("__", "_")
-                    .replace("-", "_")
-                )
-                if not re.match(event_regex, event_name):
-                    return (None, None, None, event_name)
+            if event_regex and event_name and not re.match(
+                event_regex, event_name, re.IGNORECASE
+            ):
+                return (None, None, None, event_name)
 
         current_skater = None
         has_bonus = False
@@ -247,8 +334,15 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                 # Normalize element suffixes
                 element_name = element_name.replace("SEQ<<", "SEQ").replace("SEQ<", "SEQ")
 
-                scores = re.findall(r"-?\d+(?:\.\d+)?", judge_scores_raw)
-                judges_scores = list(map(float, scores))
+                judges_scores, missing_idx = parse_fsm_element_judge_scores(
+                    judge_scores_raw
+                )
+                if not judges_scores:
+                    judges_scores = [
+                        float(x)
+                        for x in re.findall(r"-?\d+(?:\.\d+)?", judge_scores_raw)
+                    ]
+                    missing_idx = None
 
                 if judge_count is None:
                     judge_count = len(judges_scores)
@@ -259,6 +353,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                     "Value": total_score,
                     "Notes": notes,
                     "Number": element_number,
+                    "Possible Missing Position": missing_idx,
                 })
                 element_number=element_number+1
                 continue
@@ -286,9 +381,13 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                     else:
                         i += 1
 
+                missing_idx = None
+                if judge_count and len(scores) < judge_count:
+                    missing_idx = len(scores)
                 pcs_per_skater[current_skater].append({
                     "Component": component,
                     "Scores": scores,
+                    "Possible Missing Position": missing_idx,
                 })
                 continue
 
@@ -578,6 +677,58 @@ def extract_skater_element_sections(soup):
     return pairs
 
 
+_FSM_SEGMENT_IN_HEADER_RE = re.compile(
+    r"\b(Short Program|Free Skating|Rhythm Dance|Free Dance)\b",
+    re.IGNORECASE,
+)
+_FSM_TEAM_SUBSEGMENT_LINE_RE = re.compile(
+    r"(?:\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\b[^A-Za-z]*)?"
+    r"((?:Men|Women)\s+Single\s+Skating|Pair\s+Skating|Ice\s+Dance)\s*-\s*"
+    r"(Short Program|Free Skating|Rhythm Dance|Free Dance)",
+    re.IGNORECASE,
+)
+_FSM_HEADER_NOISE_RE = re.compile(
+    r"^(Milano|Figure Skating|Pattinaggio|Patinage|Judges Details|Fogli di punteggio|"
+    r"Notation|Programma|Programme|Total|NOC|Rank|Name|Segment|Element|Component|Code|"
+    r"Number|Deductions|Starting|Arena)",
+    re.IGNORECASE,
+)
+
+
+def fsm_event_label_from_pdf_lines(lines: list[str]) -> str:
+    """
+    Build a cover-style label from FSM PDF header lines (Olympics / bilingual layouts).
+
+    Swiss Timing USFS PDFs often put ``JUDGES DETAILS PER SKATER`` after translation
+    lines; discipline and segment sit a few lines above (e.g. ``Men Single Skating``,
+    ``TUE 10 FEB 2026 Short Program``).
+    """
+    discipline = ""
+    segment = ""
+    team_sub: tuple[str, str] | None = None
+    for line in lines[:30]:
+        if line.upper() == "JUDGES DETAILS PER SKATER":
+            break
+        team_m = _FSM_TEAM_SUBSEGMENT_LINE_RE.search(line)
+        if team_m:
+            team_sub = (team_m.group(1), team_m.group(2))
+            continue
+        seg_m = _FSM_SEGMENT_IN_HEADER_RE.search(line)
+        if seg_m:
+            segment = seg_m.group(1)
+            continue
+        if _FSM_HEADER_NOISE_RE.match(line):
+            continue
+        if re.search(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN)\b", line, re.I) and segment:
+            continue
+        if "Skating" in line or "Dance" in line or "Event" in line:
+            discipline = line
+    if discipline.strip().lower() == "team event" and team_sub:
+        return f"Team Event - {team_sub[0]} - {team_sub[1]}"
+    parts = [p for p in (discipline, segment) if p]
+    return " - ".join(parts)
+
+
 def ijs_event_label_to_db_segment_name(label: str) -> str:
     """
     Normalize an IJS index/cover event label (e.g. ``115_126 Junior Women Grp B / Short Program``)
@@ -679,21 +830,40 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
 
-def create_all_element_dict(judges, elements_per_skater, event_name):
+def create_all_element_dict(
+    judges,
+    elements_per_skater,
+    event_name,
+    pcs_per_skater=None,
+):
     all_elements = []
+    pcs_per_skater = pcs_per_skater or {}
+    n_judges = len(judges)
     for skater in elements_per_skater:
-        for element in elements_per_skater[skater]:
-            all_scores = element["Scores"]
+        skater_pcs = pcs_per_skater.get(skater, [])
+        skater_elements = elements_per_skater[skater]
+        skater_missing = consensus_missing_judge_index(
+            skater_elements, skater_pcs, n_judges
+        )
+        for element in skater_elements:
+            element_label = element.get("Element") or "?"
+            missing_idx = element.get("Possible Missing Position")
+            if missing_idx is None:
+                missing_idx = skater_missing
+            all_scores = align_element_scores_to_judges(
+                element.get("Scores") or [],
+                n_judges,
+                missing_index=missing_idx,
+                event_name=event_name,
+                skater=skater,
+                element_label=element_label,
+            )
             filtered_scores = [
                 score for score in all_scores if score is not None]
             if not filtered_scores:
                 continue
             avg = sum(filtered_scores) / len(filtered_scores)
-            judgeNumber = 1
-            if len(all_scores) < len(judges):
-                raise ValueError(
-                    f"Missing components in {event_name} for {skater}, element: {element}")
-            for judge in judges:
+            for judgeNumber, judge in enumerate(judges, start=1):
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
                     from ijs_scrape_log import record_parsing_issue
@@ -728,26 +898,33 @@ def create_all_element_dict(judges, elements_per_skater, event_name):
                         "High": high,
                     }
                 )
-                judgeNumber += 1
     return all_elements
 
 
 def create_all_pcs_dict(judges, pcs_per_skater, event_name):
     all_pcs = []
+    n_judges = len(judges)
     for skater in pcs_per_skater:
-        for pcs_mark in pcs_per_skater[skater]:
-            all_scores = pcs_mark["Scores"]
-            if len(all_scores) < len(judges):
-                missing_position = pcs_mark["Possible Missing Position"]
-                all_scores.insert(missing_position, 0)
-
+        skater_rows = pcs_per_skater[skater]
+        skater_missing = consensus_missing_judge_index([], skater_rows, n_judges)
+        for pcs_mark in skater_rows:
+            missing_idx = pcs_mark.get("Possible Missing Position")
+            if missing_idx is None:
+                missing_idx = skater_missing
+            all_scores = align_element_scores_to_judges(
+                pcs_mark.get("Scores") or [],
+                n_judges,
+                missing_index=missing_idx,
+                event_name=event_name,
+                skater=skater,
+                element_label=pcs_mark.get("Component") or "PCS",
+            )
             filtered_scores = [
                 score for score in all_scores if score is not None]
             if not filtered_scores:
                 continue
             avg = sum(filtered_scores) / len(filtered_scores)
-            judgeNumber = 1
-            for judge in judges:
+            for judgeNumber, judge in enumerate(judges, start=1):
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
                     from ijs_scrape_log import record_parsing_issue
@@ -776,7 +953,6 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
                         "High": high,
                     }
                 )
-                judgeNumber += 1
     return all_pcs
 
 
@@ -887,7 +1063,10 @@ def extract_judge_scores(
     all_pcs_dict = {}
     if create_thrown_out_analysis:
         all_element_dict = create_all_element_dict(
-            judges, elements_per_skater, event_name
+            judges,
+            elements_per_skater,
+            event_name,
+            pcs_per_skater=pcs_per_skater,
         )
         all_pcs_dict = create_all_pcs_dict(judges, pcs_per_skater, event_name)
     try:

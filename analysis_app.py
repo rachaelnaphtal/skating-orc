@@ -16,7 +16,11 @@ from plotly.subplots import make_subplots
 import numpy as np
 from scipy import stats
 
-from analytics_connection import get_analytics, get_analytics_safe
+from analytics_connection import (
+    get_analytics,
+    get_analytics_safe,
+    release_analytics_db_connection,
+)
 from analytics import JudgeAnalytics
 from models import (
     Competition,
@@ -4522,8 +4526,9 @@ elif page == "Load Competition":
 
             st.caption(
                 f"Scrape scratch files (FSM judge-detail PDFs): **{scrape_storage_summary()}**. "
-                "Set ``USE_GCP=1`` on Heroku to use GCS (requires ``GCS_CONNECTION`` / "
-                "``GCS_PRIVATE_KEY`` in ``setup.sh``)."
+                "Set ``USE_GCP=1`` on Heroku to use GCS. Prefer ``GCS_SERVICE_ACCOUNT_JSON`` "
+                "(full service-account JSON); or ``GCS_CONNECTION`` + ``GCS_PRIVATE_KEY`` "
+                "(PEM may use ``\\n`` for newlines)."
             )
 
             st.markdown("---")
@@ -4566,23 +4571,30 @@ elif page == "Load Competition":
                         international=load_international,
                         officials_analysis_competition_type_id=load_oa_competition_type_id,
                         update_officials_competition_type=True,
+                        rebuild_analytics_caches=False,
                         **scrape_storage_kwargs_for_load(report_name.strip()),
                     )
 
                     status_area = st.empty()
                     status_area.info("Running scrape — this may take a minute or two…")
+                    # Drop the UI session so scrape uses its own connection and cannot
+                    # leave the cached analytics session in a bad transaction state.
+                    release_analytics_db_connection()
                     try:
                         scrape_fn(**kwargs)
                         status_area.success(
-                            f"Done! **{report_name.strip()}** has been imported into the database."
+                            f"Done! **{report_name.strip()}** has been imported into the database. "
+                            "Analytics caches were not rebuilt during import; run "
+                            "`scripts/precompute_cross_judge_cache.py` if cross-judge data "
+                            "should include this competition."
                         )
-                        st.cache_resource.clear()
                         st.cache_data.clear()
-                        st.session_state.pop("analytics", None)
                     except Exception as _exc:
                         status_area.error(f"Scrape failed: {_exc}")
                         with st.expander("Error details (traceback)", expanded=False):
                             st.code(traceback.format_exc(), language="python")
+                    finally:
+                        release_analytics_db_connection()
 
 else:
     st.error(f"Unknown analysis page: {page!r}. Choose an option from the sidebar.")

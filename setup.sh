@@ -14,22 +14,7 @@ showSidebarNavigation = false
 
 STREAMLITCFG
 
-echo "
-
-DATABASE_URL=\"$PG_DB_URL\"
-
-[connections.postgresql]
-dialect = \"postgresql\"
-host = \"$DB_HOST\"
-port = \"$DB_PORT\"
-database = \"$DB_NAME\"
-username = \"$DB_USERNAME\"
-password = \"$DB_PASSWORD\"
-
-[connections.gcs]
-$GCS_CONNECTION
-private_key = \"$GCS_PRIVATE_KEY\"
-
-" > ~/.streamlit/secrets.toml
+# Write secrets.toml with valid PEM newlines (Heroku env vars often use literal \n).
+python3 scripts/write_streamlit_secrets.py
 
 cat ~/.streamlit/secrets.toml

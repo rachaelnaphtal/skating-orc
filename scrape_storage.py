@@ -1,9 +1,9 @@
 """
 Scrape artifact paths for Load Competition and other database loaders.
 
-On Heroku, set ``USE_GCP=1`` (and ``GCS_CONNECTION`` / ``GCS_PRIVATE_KEY`` for
-``setup.sh``) so FSM PDF scratch files go to Google Cloud Storage instead of the
-ephemeral dyno disk. ``DYNO`` alone uses ``/tmp`` when ``USE_GCP`` is unset.
+On Heroku, set ``USE_GCP=1`` and ``GCS_SERVICE_ACCOUNT_JSON`` (recommended) or
+``GCS_CONNECTION`` + ``GCS_PRIVATE_KEY`` (see ``setup.sh`` / ``gcs_credentials.py``).
+``DYNO`` alone uses ``/tmp`` when ``USE_GCP`` is unset.
 """
 
 from __future__ import annotations

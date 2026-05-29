@@ -13,7 +13,8 @@ The engine is created lazily so Streamlit secrets are loaded before connecting.
 from __future__ import annotations
 
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 from urllib.parse import quote_plus, urlparse
 
 from sqlalchemy import create_engine, text
@@ -167,7 +168,17 @@ def _bind_engine(url: str, source: str) -> None:
         _engine.dispose()
     _active_url = url
     _active_source = source
-    _engine = create_engine(url, echo=False)
+    # Heroku/RDS hobby tiers often allow ~20 connections per role; keep the pool small.
+    pool_size = int(os.getenv("SQLALCHEMY_POOL_SIZE", "2"))
+    max_overflow = int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "0"))
+    _engine = create_engine(
+        url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_recycle=int(os.getenv("SQLALCHEMY_POOL_RECYCLE", "300")),
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+    )
     _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
 
 
@@ -192,6 +203,20 @@ def get_db_session():
     if _SessionLocal is None:
         ensure_database_for_streamlit()
     return _SessionLocal()
+
+
+@contextmanager
+def db_session_scope() -> Iterator[Any]:
+    """Open a session, commit on success, rollback on error, always close."""
+    session = get_db_session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def test_connection():

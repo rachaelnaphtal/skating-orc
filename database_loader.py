@@ -5,7 +5,7 @@ import decimal
 import re
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.sql import text
+from sqlalchemy.sql import bindparam, text
 import pandas as pd
 from sqlalchemy.orm import Session
 from models import Judge, Competition, Segment, Skater, SkaterSegment, Element, ElementScorePerJudge, PcsScorePerJudge, PcsType, ElementType, DisciplineType, SegmentOfficial
@@ -13,9 +13,14 @@ from database import get_db_session, test_connection
 from rule_errors_policy import should_flag_rule_errors
 
 try:
-    from judge_official_link_core import normalize_name, suggest_matches
+    from judge_official_link_core import (
+        normalize_name,
+        protocol_person_match_key,
+        suggest_matches,
+    )
 except ImportError:  # pragma: no cover
     normalize_name = None  # type: ignore[misc, assignment]
+    protocol_person_match_key = None  # type: ignore[misc, assignment]
     suggest_matches = None  # type: ignore[misc, assignment]
 
 
@@ -44,7 +49,9 @@ def coerce_competition_location(value: object) -> str | None:
 
 
 def _normalize_person_name(name: str | None) -> str:
-    """Lowercase + collapse whitespace; matches judge_official_link_core.normalize_name."""
+    """Case-insensitive match key; prefers judge_official_link_core.protocol_person_match_key."""
+    if protocol_person_match_key is not None:
+        return protocol_person_match_key(name)
     if not name:
         return ""
     return " ".join(name.lower().split()).strip()
@@ -221,24 +228,39 @@ class DatabaseLoader:
         return pd.DataFrame(all_pcs_dict)
 
     def _ensure_judges_by_name(self, names: list[str]) -> dict[str, int]:
-        normalized = [normalize_scraped_judge_name(str(n)) for n in names]
-        unique = list(dict.fromkeys(n for n in normalized if n))
-        if not unique:
+        displays = [normalize_scraped_judge_name(str(n)) for n in names]
+        unique_displays = list(dict.fromkeys(d for d in displays if d))
+        if not unique_displays:
             return {}
-        rows = self.session.execute(
-            select(Judge.id, Judge.name).where(Judge.name.in_(unique))
-        ).all()
-        by_name = {str(r.name): int(r.id) for r in rows}
-        missing = [n for n in unique if n not in by_name]
-        for n in missing:
-            self.session.add(Judge(name=n))
-        if missing:
-            self.session.flush()
+        keys = {d: _normalize_person_name(d) for d in unique_displays}
+        unique_keys = list(dict.fromkeys(keys.values()))
+        by_key: dict[str, int] = {}
+        if unique_keys:
             rows = self.session.execute(
-                select(Judge.id, Judge.name).where(Judge.name.in_(missing))
+                text("""
+                    SELECT id,
+                           lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) AS match_key
+                    FROM judge
+                    WHERE lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) IN :keys
+                """).bindparams(bindparam("keys", expanding=True)),
+                {"keys": unique_keys},
             ).all()
-            for r in rows:
-                by_name[str(r.name)] = int(r.id)
+            for row in rows:
+                by_key[str(row.match_key)] = int(row.id)
+        by_name: dict[str, int] = {}
+        for display in unique_displays:
+            mk = keys[display]
+            if mk in by_key:
+                by_name[display] = by_key[mk]
+                continue
+            self.session.add(Judge(name=display))
+            self.session.flush()
+            by_name[display] = int(
+                self.session.execute(
+                    select(Judge.id).where(Judge.name == display)
+                ).scalar_one()
+            )
+            by_key[mk] = by_name[display]
         return by_name
 
     def _ensure_skaters_by_name(self, names: list[str]) -> dict[str, int]:
@@ -348,6 +370,28 @@ class DatabaseLoader:
             )
             self.session.execute(stmt)
 
+    def _pg_bulk_upsert(
+        self,
+        table,
+        rows: list[dict],
+        constraint: str,
+        *,
+        update_columns: tuple[str, ...],
+    ) -> None:
+        """Insert score rows; on unique conflict refresh score columns (re-scrape safe)."""
+        if not rows:
+            return
+        excluded = pg_insert(table).excluded
+        set_clause = {col: getattr(excluded, col) for col in update_columns}
+        for i in range(0, len(rows), self._BULK_CHUNK):
+            chunk = rows[i : i + self._BULK_CHUNK]
+            stmt = (
+                pg_insert(table)
+                .values(chunk)
+                .on_conflict_do_update(constraint=constraint, set_=set_clause)
+            )
+            self.session.execute(stmt)
+
     def ensure_segment_officials_if_empty(
         self, competition_id: int, segment_name: str, rows: list
     ) -> bool:
@@ -389,8 +433,7 @@ class DatabaseLoader:
         return {int(r["id"]): str(r["full_name"]) for r in rows}
 
     def _official_id_from_exact_directory_name(self, official_name: str) -> int | None:
-        norm_fn = normalize_name or _normalize_person_name
-        norm = norm_fn(official_name)
+        norm = _normalize_person_name(official_name)
         if not norm:
             return None
         try:
@@ -732,17 +775,36 @@ class DatabaseLoader:
         return int(row.id) if row else None
 
 
+    def _judge_id_for_match_key(self, match_key: str) -> int | None:
+        if not match_key:
+            return None
+        row = self.session.execute(
+            text(
+                """
+                SELECT id FROM judge
+                WHERE lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) = :k
+                ORDER BY id
+                LIMIT 1
+                """
+            ),
+            {"k": match_key},
+        ).first()
+        if not row:
+            return None
+        return int(row[0])
+
     def insert_judge(self, judge_name):
         judge_name = normalize_scraped_judge_name(judge_name)
         if not judge_name:
             raise ValueError("insert_judge: empty name after normalization")
-        existing_judge = self.session.query(Judge).filter_by(name=judge_name).first()
-        if not existing_judge:
-            new_judge = Judge(name=judge_name)
-            self.session.add(new_judge)
-            self._flush()
-            return new_judge.id
-        return existing_judge.id
+        match_key = _normalize_person_name(judge_name)
+        existing_id = self._judge_id_for_match_key(match_key)
+        if existing_id is not None:
+            return existing_id
+        new_judge = Judge(name=judge_name)
+        self.session.add(new_judge)
+        self._flush()
+        return int(new_judge.id)
 
     def insert_skater(self, skater_name):
         existing = self.session.query(Skater).filter_by(name=skater_name).first()
@@ -826,8 +888,12 @@ class DatabaseLoader:
             self.session.add(new)
             self._flush()
             return new.id
-        elif existing.judge_score!=score:
-            raise NameError("Scores do not align")
+        elif not self._numeric_eq(existing.judge_score, score):
+            existing.judge_score = score
+            existing.panel_average = panel_average
+            existing.deviation = deviation
+            existing.thrown_out = thrown_out
+            self._flush()
         return existing.id
 
     def insert_element_scores(self, judgesNames, all_element_dict, segment_id, rule_errors):
@@ -909,10 +975,16 @@ class DatabaseLoader:
                 "is_rule_error": False,
             }
         score_rows = list(score_by_key.values())
-        self._pg_bulk_insert_ignore(
+        self._pg_bulk_upsert(
             ElementScorePerJudge,
             score_rows,
             "element_score_per_judge_unique",
+            update_columns=(
+                "judge_score",
+                "panel_average",
+                "deviation",
+                "thrown_out",
+            ),
         )
 
         if self._should_apply_rule_errors_for_segment(segment_id):
@@ -1049,10 +1121,16 @@ class DatabaseLoader:
                 "is_rule_error": False,
             }
         pcs_rows = list(pcs_row_by_key.values())
-        self._pg_bulk_insert_ignore(
+        self._pg_bulk_upsert(
             PcsScorePerJudge,
             pcs_rows,
             "pcs_score_per_judge_unique",
+            update_columns=(
+                "judge_score",
+                "panel_average",
+                "deviation",
+                "thrown_out",
+            ),
         )
 
         keys = list(expected.keys())
@@ -1077,11 +1155,37 @@ class DatabaseLoader:
             for r in rows:
                 db_scores[(int(r[0]), int(r[1]), int(r[2]))] = r[3]
 
+        try:
+            from ijs_scrape_log import note_warning
+        except ImportError:
+            note_warning = None  # type: ignore[assignment]
+
         for k, exp in expected.items():
             if k not in db_scores:
-                raise NameError("PCS row missing after bulk insert")
+                msg = f"PCS row missing after upsert (segment={k[0]}, pcs_type={k[1]}, judge={k[2]})"
+                if note_warning:
+                    note_warning(msg)
+                else:
+                    raise NameError(msg)
+                continue
             if not self._numeric_eq(db_scores[k], exp):
-                raise NameError("Scores do not align")
+                self.session.execute(
+                    update(PcsScorePerJudge)
+                    .where(
+                        PcsScorePerJudge.skater_segment_id == k[0],
+                        PcsScorePerJudge.pcs_type_id == k[1],
+                        PcsScorePerJudge.judge_id == k[2],
+                    )
+                    .values(judge_score=exp)
+                )
+                msg = (
+                    f"PCS score corrected after mismatch (segment={k[0]}, "
+                    f"pcs_type={k[1]}, judge={k[2]}): expected {exp!s}, was {db_scores[k]!s}"
+                )
+                if note_warning:
+                    note_warning(msg)
+                else:
+                    raise NameError("Scores do not align")
 
         self._persist()
 

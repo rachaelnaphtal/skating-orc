@@ -18,16 +18,22 @@ from scripts.load_isu_figure_skating_results import (
 from officials_competition_types import competition_load_flags_from_officials_type_id
 
 
-def test_normalize_results_base_url_strips_index_files():
+def test_normalize_results_base_url_appends_index_htm_for_fsm():
+    assert (
+        normalize_results_base_url(
+            "https://www.kraso.sk/wp-content/uploads/sutaze/2025_2026/MON25"
+        )
+        == "https://www.kraso.sk/wp-content/uploads/sutaze/2025_2026/MON25/index.htm"
+    )
     assert (
         normalize_results_base_url(
             "https://ijs.usfigureskating.org/leaderboard/results/2025/36369/index.htm"
         )
-        == "https://ijs.usfigureskating.org/leaderboard/results/2025/36369"
+        == "https://ijs.usfigureskating.org/leaderboard/results/2025/36369/index.htm"
     )
     assert (
         normalize_results_base_url("https://example.test/results/index.asp")
-        == "https://example.test/results"
+        == "https://example.test/results/index.asp"
     )
 
 
