@@ -230,28 +230,28 @@ def _availability_report_html_table(
     )
 
 
-def _availability_report_table_css(scroll_height_px: int) -> str:
+def _availability_report_table_css(
+    *,
+    filter_bar_height_px: int,
+    table_scroll_height_px: int,
+) -> str:
     """CSS for iframe table; scroll container must be the wrap div for sticky ``thead``."""
     return f"""
 <style>
 html, body {{
   margin: 0;
   padding: 0;
-  height: {int(scroll_height_px)}px;
   overflow: hidden;
   box-sizing: border-box;
 }}
 *, *::before, *::after {{
   box-sizing: inherit;
 }}
-body {{
-  display: flex;
-  flex-direction: column;
-}}
 #qual-name-filter-bar {{
-  flex: 0 0 auto;
+  height: {int(filter_bar_height_px)}px;
   margin: 0;
   padding: 0.35rem 0.5rem 0.5rem 0.5rem;
+  overflow: hidden;
 }}
 #qual-name-filter-bar label {{
   display: block;
@@ -265,8 +265,7 @@ body {{
   font-size: 0.9rem;
 }}
 #qual-availability-report-wrap {{
-  flex: 1 1 auto;
-  min-height: 0;
+  height: {int(table_scroll_height_px)}px;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
   padding: 0 0.5rem 1rem 0.5rem;
@@ -437,6 +436,27 @@ def _render_official_form_response(payload: dict) -> None:
         st.info("No displayable answers in the stored form response.")
 
 
+def _availability_report_iframe_heights(
+    row_count: int,
+    *,
+    compact: bool = False,
+) -> tuple[int, int, int]:
+    """
+    Return (filter_bar_px, table_scroll_px, iframe_px) for the sortable report iframe.
+
+    Uses explicit pixel heights so the table region does not collapse inside ``st.iframe``
+    (flex + ``min-height: 0`` often leaves only one or two visible rows).
+    """
+    row_h = 24 if compact else 34
+    thead_h = 40
+    filter_bar_h = 76
+    n = max(int(row_count), 1)
+    # Visible viewport for the table body; cap height and scroll within the wrap div.
+    table_scroll_h = min(680, max(280, thead_h + n * row_h + 20))
+    iframe_h = filter_bar_h + table_scroll_h
+    return filter_bar_h, table_scroll_h, iframe_h
+
+
 def _render_sortable_availability_table(
     display_df: pd.DataFrame,
     *,
@@ -444,11 +464,15 @@ def _render_sortable_availability_table(
     compact: bool = False,
 ) -> None:
     """Sortable, wrapping HTML table (``st.dataframe`` does not wrap long text well)."""
-    row_h = 22 if compact else 30
-    filter_bar_h = 72
-    est_h = min(820, max(200, filter_bar_h + len(display_df) * row_h + 24))
+    filter_bar_h, table_scroll_h, iframe_h = _availability_report_iframe_heights(
+        len(display_df),
+        compact=compact,
+    )
     payload = (
-        _availability_report_table_css(est_h)
+        _availability_report_table_css(
+            filter_bar_height_px=filter_bar_h,
+            table_scroll_height_px=table_scroll_h,
+        )
         + "<div id='qual-name-filter-bar'>"
         + "<label for='qual-name-filter'>Search name</label>"
         + "<input type='search' id='qual-name-filter' "
@@ -461,7 +485,7 @@ def _render_sortable_availability_table(
         + "</div>"
         + _SORTABLE_TABLE_SCRIPT
     )
-    st.iframe(payload, height=est_h)
+    st.iframe(payload, height=iframe_h)
 
 
 def render_qualifying_availability_page(
