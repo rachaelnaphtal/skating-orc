@@ -92,3 +92,16 @@ def test_infer_communication_ref_from_url():
         )
         == "2735"
     )
+
+
+def test_admin_parser_includes_load_isu_pdf_command():
+    from scripts import judge_official_admin
+
+    args = judge_official_admin._build_parser().parse_args(
+        ["load-isu-pdf", "list-officials.pdf", "--season", "2526", "--dry-run"]
+    )
+
+    assert args.command == "load-isu-pdf"
+    assert args.source == "list-officials.pdf"
+    assert args.season == "2526"
+    assert args.dry_run is True

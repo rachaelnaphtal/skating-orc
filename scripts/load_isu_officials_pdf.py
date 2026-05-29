@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import pdfplumber
 import requests
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -254,7 +255,9 @@ def write_csv(path: str, rows: list[IsuOfficialRow]) -> None:
             out.close()
 
 
-def load_rows(rows: list[IsuOfficialRow], *, dry_run: bool) -> int:
+def load_rows(
+    rows: list[IsuOfficialRow], *, dry_run: bool, engine: Engine | None = None
+) -> int:
     import judge_official_link_core as core
 
     if dry_run:
@@ -262,7 +265,7 @@ def load_rows(rows: list[IsuOfficialRow], *, dry_run: bool) -> int:
             print(f"DRY RUN {row.federation_code} | {row.full_name} | {row.season}")
         return 0
 
-    engine = core.make_engine()
+    engine = engine or core.make_engine()
     core.ensure_table(engine)
     count = 0
     with engine.begin() as conn:
@@ -303,6 +306,23 @@ def load_rows(rows: list[IsuOfficialRow], *, dry_run: bool) -> int:
     return count
 
 
+def parse_pdf_source(
+    source: str,
+    *,
+    season: str,
+    communication_ref: str = "",
+    limit: int | None = None,
+) -> list[IsuOfficialRow]:
+    rows = parse_isu_official_text(
+        pdf_text(read_pdf_bytes(source)),
+        season=season,
+        communication_ref=communication_ref or infer_communication_ref(source),
+    )
+    if limit is not None:
+        return rows[:limit]
+    return rows
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("source", help="ISU officials PDF URL or local PDF path")
@@ -317,14 +337,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    communication_ref = args.communication_ref or infer_communication_ref(args.source)
-    rows = parse_isu_official_text(
-        pdf_text(read_pdf_bytes(args.source)),
+    rows = parse_pdf_source(
+        args.source,
         season=args.season,
-        communication_ref=communication_ref,
+        communication_ref=args.communication_ref,
+        limit=args.limit,
     )
-    if args.limit is not None:
-        rows = rows[: args.limit]
     if args.output:
         write_csv(args.output, rows)
     if args.load or args.dry_run:

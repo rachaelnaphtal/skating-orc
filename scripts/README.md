@@ -327,6 +327,12 @@ Preview without writing:
 python scripts/load_isu_officials_pdf.py list-officials.pdf --season 2526 --dry-run --limit 20
 ```
 
+The same loader is also available through the judge/official admin CLI, which uses the same database engine as the matcher:
+
+```bash
+python scripts/judge_official_admin.py load-isu-pdf list-officials.pdf --season 2526 --dry-run --limit 20
+```
+
 The parser treats federation lines like `AUS - AUSTRALIA` as headers and strips section headers such as `SINGLE & PAIR SKATING`, `REFEREE & JUDGE`, `ISU Judge`, and `International Technical Specialist` before extracting names. Only segments ending in title markers like `, Ms.` or `, Mr.` are loaded as officials.
 
 ---
