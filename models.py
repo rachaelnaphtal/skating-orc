@@ -423,6 +423,47 @@ class JudgeOfficialLink(Judge):
     official: Mapped[Optional['Officials']] = relationship('Officials', back_populates='judge_official_link')
 
 
+class IsuOfficialNameAlias(Base):
+    __tablename__ = 'isu_official_name_alias'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['isu_official_id'],
+            ['officials_analysis.isu_official.id'],
+            ondelete='CASCADE',
+            name='isu_official_name_alias_isu_official_id_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='isu_official_name_alias_pkey'),
+        UniqueConstraint('alias_normalized', name='isu_official_name_alias_alias_normalized_key'),
+        Index('ix_isu_official_name_alias_isu_official_id', 'isu_official_id'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1), primary_key=True)
+    alias_normalized: Mapped[str] = mapped_column(Text)
+    isu_official_id: Mapped[int] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+
+
+class JudgeIsuOfficialLink(Base):
+    __tablename__ = 'judge_isu_official_link'
+    __table_args__ = (
+        ForeignKeyConstraint(['judge_id'], ['judge.id'], ondelete='CASCADE', name='judge_isu_official_link_judge_id_fkey'),
+        ForeignKeyConstraint(
+            ['isu_official_id'],
+            ['officials_analysis.isu_official.id'],
+            ondelete='CASCADE',
+            name='judge_isu_official_link_isu_official_id_fkey',
+        ),
+        PrimaryKeyConstraint('judge_id', name='judge_isu_official_link_pkey'),
+        Index('idx_judge_isu_official_link_isu_official_id', 'isu_official_id'),
+    )
+
+    judge_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    isu_official_id: Mapped[int] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
+
+
 class OfficialNameAlias(Base):
     __tablename__ = 'official_name_alias'
     __table_args__ = (
@@ -495,11 +536,13 @@ class SegmentOfficial(Base):
     __table_args__ = (
         ForeignKeyConstraint(['appointment_type_id'], ['officials_analysis.appointment_types.id'], ondelete='SET NULL', name='segment_official_appointment_type_id_fkey'),
         ForeignKeyConstraint(['official_id'], ['officials_analysis.officials.id'], ondelete='SET NULL', name='segment_official_official_id_fkey'),
+        ForeignKeyConstraint(['isu_official_id'], ['officials_analysis.isu_official.id'], ondelete='SET NULL', name='segment_official_isu_official_id_fkey'),
         ForeignKeyConstraint(['segment_id'], ['segment.id'], ondelete='CASCADE', name='segment_official_segment_id_fkey'),
         PrimaryKeyConstraint('id', name='segment_official_pkey'),
         UniqueConstraint('segment_id', 'role', name='segment_official_segment_role_uniq'),
         Index('ix_segment_official_appointment_type_id', 'appointment_type_id'),
         Index('ix_segment_official_official_id', 'official_id'),
+        Index('ix_segment_official_isu_official_id', 'isu_official_id'),
         Index('ix_segment_official_segment_id', 'segment_id')
     )
 
@@ -509,6 +552,7 @@ class SegmentOfficial(Base):
     role: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), server_default=text('now()'))
     official_id: Mapped[Optional[int]] = mapped_column(Integer)
+    isu_official_id: Mapped[Optional[int]] = mapped_column(Integer)
     appointment_type_id: Mapped[Optional[int]] = mapped_column(Integer)
 
     appointment_type: Mapped[Optional['AppointmentTypes']] = relationship('AppointmentTypes', back_populates='segment_official')

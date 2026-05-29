@@ -100,6 +100,39 @@ class Officials(Base):
     )
 
 
+class IsuOfficial(Base):
+    __tablename__ = 'isu_official'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='isu_official_pkey'),
+        UniqueConstraint(
+            'federation_code',
+            'name_normalized',
+            'season',
+            name='isu_official_roster_unique',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    federation_code: Mapped[str] = mapped_column(Text)
+    full_name: Mapped[str] = mapped_column(Text)
+    first_name: Mapped[Optional[str]] = mapped_column(Text)
+    last_name: Mapped[Optional[str]] = mapped_column(Text)
+    name_normalized: Mapped[str] = mapped_column(Text)
+    season: Mapped[str] = mapped_column(Text)
+    communication_ref: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+    last_modified: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+
 class Appointments(Base):
     __tablename__ = 'appointments'
     __table_args__ = (

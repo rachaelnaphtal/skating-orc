@@ -44,7 +44,7 @@ def _engine() -> Engine:
 
 def cmd_init_db(engine: Engine) -> None:
     jol_core.ensure_table(engine)
-    print("OK: judge_official_link table is ready.")
+    print("OK: judge_official_link and ISU directory link tables are ready.")
 
 
 def cmd_unmapped(engine: Engine, limit: int) -> None:
