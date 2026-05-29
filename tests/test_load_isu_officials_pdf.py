@@ -142,6 +142,22 @@ def test_geometry_lines_keep_column_context_for_appointments():
     }
 
 
+def test_geometry_same_country_discipline_header_applies_across_columns():
+    lines = [
+        PdfLine(1, 10, 1, "ICE DANCE", "USA", "UNITED STATES OF AMERICA"),
+        PdfLine(2, 72, 0, "SYNCHRONIZED SKATING", "USA", "UNITED STATES OF AMERICA"),
+        PdfLine(2, 72, 1, "TECHNICAL CONTROLLER", "USA", "UNITED STATES OF AMERICA"),
+        PdfLine(2, 90, 1, "International Technical Controller", "USA", "UNITED STATES OF AMERICA"),
+        PdfLine(2, 135, 1, "Sherr Karin, Ms.", "USA", "UNITED STATES OF AMERICA"),
+    ]
+
+    rows = parse_isu_official_lines(lines, season="2526", communication_ref="2735")
+
+    assert appointment_tuples(rows[0]) == {
+        ("Synchronized Skating", "Technical Controller", "International")
+    }
+
+
 def test_parse_text_extracts_multiple_names_from_one_line():
     text = """
 AUS - AUSTRALIA

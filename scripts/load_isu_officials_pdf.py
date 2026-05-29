@@ -332,8 +332,15 @@ def parse_isu_official_lines(
     parsed: dict[tuple[str, str, str], dict[str, object]] = {}
     state: dict[int, dict[str, str]] = {}
     federation_discipline_defaults: dict[str, str] = {}
+    row_discipline_defaults: dict[tuple[int, str, int], str] = {}
+    for pdf_line in lines:
+        discipline = _line_discipline(_clean_line(pdf_line.text))
+        if discipline and pdf_line.federation_code:
+            row_discipline_defaults[
+                (pdf_line.page, pdf_line.federation_code, round(pdf_line.top / 3))
+            ] = discipline
 
-    for pdf_line in sorted(lines, key=lambda item: (item.page, item.column, item.top)):
+    for pdf_line in sorted(lines, key=lambda item: (item.page, item.top, item.column)):
         line = _clean_line(pdf_line.text)
         if not line:
             continue
@@ -381,6 +388,18 @@ def parse_isu_official_lines(
             federation_discipline_defaults[pdf_line.federation_code] = line_discipline
         line_appointment_type = _line_appointment_group(line)
         if line_appointment_type:
+            if not line_discipline:
+                row_discipline = row_discipline_defaults.get(
+                    (pdf_line.page, pdf_line.federation_code, round(pdf_line.top / 3))
+                )
+                if row_discipline:
+                    current["discipline"] = row_discipline
+                elif not current["discipline"] and federation_discipline_defaults.get(
+                    pdf_line.federation_code
+                ):
+                    current["discipline"] = federation_discipline_defaults[
+                        pdf_line.federation_code
+                    ]
             current["appointment_type"] = line_appointment_type
         role_line_text, role_appointment_type, role_level = _role_prefix(line)
         if not role_line_text and (role_appointment_type or role_level):
