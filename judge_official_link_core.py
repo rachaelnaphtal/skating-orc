@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS officials_analysis.isu_official (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT isu_official_roster_unique
-        UNIQUE (federation_code, name_normalized, season)
+        UNIQUE (federation_code, name_normalized)
 );
 
 CREATE TABLE IF NOT EXISTS public.isu_official_name_alias (

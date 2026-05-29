@@ -107,7 +107,6 @@ class IsuOfficial(Base):
         UniqueConstraint(
             'federation_code',
             'name_normalized',
-            'season',
             name='isu_official_roster_unique',
         ),
         {'schema': 'officials_analysis'},

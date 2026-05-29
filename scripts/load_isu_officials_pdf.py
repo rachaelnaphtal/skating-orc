@@ -255,6 +255,74 @@ def write_csv(path: str, rows: list[IsuOfficialRow]) -> None:
             out.close()
 
 
+def merge_csv_values(existing: str | None, new_value: str | None) -> str:
+    """Append ``new_value`` to a comma-separated text field if it is not already present."""
+    values: list[str] = []
+    for raw in (existing or "").split(","):
+        value = raw.strip()
+        if value and value not in values:
+            values.append(value)
+    new_clean = (new_value or "").strip()
+    if new_clean and new_clean not in values:
+        values.append(new_clean)
+    return ",".join(values)
+
+
+def _repoint_duplicate_isu_official_refs(conn, *, keeper_id: int, duplicate_ids: list[int]) -> None:
+    """Move FK references from duplicate ISU official rows to the canonical row."""
+    has_segment_isu_official_id = bool(
+        conn.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'segment_official'
+                      AND column_name = 'isu_official_id'
+                )
+                """
+            )
+        ).scalar()
+    )
+    for duplicate_id in duplicate_ids:
+        conn.execute(
+            text(
+                """
+                UPDATE public.judge_isu_official_link
+                SET isu_official_id = :keeper_id
+                WHERE isu_official_id = :duplicate_id
+                """
+            ),
+            {"keeper_id": keeper_id, "duplicate_id": duplicate_id},
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE public.isu_official_name_alias
+                SET isu_official_id = :keeper_id
+                WHERE isu_official_id = :duplicate_id
+                """
+            ),
+            {"keeper_id": keeper_id, "duplicate_id": duplicate_id},
+        )
+        if has_segment_isu_official_id:
+            conn.execute(
+                text(
+                    """
+                    UPDATE public.segment_official
+                    SET isu_official_id = :keeper_id
+                    WHERE isu_official_id = :duplicate_id
+                    """
+                ),
+                {"keeper_id": keeper_id, "duplicate_id": duplicate_id},
+            )
+        conn.execute(
+            text("DELETE FROM officials_analysis.isu_official WHERE id = :duplicate_id"),
+            {"duplicate_id": duplicate_id},
+        )
+
+
 def load_rows(
     rows: list[IsuOfficialRow], *, dry_run: bool, engine: Engine | None = None
 ) -> int:
@@ -270,38 +338,73 @@ def load_rows(
     count = 0
     with engine.begin() as conn:
         for row in rows:
-            conn.execute(
+            existing = conn.execute(
                 text(
                     """
-                    INSERT INTO officials_analysis.isu_official (
-                        federation_code,
-                        full_name,
-                        first_name,
-                        last_name,
-                        name_normalized,
-                        season,
-                        communication_ref
-                    )
-                    VALUES (
-                        :federation_code,
-                        :full_name,
-                        :first_name,
-                        :last_name,
-                        :name_normalized,
-                        :season,
-                        :communication_ref
-                    )
-                    ON CONFLICT (federation_code, name_normalized, season)
-                    DO UPDATE SET
-                        full_name = EXCLUDED.full_name,
-                        first_name = EXCLUDED.first_name,
-                        last_name = EXCLUDED.last_name,
-                        communication_ref = EXCLUDED.communication_ref,
-                        last_modified = NOW()
+                    SELECT id, season, communication_ref
+                    FROM officials_analysis.isu_official
+                    WHERE federation_code = :federation_code
+                      AND name_normalized = :name_normalized
+                    ORDER BY id
                     """
                 ),
                 row.__dict__,
-            )
+            ).mappings().all()
+            if existing:
+                keeper = existing[0]
+                duplicate_ids = [int(r["id"]) for r in existing[1:]]
+                if duplicate_ids:
+                    _repoint_duplicate_isu_official_refs(
+                        conn, keeper_id=int(keeper["id"]), duplicate_ids=duplicate_ids
+                    )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE officials_analysis.isu_official
+                        SET full_name = :full_name,
+                            first_name = :first_name,
+                            last_name = :last_name,
+                            season = :season,
+                            communication_ref = :communication_ref,
+                            last_modified = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        **row.__dict__,
+                        "id": int(keeper["id"]),
+                        "season": merge_csv_values(keeper["season"], row.season),
+                        "communication_ref": merge_csv_values(
+                            keeper["communication_ref"], row.communication_ref
+                        ),
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO officials_analysis.isu_official (
+                            federation_code,
+                            full_name,
+                            first_name,
+                            last_name,
+                            name_normalized,
+                            season,
+                            communication_ref
+                        )
+                        VALUES (
+                            :federation_code,
+                            :full_name,
+                            :first_name,
+                            :last_name,
+                            :name_normalized,
+                            :season,
+                            :communication_ref
+                        )
+                        """
+                    ),
+                    row.__dict__,
+                )
             count += 1
     return count
 

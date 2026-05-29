@@ -1,6 +1,7 @@
 from scripts.load_isu_officials_pdf import (
     _extract_names_from_line,
     infer_communication_ref,
+    merge_csv_values,
     parse_isu_official_text,
     split_surname_first_name,
 )
@@ -94,6 +95,12 @@ def test_infer_communication_ref_from_url():
     )
 
 
+def test_merge_csv_values_appends_without_duplicates():
+    assert merge_csv_values("2526", "2627") == "2526,2627"
+    assert merge_csv_values("2526,2627", "2526") == "2526,2627"
+    assert merge_csv_values("", "2735") == "2735"
+
+
 def test_admin_parser_includes_load_isu_pdf_command():
     from scripts import judge_official_admin
 
@@ -105,3 +112,11 @@ def test_admin_parser_includes_load_isu_pdf_command():
     assert args.source == "list-officials.pdf"
     assert args.season == "2526"
     assert args.dry_run is True
+
+
+def test_isu_roster_schema_is_canonical_across_seasons():
+    import judge_official_link_core
+
+    ddl = judge_official_link_core.DDL_JUDGE_ISU_OFFICIAL_LINK
+    assert "UNIQUE (federation_code, name_normalized)" in ddl
+    assert "UNIQUE (federation_code, name_normalized, season)" not in ddl
