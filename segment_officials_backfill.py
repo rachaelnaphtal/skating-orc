@@ -23,16 +23,13 @@ from downloadResults import (
     parse_ijs_segment_officials,
 )
 from judgingParsing import ijs_event_label_to_db_segment_name
+from ijs_results_urls import (
+    competition_index_fetch_url,
+    is_fsm_results_url,
+    results_url_lookup_keys,
+    scrape_join_base,
+)
 from models import Competition, Segment
-
-
-def normalize_results_url(url: str) -> str:
-    u = (url or "").strip().rstrip("/")
-    for suffix in ("/index.asp", "/index.htm"):
-        if u.lower().endswith(suffix):
-            u = u[: -len(suffix)].rstrip("/")
-            break
-    return u
 
 
 def find_segment_by_db_name(
@@ -64,9 +61,9 @@ def backfill_one_competition(
     FSM), pass ``fsm=True`` so only ``index.htm`` is used. Otherwise classic links are tried
     first on ``index.asp``, then FSM-style links on whichever index yields rows.
     """
-    base_url = normalize_results_url(results_url)
+    join_base = scrape_join_base(results_url)
     out: dict = {
-        "results_url": base_url,
+        "results_url": results_url,
         "competition_id": None,
         "updated": 0,
         "skipped_no_segment": 0,
@@ -74,20 +71,32 @@ def backfill_one_competition(
         "index_fetched": None,
         "errors": [],
     }
-    comp = (
-        session.query(Competition)
-        .filter(Competition.results_url == base_url)
-        .first()
-    )
+    comp = None
+    for key in results_url_lookup_keys(results_url):
+        comp = (
+            session.query(Competition)
+            .filter(Competition.results_url == key)
+            .first()
+        )
+        if comp:
+            break
     if not comp:
-        out["errors"].append(f"No competition row with results_url={base_url!r}")
+        out["errors"].append(
+            f"No competition row with results_url in {results_url_lookup_keys(results_url)!r}"
+        )
         return out
     out["competition_id"] = comp.id
 
+    stored = comp.results_url or results_url
     if fsm:
-        index_candidates = [f"{base_url}/index.htm"]
+        index_candidates = [competition_index_fetch_url(stored)]
+        if not is_fsm_results_url(stored):
+            index_candidates.append(f"{join_base}/index.htm")
     else:
-        index_candidates = [f"{base_url}/index.asp", f"{base_url}/index.htm"]
+        index_candidates = [
+            competition_index_fetch_url(stored),
+            f"{join_base}/index.htm",
+        ]
 
     index_html = None
     index_url = None

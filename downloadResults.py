@@ -762,9 +762,11 @@ def loadInfoForExistingCompetitions():
     session = get_db_session()
     database_obj = DatabaseLoader(session)
     urls = database_obj.getCompetitionUrlsWithNoLocation()
+    from ijs_results_urls import competition_index_fetch_url
+
     for url in urls:
-        (start_date, end_date, location) = loadCompetitionInfo(
-            f"{url}/index.asp")
+        index_url = competition_index_fetch_url(url)
+        (start_date, end_date, location) = loadCompetitionInfo(index_url)
         database_obj.updateCompetition(
             url, location=location, start_date=start_date, end_date=end_date)
 
@@ -860,9 +862,18 @@ def scrape(
         pdf_loop = None
         pdf_browser = None
 
-        url = f"{base_url}/index.asp"
-        if isFSM:
-            url = f"{base_url}/index.htm"
+        from ijs_results_urls import (
+            competition_index_fetch_url,
+            is_fsm_results_url,
+            results_url_for_storage,
+            scrape_join_base,
+        )
+
+        stored_url = results_url_for_storage(base_url)
+        if isFSM is None:
+            isFSM = is_fsm_results_url(stored_url)
+        join_base = scrape_join_base(stored_url)
+        url = competition_index_fetch_url(stored_url)
         page_contents = get_page_contents(url, session=http_session)
         _LOG.debug("GET %s", url)
         # Launch Chromium only after index succeeds and only for classic PDF mode (not FSM).
@@ -890,20 +901,20 @@ def scrape(
         if write_to_database:
             competition_id = database_obj.insert_competition(
                 report_name.replace("_", " "),
-                base_url,
+                stored_url,
                 year,
                 qualifying=qualifying,
                 nqs=nqs,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
-            proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
+            proccessed_segments = database_obj.getSegmentNamesForCompetition(stored_url)
             start_date, end_date, location = _competition_metadata_dates_and_location(
                 competition_metadata,
                 url,
                 session=http_session,
             )
             database_obj.updateCompetition(
-                base_url,
+                stored_url,
                 location=location,
                 start_date=start_date,
                 end_date=end_date,
@@ -921,7 +932,7 @@ def scrape(
             detailed_rule_errors = []
             if isFSM:
                 judges_and_results_links = get_fsm_judges_and_results_links(
-                    page_contents, f"{base_url}/", session=http_session
+                    page_contents, f"{join_base}/", session=http_session
                 )
                 i = 0
                 for event_info_dict in judges_and_results_links:
@@ -997,7 +1008,7 @@ def scrape(
                         judgesNames,
                         h1_event_label,
                     ) = findResultsDetailUrlAndJudgesNames(
-                        base_url, segment_href, session=http_session
+                        join_base, segment_href, session=http_session
                     )
                     if not resultsLink:
                         note_warning(
@@ -1019,7 +1030,7 @@ def scrape(
                         all_element_dict,
                         all_pcs_dict,
                     ) = processEvent(
-                        f"{base_url}/{resultsLink}",
+                        f"{join_base}/{resultsLink}",
                         i,
                         judgesNames,
                         workbook,
@@ -1044,7 +1055,7 @@ def scrape(
                     segment_db_key = None
                     if write_to_database:
                         segment_official_rows = _classic_segment_official_rows(
-                            base_url, segment_href, session=http_session
+                            join_base, segment_href, session=http_session
                         )
                         if not segment_official_rows:
                             note_warning(
@@ -1134,7 +1145,7 @@ def scrape(
             database_obj.commit()
         warnings = pop_warnings()
         log_competition_summary(
-            base_url,
+            stored_url,
             segments_written=segment_stats["written"],
             segments_skipped=segment_stats["skipped"],
             warnings=warnings,

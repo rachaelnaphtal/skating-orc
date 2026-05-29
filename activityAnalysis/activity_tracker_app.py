@@ -158,14 +158,10 @@ def _discipline_id_int(discipline_id):
 
 
 def _judging_results_index_url(url: str) -> str:
-    """Ensure IJS results base URL opens the index page (…/index.asp)."""
-    u = (url or "").strip()
-    if not u:
-        return u
-    u = u.rstrip("/")
-    if u.lower().endswith("index.asp"):
-        return u
-    return f"{u}/index.asp"
+    """IJS results page URL for links (see ``ijs_results_urls.results_page_url``)."""
+    from ijs_results_urls import results_page_url
+
+    return results_page_url(url) or ""
 
 
 def _segment_official_disciplines_summary(series: pd.Series) -> str:
@@ -280,7 +276,7 @@ def _render_additional_segment_activity_slice(
             "results_url": st.column_config.LinkColumn(
                 "Results",
                 display_text="Open",
-                help="IJS results index (index.asp) for this competition.",
+                help="IJS competition results page (classic index.asp or FSM entry URL).",
             ),
         },
     )

@@ -263,10 +263,10 @@ def generate_full_competition_report():
         return
     print(st.session_state["report_type"])
     url = st.session_state["url"]
-    isFSM = not url.endswith("index.asp")
-    url=url.replace("/index.asp", "").replace("/index.htm", "")
-    if url.endswith('/'):
-        url = url[:-1]
+    from ijs_results_urls import is_fsm_results_url, results_url_for_storage
+
+    url = results_url_for_storage(url)
+    isFSM = is_fsm_results_url(url)
     report_name_value = st.session_state["report_name"]
     event_regex = effective_event_regex(
         st.session_state.get("event_regex_custom", ""),

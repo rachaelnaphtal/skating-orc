@@ -46,24 +46,11 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from ijs_index_parse import ijs_index_start_end_and_location  # noqa: E402
-
-
-def _normalize_ijs_results_base_url(url: str) -> str:
-    """Match ``public.competition.results_url``: base path without ``/index.asp`` / ``/index.htm``."""
-    u = (url or "").strip()
-    if not u:
-        return u
-    lower = u.lower()
-    for suffix in ("/index.asp", "/index.htm"):
-        if lower.endswith(suffix):
-            u = u[: -len(suffix)]
-            lower = u.lower()
-            break
-    return u.rstrip("/")
+from ijs_results_urls import results_url_dedupe_key  # noqa: E402
 
 
 def _load_existing_competition_base_urls() -> set[str]:
-    """Normalized ``results_url`` values from the judging DB."""
+    """Dedupe keys for ``results_url`` values already in the judging DB."""
     import os
 
     from sqlalchemy import create_engine, text
@@ -93,7 +80,7 @@ def _load_existing_competition_base_urls() -> set[str]:
                 for row in result:
                     ru = row[0]
                     if ru:
-                        out.add(_normalize_ijs_results_base_url(str(ru)))
+                        out.add(results_url_dedupe_key(str(ru)))
                 return out
             except Exception as e:
                 last_err = e
@@ -284,9 +271,8 @@ def main(argv: list[str] | None = None) -> int:
             cid = args.start_id
             while cid <= args.end_id:
                 url = f"{BASE}/{year}/{cid}/index.asp"
-                base_for_db = _normalize_ijs_results_base_url(url)
 
-                if args.skip_if_in_database and base_for_db in existing_urls:
+                if args.skip_if_in_database and results_url_dedupe_key(url) in existing_urls:
                     skipped_in_db += 1
                     probe_num += 1
                     if (
