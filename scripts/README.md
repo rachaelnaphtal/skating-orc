@@ -276,7 +276,7 @@ python scripts/load_isu_figure_skating_results.py \
 
 ```bash
 python scripts/load_isu_figure_skating_results.py \
-  --seasons 2025/2026,2024/2025 \
+  --seasons 2526,2425 \
   --dry-run \
   --skip-if-in-database
 ```
@@ -285,13 +285,22 @@ python scripts/load_isu_figure_skating_results.py \
 
 ```bash
 python scripts/load_isu_figure_skating_results.py \
-  --seasons 2025/2026,2024/2025 \
+  --seasons 2526 \
+  --event-levels All \
   --load \
   --skip-if-in-database \
   --quiet
 ```
 
-Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Add `--officials-analysis-competition-type-id ID` if these competitions should be linked to an existing `officials_analysis.competition_type`; otherwise loaded rows keep that link empty and default `qualifying` / `nqs` flags.
+Database load behavior:
+
+- `--event-levels All` loads both API categories: `ISU` and `International`. Use `--event-levels ISU` or `--event-levels International` for only one category.
+- `competition.name` uses the ISU API event name exactly.
+- `competition.year` uses the compact season code, e.g. `2526`.
+- `competition.results_url` uses `normalized_results_url`, with `/index.htm` or `/index.asp` stripped.
+- `start_date`, `end_date`, and `location` come from ISU API event metadata.
+- By default no `officials_analysis.competition_type` category is assigned. Add `--officials-analysis-competition-type-id ID` if every loaded row should use an existing type id; `qualifying` / `nqs` flags are derived from that id.
+- Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`.
 
 CSV columns include `season`, `season_year`, `event_level`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
 

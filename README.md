@@ -31,6 +31,27 @@ python scripts/load_isu_figure_skating_results.py --year 2025 --event-levels All
 
 Compact season codes like `2526` are expanded to ISU API seasons like `2025/2026`. Add `--load --skip-if-in-database` to load discovered result pages into the database after writing the CSV. Full script details are in **[scripts/README.md](scripts/README.md)**.
 
+To write the season `2526` ISU + international competitions directly to the database:
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  --seasons 2526 \
+  --event-levels All \
+  --load \
+  --skip-if-in-database \
+  --quiet
+```
+
+Database load behavior:
+
+- `--event-levels All` loads both API categories: `ISU` and `International`. Use `--event-levels ISU` or `--event-levels International` for only one category.
+- `competition.name` uses the ISU API event name exactly, for example `Lake Placid International Ice Dance Competition 2025`.
+- `competition.year` uses the compact season code, for example `2526`.
+- `competition.results_url` uses the normalized Detailed Results URL with `/index.htm` or `/index.asp` stripped.
+- `start_date`, `end_date`, and `location` come from the ISU API event metadata.
+- By default no `officials_analysis.competition_type` category is assigned. If you pass `--officials-analysis-competition-type-id ID`, every loaded row gets that type id and the `qualifying` / `nqs` flags are derived from it.
+- Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`. Add `--metadata-only` to only create/update competition rows.
+
 # Setup libraries
 install homebrew or anaconda
 install python
