@@ -26,7 +26,14 @@ def _toml_quote(value: str) -> str:
 def _append_gcs_section(lines: list[str]) -> None:
     lines.append("")
     lines.append("[connections.gcs]")
-    info = service_account_info_from_env()
+    info = None
+    try:
+        info = service_account_info_from_env()
+    except Exception as exc:
+        print(
+            f"WARNING: skipping GCS block in secrets.toml ({exc})",
+            file=sys.stderr,
+        )
     if info:
         fields = (
             "type",

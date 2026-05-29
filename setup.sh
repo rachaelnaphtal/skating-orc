@@ -15,6 +15,9 @@ showSidebarNavigation = false
 STREAMLITCFG
 
 # Write secrets.toml with valid PEM newlines (Heroku env vars often use literal \n).
-python3 scripts/write_streamlit_secrets.py
-
-cat ~/.streamlit/secrets.toml
+python3 scripts/write_streamlit_secrets.py || exit 1
+if [ ! -f ~/.streamlit/secrets.toml ]; then
+  echo "ERROR: ~/.streamlit/secrets.toml was not created" >&2
+  exit 1
+fi
+echo "Wrote ~/.streamlit/secrets.toml"
