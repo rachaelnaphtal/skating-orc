@@ -238,9 +238,56 @@ python scripts/discover_usfs_ijs_competitions.py \
 
 ---
 
+## ISU figure skating detailed-results load
+
+**Script:** `load_isu_figure_skating_results.py`
+
+Uses the ISU event API to enumerate figure skating ISU events, follows each ISU event detail page, extracts the **Detailed Results** URL, and writes a CSV. It can also load the discovered result pages through the normal `downloadResults.scrape()` database path.
+
+**Discover URLs only** (defaults to the latest two ISU seasons whose start date has passed):
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  -o isu_figure_skating_detailed_results.csv
+```
+
+**Explicit seasons:**
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  --seasons 2025/2026,2024/2025 \
+  -o isu_figure_skating_detailed_results.csv
+```
+
+**Preview database loads without writing:**
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  --seasons 2025/2026,2024/2025 \
+  --dry-run \
+  --skip-if-in-database
+```
+
+**Load all found detailed-results pages into the database:**
+
+```bash
+python scripts/load_isu_figure_skating_results.py \
+  --seasons 2025/2026,2024/2025 \
+  --load \
+  --skip-if-in-database \
+  --quiet
+```
+
+Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Add `--officials-analysis-competition-type-id ID` if these competitions should be linked to an existing `officials_analysis.competition_type`; otherwise loaded rows keep that link empty and default `qualifying` / `nqs` flags.
+
+CSV columns include `season`, `season_year`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
+
+---
+
 ## Help
 
 ```bash
 python scripts/discover_usfs_ijs_competitions.py --help
 python scripts/load_discovered_ijs_competitions_csv.py --help
+python scripts/load_isu_figure_skating_results.py --help
 ```
