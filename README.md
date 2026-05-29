@@ -50,7 +50,9 @@ Database load behavior:
 - `competition.results_url` uses the normalized Detailed Results URL with `/index.htm` or `/index.asp` stripped.
 - `start_date`, `end_date`, and `location` come from the ISU API event metadata.
 - `competition.international` is set to `true` for every row loaded by this script.
-- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU events whose name contains `World Championships` use type `15`; all other ISU events use type `16`.
+- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU Championship-tier events (Worlds, World Junior, Europeans, Four Continents, World Synchro, Olympic Games) use type `15`; all other ISU events use type `16`.
+- Use `--write-failures` or `--failures-output PATH` to save failed competitions to CSV.
+- Use `--disciplines All` for figure + synchronized skating (default is figure only).
 - `qualifying` and `nqs` are set to `false` for these international type IDs.
 - Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`. Add `--metadata-only` to only create/update competition rows without scraping segments.
 

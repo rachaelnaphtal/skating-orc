@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Discover ISU figure skating "Detailed Results" URLs and optionally load them.
+Discover ISU skating "Detailed Results" URLs and optionally load them.
 
 The ISU events listing is backed by ``https://api.isu-skating.com/api/event/mobile-list``.
-This script uses that API to enumerate figure skating ISU events by season, follows each
-event detail page, extracts the "Detailed Results" URL, writes a CSV, and can run the
-project's normal ``downloadResults.scrape`` path for every discovered results page.
+This script enumerates events by discipline (figure and/or synchronized skating), season,
+and event level, extracts each event's Detailed Results URL, writes a CSV, and can load
+via ``downloadResults.scrape``.
 
 Examples:
 
-  # Discover the last two started seasons and write a CSV.
-  python scripts/load_isu_figure_skating_results.py -o isu_figure_results.csv
+  # Figure skating only (default).
+  python scripts/load_isu_figure_skating_results.py -o isu_results.csv
 
-  # Discover explicit seasons, but only print what would be loaded.
-  python scripts/load_isu_figure_skating_results.py --seasons 2526,2425 --dry-run
+  # Figure + synchronized skating.
+  python scripts/load_isu_figure_skating_results.py --disciplines All -o isu_results.csv
 
-  # Discover ISU + international competitions whose start date is in 2025.
-  python scripts/load_isu_figure_skating_results.py --year 2025 \
-      --event-levels ISU,International -o figure_results_2025.csv
+  # Synchronized only.
+  python scripts/load_isu_figure_skating_results.py \\
+      --disciplines "SYNCHRONIZED SKATING" -o isu_synchro.csv
 
-  # Discover and load every found ISU competition into the database.
-  python scripts/load_isu_figure_skating_results.py --load --quiet
+  # Write failed competitions to a file (see --write-failures / --failures-output).
+  python scripts/load_isu_figure_skating_results.py --load --write-failures -o isu_results.csv
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Iterable
+from typing import Iterable, TextIO
 from urllib.parse import urljoin
 
 import requests
@@ -52,11 +52,15 @@ from officials_competition_types import (  # noqa: E402
 
 ISU_API_BASE = "https://api.isu-skating.com/api"
 ISU_SITE_BASE = "https://isu.org"
-DISCIPLINE_TITLE = "FIGURE SKATING"
+DISCIPLINE_FIGURE_SKATING = "FIGURE SKATING"
+DISCIPLINE_SYNCHRONIZED_SKATING = "SYNCHRONIZED SKATING"
+DEFAULT_DISCIPLINES = (DISCIPLINE_FIGURE_SKATING,)
+DISCIPLINE_CHOICES = (DISCIPLINE_FIGURE_SKATING, DISCIPLINE_SYNCHRONIZED_SKATING)
 DEFAULT_EVENT_LEVELS = ("ISU",)
 EVENT_LEVEL_CHOICES = ("ISU", "International")
 
 CSV_FIELDS = (
+    "discipline_title",
     "season",
     "season_year",
     "event_level",
@@ -81,6 +85,7 @@ CSV_FIELDS = (
 
 @dataclass(frozen=True)
 class ResultRow:
+    discipline_title: str
     season: str
     season_year: str
     event_level: str
@@ -103,6 +108,7 @@ class ResultRow:
 
     def as_csv_row(self) -> dict[str, str]:
         return {
+            "discipline_title": self.discipline_title,
             "season": self.season,
             "season_year": self.season_year,
             "event_level": self.event_level,
@@ -300,6 +306,36 @@ def parse_seasons_arg(
     return seasons
 
 
+def parse_disciplines_arg(raw: str | None) -> tuple[str, ...]:
+    if not raw or not raw.strip():
+        return DEFAULT_DISCIPLINES
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) == 1 and parts[0].lower() == "all":
+        return DISCIPLINE_CHOICES
+    normalized: list[str] = []
+    aliases = {
+        "figure": DISCIPLINE_FIGURE_SKATING,
+        "figure skating": DISCIPLINE_FIGURE_SKATING,
+        "synchro": DISCIPLINE_SYNCHRONIZED_SKATING,
+        "synchronized": DISCIPLINE_SYNCHRONIZED_SKATING,
+        "synchronized skating": DISCIPLINE_SYNCHRONIZED_SKATING,
+    }
+    for part in parts:
+        key = part.lower()
+        if key in aliases:
+            normalized.append(aliases[key])
+            continue
+        upper = part.upper()
+        if upper not in DISCIPLINE_CHOICES:
+            raise SystemExit(
+                f"Invalid --disciplines value {part!r}; "
+                f"use {', '.join(DISCIPLINE_CHOICES)}, All, or aliases "
+                f"(figure, synchronized)."
+            )
+        normalized.append(upper)
+    return tuple(dict.fromkeys(normalized))
+
+
 def parse_event_levels_arg(raw: str | None) -> tuple[str, ...]:
     if not raw or not raw.strip():
         return DEFAULT_EVENT_LEVELS
@@ -315,14 +351,107 @@ def parse_event_levels_arg(raw: str | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(parts))
 
 
+# ISU Championship subtypes: long labels (official PDF) and short labels (mobile-list API).
+ISU_CHAMPIONSHIP_EVENT_SUB_TYPES = frozenset(
+    {
+        # Official Communication / PDF wording
+        "isu world figure skating championships",
+        "isu world junior figure skating championships",
+        "isu european figure skating championships",
+        "isu four continents figure skating championships",
+        "isu world synchronized skating championships",
+        # api.isu-skating.com ``event_sub_type_name`` (see analysisTemp/figure_2526.csv)
+        "world championships",
+        "world junior championships",
+        "european championships",
+        "four continents championships",
+        "world synchronized skating championships",
+        "isu synchronized skating combined world & junior world championships",
+        "synchronized skating world championships",
+        "world synchronized championships",
+        "olympic games",
+    }
+)
+
+FAILURE_CSV_FIELDS = (
+    "failure_stage",
+    "discipline_title",
+    "season",
+    "season_year",
+    "event_level",
+    "event_name",
+    "event_sub_type_name",
+    "isu_event_url",
+    "detailed_results_url",
+    "normalized_results_url",
+    "error",
+)
+
+
+def _normalize_event_label(value: str) -> str:
+    return " ".join((value or "").lower().split())
+
+
+def _name_indicates_isu_championship(name: str) -> bool:
+    if not name:
+        return False
+    if any(
+        phrase in name
+        for phrase in (
+            "four continents championships",
+            "four continents figure skating championships",
+            "european championships",
+            "european figure skating championships",
+            "world synchronized skating championships",
+            "world junior figure skating championships",
+            "world junior championships",
+            "junior world championships",
+            "world figure skating championships",
+            "olympic winter games",
+            "olympic games",
+            "synchronized skating world championships",
+            "synchronized skating junior world championships",
+            "synchronized skating combined world",
+        )
+    ):
+        return True
+    if "world championships" in name:
+        if "junior" not in name:
+            return True
+        return "junior world" in name or "world junior" in name
+    return False
+
+
+def is_isu_championship_event(
+    event_name: str,
+    event_sub_type_name: str = "",
+) -> bool:
+    """
+    True for ISU Championship-tier events (type id 15).
+
+    Uses ``event_sub_type_name`` when it matches known championship subtypes, and also
+    checks ``event_name`` (the API often sends short subtypes like ``World Championships``
+    rather than the long PDF labels).
+    """
+    sub_norm = _normalize_event_label(event_sub_type_name)
+    if sub_norm and sub_norm in ISU_CHAMPIONSHIP_EVENT_SUB_TYPES:
+        return True
+    return _name_indicates_isu_championship(_normalize_event_label(event_name))
+
+
 def is_world_championship_event(event_name: str) -> bool:
-    return "world championships" in (event_name or "").lower()
+    """Backward-compatible alias; name-only check."""
+    return is_isu_championship_event(event_name, "")
 
 
-def inferred_competition_type_id(event_level: str, event_name: str) -> int:
+def inferred_competition_type_id(
+    event_level: str,
+    event_name: str,
+    event_sub_type_name: str = "",
+) -> int:
     if event_level == "International":
         return OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION
-    if is_world_championship_event(event_name):
+    if is_isu_championship_event(event_name, event_sub_type_name):
         return OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP
     return OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION
 
@@ -339,12 +468,13 @@ def fetch_events_for_season(
     session: requests.Session,
     season: str,
     event_level: str,
+    discipline_title: str,
     pagesize: int,
     timeout: float,
 ) -> list[dict]:
     payload = {
         "pagesize": pagesize,
-        "discipline_title": DISCIPLINE_TITLE,
+        "discipline_title": discipline_title,
         "season": season,
         "event_level": event_level,
     }
@@ -392,12 +522,12 @@ def collect_result_rows(
     session: requests.Session,
     seasons: Iterable[str],
     *,
+    disciplines: Iterable[str],
     event_levels: Iterable[str],
     year: int | None,
     pagesize: int,
     timeout: float,
     delay: float,
-    include_missing: bool,
     limit: int | None,
     start_offset: int,
     quiet: bool,
@@ -405,51 +535,63 @@ def collect_result_rows(
     rows: list[ResultRow] = []
     seen = 0
     fetched_at = _utc_now()
-    for season in seasons:
-        for event_level in event_levels:
-            events = fetch_events_for_season(
-                session, season, event_level, pagesize, timeout
-            )
-            if not quiet:
-                print(
-                    f"{season} {event_level}: {len(events)} figure skating events",
-                    file=sys.stderr,
+    for discipline_title in disciplines:
+        for season in seasons:
+            for event_level in event_levels:
+                events = fetch_events_for_season(
+                    session,
+                    season,
+                    event_level,
+                    discipline_title,
+                    pagesize,
+                    timeout,
                 )
-            for event in events:
-                start_date = _date_from_iso(event.get("from_date"))
-                parsed_start = _parse_iso_date(start_date)
-                if year is not None:
-                    if parsed_start is None or parsed_start.year != year:
-                        continue
-                if seen < start_offset:
-                    seen += 1
-                    continue
-                if limit is not None and len(rows) >= limit:
-                    return rows
-                seen += 1
-
-                name = str(event.get("name") or "").strip()
-                detail_url = event_detail_page_url(event)
-                results_url, error = detailed_results_url_for_event(
-                    session, event, timeout
-                )
-                status = "found" if results_url else "missing"
-                normalized = normalize_results_base_url(results_url)
                 if not quiet:
-                    print(f"{status}: {season} {event_level} | {name}", file=sys.stderr)
+                    print(
+                        f"{discipline_title} | {season} {event_level}: "
+                        f"{len(events)} events",
+                        file=sys.stderr,
+                    )
+                for event in events:
+                    start_date = _date_from_iso(event.get("from_date"))
+                    parsed_start = _parse_iso_date(start_date)
+                    if year is not None:
+                        if parsed_start is None or parsed_start.year != year:
+                            continue
+                    if seen < start_offset:
+                        seen += 1
+                        continue
+                    if limit is not None and len(rows) >= limit:
+                        return rows
+                    seen += 1
 
-                if results_url or include_missing:
-                    competition_type_id = inferred_competition_type_id(event_level, name)
+                    name = str(event.get("name") or "").strip()
+                    sub_type = str(event.get("event_sub_type_name") or "").strip()
+                    detail_url = event_detail_page_url(event)
+                    results_url, error = detailed_results_url_for_event(
+                        session, event, timeout
+                    )
+                    status = "found" if results_url else "missing"
+                    normalized = normalize_results_base_url(results_url)
+                    if not quiet:
+                        print(
+                            f"{status}: {discipline_title} | {season} {event_level} | "
+                            f"{name}",
+                            file=sys.stderr,
+                        )
+
+                    competition_type_id = inferred_competition_type_id(
+                        event_level, name, sub_type
+                    )
                     rows.append(
                         ResultRow(
+                            discipline_title=discipline_title,
                             season=season,
                             season_year=season_year_from_title(season),
                             event_level=event_level,
                             isu_event_id=str(event.get("event_id") or ""),
                             event_name=name,
-                            event_sub_type_name=str(
-                                event.get("event_sub_type_name") or ""
-                            ).strip(),
+                            event_sub_type_name=sub_type,
                             display_date=str(event.get("display_date") or "").strip(),
                             start_date=start_date,
                             end_date=_date_from_iso(event.get("to_date")),
@@ -465,9 +607,115 @@ def collect_result_rows(
                             fetched_at_utc=fetched_at,
                         )
                     )
-                if delay:
-                    time.sleep(delay)
+                    if delay:
+                        time.sleep(delay)
     return rows
+
+
+def failures_output_path(output_path: str, explicit: str | None = None) -> str:
+    """Default failures CSV beside ``-o`` path, or a generic name for stdout output."""
+    if explicit:
+        return explicit
+    if output_path and output_path != "-":
+        base, ext = os.path.splitext(output_path)
+        suffix = ext or ".csv"
+        return f"{base}_failures{suffix}"
+    return "isu_competition_failures.csv"
+
+
+def resolve_failures_output_path(args: argparse.Namespace) -> str | None:
+    """Return path when user asked for a failures file; else None (stderr summary only)."""
+    if args.no_failures_file:
+        return None
+    if args.failures_output:
+        return args.failures_output
+    if args.write_failures:
+        return failures_output_path(args.output)
+    return None
+
+
+def discovery_failures(rows: Iterable[ResultRow]) -> list[dict[str, str]]:
+    """Events with no Detailed Results URL (``status == missing``)."""
+    out: list[dict[str, str]] = []
+    for row in rows:
+        if row.status != "missing":
+            continue
+        out.append(
+            {
+                "failure_stage": "discover_missing_results",
+                "discipline_title": row.discipline_title,
+                "season": row.season,
+                "season_year": row.season_year,
+                "event_level": row.event_level,
+                "event_name": row.event_name,
+                "event_sub_type_name": row.event_sub_type_name,
+                "isu_event_url": row.isu_event_url,
+                "detailed_results_url": row.detailed_results_url,
+                "normalized_results_url": row.normalized_results_url,
+                "error": row.error or "no Detailed Results URL found",
+            }
+        )
+    return out
+
+
+def failure_record_from_row(row: ResultRow, *, stage: str, error: str) -> dict[str, str]:
+    return {
+        "failure_stage": stage,
+        "discipline_title": row.discipline_title,
+        "season": row.season,
+        "season_year": row.season_year,
+        "event_level": row.event_level,
+        "event_name": row.event_name,
+        "event_sub_type_name": row.event_sub_type_name,
+        "isu_event_url": row.isu_event_url,
+        "detailed_results_url": row.detailed_results_url,
+        "normalized_results_url": row.normalized_results_url,
+        "error": error,
+    }
+
+
+def write_failures_csv(path: str, failures: Iterable[dict[str, str]]) -> int:
+    items = list(failures)
+    if not items:
+        return 0
+    with open(path, "w", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=FAILURE_CSV_FIELDS)
+        writer.writeheader()
+        for item in items:
+            writer.writerow(item)
+    return len(items)
+
+
+def print_failures_summary(
+    failures: list[dict[str, str]],
+    *,
+    failures_path: str | None = None,
+    stream: TextIO | None = None,
+) -> None:
+    out = stream or sys.stderr
+    if not failures:
+        print("\nNo failed competitions.", file=out)
+        return
+    by_stage: dict[str, list[dict[str, str]]] = {}
+    for f in failures:
+        by_stage.setdefault(f["failure_stage"], []).append(f)
+    print(f"\n=== Failed competitions ({len(failures)} total) ===", file=out)
+    for stage, items in sorted(by_stage.items()):
+        print(f"\n{stage} ({len(items)}):", file=out)
+        for item in items:
+            disc = item.get("discipline_title") or ""
+            print(
+                f"  - {item['event_name']} [{disc} | {item['event_level']}] "
+                f"({item['season']})",
+                file=out,
+            )
+            err = (item.get("error") or "").strip()
+            if err:
+                print(f"      {err}", file=out)
+            if item.get("isu_event_url"):
+                print(f"      {item['isu_event_url']}", file=out)
+    if failures_path:
+        print(f"\nFailures written to {failures_path}", file=out)
 
 
 def write_csv(path: str, rows: Iterable[ResultRow]) -> None:
@@ -532,7 +780,7 @@ def load_rows(
     log_file: str | None,
     default_competition_type_id: int | None,
     delay: float,
-) -> tuple[int, int]:
+) -> tuple[int, int, list[dict[str, str]]]:
     eligible = [row for row in rows if row.normalized_results_url and row.status == "found"]
     existing = _load_existing_competition_base_urls() if skip_if_in_database else set()
 
@@ -541,6 +789,7 @@ def load_rows(
         for row in eligible
         if normalize_results_base_url(row.normalized_results_url) not in existing
     ]
+    load_failures: list[dict[str, str]] = []
 
     if dry_run:
         for row in planned:
@@ -552,7 +801,7 @@ def load_rows(
                 f"{'FSM' if row.is_fsm else 'classic'} | "
                 f"{row.normalized_results_url} | {row.event_name}"
             )
-        return 0, len(planned)
+        return 0, len(planned), load_failures
 
     from database import get_db_session
     from database_loader import DatabaseLoader
@@ -576,66 +825,81 @@ def load_rows(
             qualifying, nqs, international = competition_load_flags_from_officials_type_id(
                 type_id
             )
-            if metadata_only:
-                db_loader.insert_competition(
-                    row.event_name,
-                    row.normalized_results_url,
-                    row.season_year,
-                    qualifying=qualifying,
-                    nqs=nqs,
-                    officials_analysis_competition_type_id=type_id,
-                    international=international,
+            try:
+                if metadata_only:
+                    db_loader.insert_competition(
+                        row.event_name,
+                        row.normalized_results_url,
+                        row.season_year,
+                        qualifying=qualifying,
+                        nqs=nqs,
+                        officials_analysis_competition_type_id=type_id,
+                        international=international,
+                    )
+                    db_loader.updateCompetition(
+                        row.normalized_results_url,
+                        location=row.location,
+                        start_date=start_date,
+                        end_date=end_date,
+                        name=row.event_name,
+                        qualifying=qualifying,
+                        nqs=nqs,
+                        officials_analysis_competition_type_id=type_id,
+                        update_officials_competition_type=True,
+                        international=international,
+                    )
+                    db_session.commit()
+                else:
+                    scrape(
+                        row.normalized_results_url,
+                        row.event_name,
+                        write_to_database=True,
+                        write_excel=False,
+                        year=row.season_year,
+                        use_html=True,
+                        isFSM=row.is_fsm,
+                        qualifying=qualifying,
+                        nqs=nqs,
+                        officials_analysis_competition_type_id=type_id,
+                        update_officials_competition_type=True,
+                        international=international,
+                        http_session=http_session,
+                        db_session=db_session,
+                        database_loader=db_loader,
+                        competition_metadata={
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "location": row.location,
+                        },
+                        commit_per_segment=False,
+                        quiet=quiet,
+                        verbose=verbose,
+                        log_file=log_file,
+                        configure_logging=False,
+                    )
+                    db_session.commit()
+                    print_batch_summary()
+                loaded += 1
+            except Exception as exc:
+                db_session.rollback()
+                load_failures.append(
+                    failure_record_from_row(
+                        row,
+                        stage="load_error",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                 )
-                db_loader.updateCompetition(
-                    row.normalized_results_url,
-                    location=row.location,
-                    start_date=start_date,
-                    end_date=end_date,
-                    name=row.event_name,
-                    qualifying=qualifying,
-                    nqs=nqs,
-                    officials_analysis_competition_type_id=type_id,
-                    update_officials_competition_type=True,
-                    international=international,
-                )
-                db_session.commit()
-            else:
-                scrape(
-                    row.normalized_results_url,
-                    row.event_name,
-                    write_to_database=True,
-                    write_excel=False,
-                    year=row.season_year,
-                    use_html=True,
-                    isFSM=row.is_fsm,
-                    qualifying=qualifying,
-                    nqs=nqs,
-                    officials_analysis_competition_type_id=type_id,
-                    update_officials_competition_type=True,
-                    international=international,
-                    http_session=http_session,
-                    db_session=db_session,
-                    database_loader=db_loader,
-                    competition_metadata={
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "location": row.location,
-                    },
-                    commit_per_segment=False,
-                    quiet=quiet,
-                    verbose=verbose,
-                    log_file=log_file,
-                    configure_logging=False,
-                )
-                db_session.commit()
-                print_batch_summary()
-            loaded += 1
+                if not quiet:
+                    print(
+                        f"FAILED load: {row.event_name}: {exc}",
+                        file=sys.stderr,
+                    )
             if delay:
                 time.sleep(delay)
     finally:
         http_session.close()
         db_session.close()
-    return loaded, len(planned)
+    return loaded, len(planned), load_failures
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -658,6 +922,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Calendar year to collect; filters events by start date.",
     )
     p.add_argument(
+        "--disciplines",
+        default=None,
+        help=(
+            "Comma-separated ISU API discipline_title values. "
+            f"Default: {DISCIPLINE_FIGURE_SKATING!r}. "
+            f"Use All for {DISCIPLINE_FIGURE_SKATING!r} + {DISCIPLINE_SYNCHRONIZED_SKATING!r}, "
+            "or aliases figure / synchronized."
+        ),
+    )
+    p.add_argument(
         "--event-levels",
         default=",".join(DEFAULT_EVENT_LEVELS),
         help="Comma-separated event levels: ISU, International, or All (default: ISU).",
@@ -676,7 +950,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--include-missing",
         action="store_true",
-        help="Also write events with no Detailed Results URL.",
+        help=(
+            "Include events with no Detailed Results URL in the main -o CSV. "
+            "Missing events are always tracked for the failures summary/CSV."
+        ),
     )
     p.add_argument(
         "--load",
@@ -704,7 +981,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Override inferred officials_analysis.competition_type id for loaded rows. "
-            "Default inference: International=17, ISU World Championships=15, other ISU=16."
+            "Default inference: International=17, ISU Championships/Olympics=15, other ISU=16."
         ),
     )
     p.add_argument(
@@ -714,6 +991,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--verbose", action="store_true", help="Verbose scraper logs with --load.")
     p.add_argument("--log-file", default=None, help="Optional DEBUG log file for --load.")
+    p.add_argument(
+        "--write-failures",
+        action="store_true",
+        help=(
+            "Write failed competitions to a CSV file. "
+            "Default path: <output-stem>_failures.csv (or isu_competition_failures.csv)."
+        ),
+    )
+    p.add_argument(
+        "--failures-output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "CSV path for failed competitions (implies --write-failures). "
+            "Discovery misses and load errors are included."
+        ),
+    )
+    p.add_argument(
+        "--no-failures-file",
+        action="store_true",
+        help="Do not write a failures CSV (stderr summary still printed).",
+    )
     return p.parse_args(argv)
 
 
@@ -722,16 +1021,17 @@ def main(argv: list[str] | None = None) -> int:
     session = _session()
     try:
         seasons = parse_seasons_arg(args.seasons, session, args.timeout, args.year)
+        disciplines = parse_disciplines_arg(args.disciplines)
         event_levels = parse_event_levels_arg(args.event_levels)
         rows = collect_result_rows(
             session,
             seasons,
+            disciplines=disciplines,
             event_levels=event_levels,
             year=args.year,
             pagesize=args.pagesize,
             timeout=args.timeout,
             delay=args.delay,
-            include_missing=args.include_missing,
             limit=args.limit,
             start_offset=args.start_offset,
             quiet=args.quiet,
@@ -739,7 +1039,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         session.close()
 
-    write_csv(args.output, rows)
+    csv_rows = rows if args.include_missing else [r for r in rows if r.status == "found"]
+    write_csv(args.output, csv_rows)
     found = sum(1 for row in rows if row.status == "found")
     missing = sum(1 for row in rows if row.status == "missing")
     if not args.quiet:
@@ -748,8 +1049,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    all_failures: list[dict[str, str]] = discovery_failures(rows)
+    load_failures: list[dict[str, str]] = []
+
     if args.load or args.dry_run:
-        loaded, planned = load_rows(
+        loaded, planned, load_failures = load_rows(
             rows,
             dry_run=args.dry_run,
             metadata_only=args.metadata_only,
@@ -760,11 +1064,28 @@ def main(argv: list[str] | None = None) -> int:
             default_competition_type_id=args.officials_analysis_competition_type_id,
             delay=args.delay,
         )
+        all_failures.extend(load_failures)
         if not args.quiet:
             action = "planned" if args.dry_run else "loaded"
             print(f"{action} {loaded or planned} competitions", file=sys.stderr)
+            if load_failures:
+                print(
+                    f"load failures: {len(load_failures)} of {planned} planned",
+                    file=sys.stderr,
+                )
 
-    return 0
+    failures_path = resolve_failures_output_path(args)
+    if failures_path is not None:
+        n = write_failures_csv(failures_path, all_failures)
+        if not args.quiet:
+            print(
+                f"wrote {n} failure row(s) to {failures_path}",
+                file=sys.stderr,
+            )
+
+    print_failures_summary(all_failures, failures_path=failures_path)
+
+    return 1 if all_failures else 0
 
 
 if __name__ == "__main__":

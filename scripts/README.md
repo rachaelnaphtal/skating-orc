@@ -272,6 +272,24 @@ python scripts/load_isu_figure_skating_results.py \
 
 `--year` filters by event start date and queries the two overlapping ISU seasons, e.g. `2024/2025` and `2025/2026` for calendar year 2025. Use `--event-levels International` for only international competitions, or `--event-levels All` as shorthand for `ISU,International`.
 
+**Disciplines** (default: figure skating only):
+
+```bash
+# Figure + synchronized skating in one CSV
+python scripts/load_isu_figure_skating_results.py --disciplines All -o isu_all.csv
+
+# Synchronized only
+python scripts/load_isu_figure_skating_results.py --disciplines synchronized -o isu_synchro.csv
+```
+
+**Failed competitions file** (optional; stderr summary always prints):
+
+```bash
+python scripts/load_isu_figure_skating_results.py -o isu_results.csv --write-failures
+# or explicit path:
+python scripts/load_isu_figure_skating_results.py -o isu_results.csv --failures-output toLoad/isu_failures.csv
+```
+
 **Preview database loads without writing:**
 
 ```bash
@@ -300,11 +318,12 @@ Database load behavior:
 - `competition.results_url` uses `normalized_results_url`, with `/index.htm` or `/index.asp` stripped.
 - `start_date`, `end_date`, and `location` come from ISU API event metadata.
 - `competition.international` is set to `true` for every row loaded by this script.
-- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU events whose name contains `World Championships` use type `15`; all other ISU events use type `16`.
+- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU Championship-tier events (Worlds, World Junior, Europeans, Four Continents, World Synchro, Olympic Games) use type `15`; all other ISU events use type `16`.
+- Failed competitions (no Detailed Results URL, or load errors) are listed at the end. Use `--write-failures` or `--failures-output PATH` to save them to CSV (`--no-failures-file` disables the file).
 - `qualifying` and `nqs` are set to `false` for these international type IDs. Add `--officials-analysis-competition-type-id ID` only if every loaded row should override the inferred type.
 - Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`.
 
-CSV columns include `season`, `season_year`, `event_level`, `officials_analysis_competition_type_id`, `international`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
+CSV columns include `discipline_title`, `season`, `season_year`, `event_level`, `officials_analysis_competition_type_id`, `international`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
 
 ---
 

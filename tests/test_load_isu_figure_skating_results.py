@@ -5,8 +5,10 @@ from scripts.load_isu_figure_skating_results import (
     inferred_competition_type_id,
     extract_detailed_results_url,
     is_fsm_results_url,
+    is_isu_championship_event,
     is_world_championship_event,
     normalize_results_base_url,
+    parse_disciplines_arg,
     parse_event_levels_arg,
     parse_seasons_arg,
     season_year_from_title,
@@ -81,6 +83,24 @@ def test_seasons_for_calendar_year_uses_overlapping_isu_seasons():
     ]
 
 
+def test_parse_disciplines_arg():
+    from scripts.load_isu_figure_skating_results import (
+        DISCIPLINE_FIGURE_SKATING,
+        DISCIPLINE_SYNCHRONIZED_SKATING,
+    )
+
+    assert parse_disciplines_arg(None) == (DISCIPLINE_FIGURE_SKATING,)
+    assert parse_disciplines_arg("All") == (
+        DISCIPLINE_FIGURE_SKATING,
+        DISCIPLINE_SYNCHRONIZED_SKATING,
+    )
+    assert parse_disciplines_arg("synchronized") == (DISCIPLINE_SYNCHRONIZED_SKATING,)
+    assert parse_disciplines_arg("figure,synchro") == (
+        DISCIPLINE_FIGURE_SKATING,
+        DISCIPLINE_SYNCHRONIZED_SKATING,
+    )
+
+
 def test_parse_event_levels_arg():
     assert parse_event_levels_arg(None) == ("ISU",)
     assert parse_event_levels_arg("ISU,International") == ("ISU", "International")
@@ -99,6 +119,30 @@ def test_inferred_competition_type_id():
         == 15
     )
     assert inferred_competition_type_id("ISU", "ISU Grand Prix Final 2025") == 16
+    assert (
+        inferred_competition_type_id(
+            "ISU",
+            "Four Continents Championships 2026",
+            "ISU Four Continents Figure Skating Championships",
+        )
+        == 15
+    )
+    assert (
+        inferred_competition_type_id(
+            "ISU",
+            "ISU European Figure Skating Championships 2026",
+            event_sub_type_name="ISU European Figure Skating Championships",
+        )
+        == 15
+    )
+    assert (
+        inferred_competition_type_id(
+            "ISU",
+            "Olympic Winter Games 2026 Figure Skating",
+            "Olympic Games",
+        )
+        == 15
+    )
 
 
 def test_international_competition_type_flags_are_not_domestic_qualifying():
@@ -107,10 +151,42 @@ def test_international_competition_type_flags_are_not_domestic_qualifying():
     assert competition_load_flags_from_officials_type_id(17) == (False, False, True)
 
 
-def test_world_championship_detection():
+def test_isu_championship_detection_by_subtype():
+    assert is_isu_championship_event(
+        "Any display name",
+        "ISU Four Continents Figure Skating Championships",
+    )
+    assert is_isu_championship_event(
+        "ISU Figure Skating Four Continents Championships 2026",
+        "Four Continents Championships",
+    )
+    assert is_isu_championship_event(
+        "ISU Figure Skating World Championships 2026",
+        "World Championships",
+    )
+    assert is_isu_championship_event(
+        "ISU Figure Skating European Championships 2026",
+        "European Championships",
+    )
+    assert is_isu_championship_event(
+        "ISU Figure Skating Junior World Championships 2026",
+        "World Junior Championships",
+    )
+    assert is_isu_championship_event(
+        "Olympic Winter Games 2026 Figure Skating",
+        "Olympic Games",
+    )
+    assert not is_isu_championship_event(
+        "ISU Grand Prix Final 2025",
+        "ISU Grand Prix",
+    )
+
+
+def test_world_championship_detection_name_fallback():
     assert is_world_championship_event("ISU Figure Skating World Championships 2026")
-    assert not is_world_championship_event(
-        "ISU Figure Skating World Junior Championships 2026"
+    assert is_isu_championship_event(
+        "ISU Figure Skating World Junior Championships 2026",
+        "",
     )
 
 
