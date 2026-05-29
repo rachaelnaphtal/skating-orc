@@ -102,9 +102,9 @@ def test_inferred_competition_type_id():
 
 
 def test_international_competition_type_flags_are_not_domestic_qualifying():
-    assert competition_load_flags_from_officials_type_id(15) == (False, False)
-    assert competition_load_flags_from_officials_type_id(16) == (False, False)
-    assert competition_load_flags_from_officials_type_id(17) == (False, False)
+    assert competition_load_flags_from_officials_type_id(15) == (False, False, True)
+    assert competition_load_flags_from_officials_type_id(16) == (False, False, True)
+    assert competition_load_flags_from_officials_type_id(17) == (False, False, True)
 
 
 def test_world_championship_detection():

@@ -2067,6 +2067,7 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
         "start_date",
         "end_date",
         "qualifying",
+        "international",
         "segment_id",
         "segment_name",
         "discipline",
@@ -2085,6 +2086,7 @@ def get_official_segment_official_activity_detail(official_id: int) -> pd.DataFr
             c.start_date,
             c.end_date,
             COALESCE(c.qualifying, false) AS qualifying,
+            COALESCE(c.international, false) AS international,
             s.id AS segment_id,
             s.name AS segment_name,
             dt.name AS discipline,
@@ -2216,8 +2218,10 @@ def count_official_segment_competitions_batch(
     segment_discipline_type_ids: tuple[int, ...] | None = None,
 ) -> dict[int, int]:
     """
-    Distinct ``public.competition`` rows per directory official from ``segment_official``
-    (same attribution as :func:`get_official_segment_official_activity_detail`).
+    Distinct ``public.competition`` rows per directory official from ``segment_official``.
+
+    Only rows with ``segment_official.official_id`` set (linked at ingest) are counted;
+    name-only protocol rows without a directory link are ignored.
 
     Includes qualifying and nonqualifying competitions whose ``competition.year`` is a
     USFS season code in ``season_year_codes`` (e.g. 2526) **or** a matching 4-digit
@@ -2259,28 +2263,13 @@ def count_official_segment_competitions_batch(
     stmt = (
         text(
             f"""
-            SELECT attrib.directory_official_id AS official_id,
+            SELECT so.official_id AS official_id,
                    COUNT(DISTINCT c.id) AS n_competitions
             FROM public.segment_official so
             INNER JOIN public.segment s ON s.id = so.segment_id
             INNER JOIN public.competition c ON c.id = s.competition_id
-            CROSS JOIN LATERAL (
-              SELECT COALESCE(
-                CASE WHEN so.official_id IN :official_ids THEN so.official_id END,
-                (
-                  SELECT MIN(jol.official_id)
-                  FROM public.judge_official_link jol
-                  INNER JOIN public.judge j ON j.id = jol.judge_id
-                  WHERE jol.status = 'linked'
-                    AND jol.official_id IN :official_ids
-                    AND jol.official_id IS NOT NULL
-                    AND so.official_name IS NOT NULL
-                    AND lower(btrim(j.name)) = lower(btrim(so.official_name))
-                )
-              ) AS directory_official_id
-            ) AS attrib
-            WHERE attrib.directory_official_id IS NOT NULL
-{_segment_competition_year_sql_predicate()}{role_clauses}            GROUP BY attrib.directory_official_id
+            WHERE so.official_id IN :official_ids
+{_segment_competition_year_sql_predicate()}{role_clauses}            GROUP BY so.official_id
             """
         )
         .bindparams(*bind_params)

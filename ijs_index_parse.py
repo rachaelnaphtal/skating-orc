@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 from bs4 import BeautifulSoup
+
+_EU_DOT_DATE_RANGE_RE = re.compile(
+    r"(\d{1,2}\.\d{1,2}\.\d{4})\s*-\s*(\d{1,2}\.\d{1,2}\.\d{4})"
+)
+_EU_DOT_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
 
 _SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b")
 
@@ -155,3 +160,79 @@ def ijs_index_start_end_and_location(
         start_date, end_date = infer_ijs_index_dates_from_day_sort_table(soup, page_url)
     location = ijs_index_location_from_h3_texts(h3_texts)
     return start_date, end_date, location
+
+
+def _parse_eu_dot_date(text: str) -> date | None:
+    s = " ".join(str(text or "").split())
+    m = _EU_DOT_DATE_RE.search(s)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(
+            f"{int(m.group(1))}.{int(m.group(2))}.{int(m.group(3))}",
+            "%d.%m.%Y",
+        ).date()
+    except ValueError:
+        return None
+
+
+def _parse_mdy_slash_or_compact(text: str) -> date | None:
+    """US ``M/D/YY(YY)`` or ``M/D/YYYY`` in FSM ``caption3`` cells."""
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return None
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def swiss_timing_index_start_end_and_location(
+    soup: BeautifulSoup, page_url: str = ""
+) -> tuple[date | None, date | None, str | None]:
+    """
+    Swiss Timing event pages (ISU ``results.isu.org``, USFS FSM ``index.htm``, etc.).
+
+    Dates: ``DD.MM.YYYY - DD.MM.YYYY`` in page text, else USFS ``tr.caption3`` rows.
+    Location: first ``caption3`` line with `` / ``, else non-date ``caption3`` text.
+    """
+    _ = page_url
+    start_date: date | None = None
+    end_date: date | None = None
+    location: str | None = None
+
+    page_text = soup.get_text(" ", strip=True)
+    m = _EU_DOT_DATE_RANGE_RE.search(page_text)
+    if m:
+        start_date = _parse_eu_dot_date(m.group(1))
+        end_date = _parse_eu_dot_date(m.group(2))
+
+    caption_rows = soup.find_all("tr", class_="caption3")
+    if caption_rows:
+        td = caption_rows[0].find("td")
+        raw = (td.get_text() if td else "").strip()
+        if not start_date or not end_date:
+            parts = [p.strip() for p in raw.replace(" ", "").split("-") if p.strip()]
+            if len(parts) >= 2:
+                start_date = start_date or _parse_mdy_slash_or_compact(parts[0])
+                end_date = end_date or _parse_mdy_slash_or_compact(parts[1])
+            elif len(parts) == 1:
+                d = _parse_mdy_slash_or_compact(parts[0])
+                start_date = start_date or d
+                end_date = end_date or d
+        if not location and raw and " / " in raw:
+            location = raw
+        elif not location and raw and not _EU_DOT_DATE_RANGE_RE.search(raw):
+            location = raw
+
+    if not location:
+        for td in soup.find_all("td", class_="caption3"):
+            t = " ".join(td.get_text().split())
+            if t and " / " in t and not _EU_DOT_DATE_RANGE_RE.search(t):
+                location = t
+                break
+
+    loc_out = (location or "").strip() or None
+    return start_date, end_date, loc_out

@@ -158,14 +158,10 @@ def _discipline_id_int(discipline_id):
 
 
 def _judging_results_index_url(url: str) -> str:
-    """Ensure IJS results base URL opens the index page (…/index.asp)."""
-    u = (url or "").strip()
-    if not u:
-        return u
-    u = u.rstrip("/")
-    if u.lower().endswith("index.asp"):
-        return u
-    return f"{u}/index.asp"
+    """IJS results page URL for links (see ``ijs_results_urls.results_page_url``)."""
+    from ijs_results_urls import results_page_url
+
+    return results_page_url(url) or ""
 
 
 def _segment_official_disciplines_summary(series: pd.Series) -> str:
@@ -280,7 +276,7 @@ def _render_additional_segment_activity_slice(
             "results_url": st.column_config.LinkColumn(
                 "Results",
                 display_text="Open",
-                help="IJS results index (index.asp) for this competition.",
+                help="IJS competition results page (classic index.asp or FSM entry URL).",
             ),
         },
     )
@@ -1882,12 +1878,19 @@ if report_mode == REPORT_PERSON_ASSIGNMENTS:
         "full record of activity; non-qualifying competitions in particular are non-exhaustive."
     )
     if panel_detail.empty:
-        qual_detail = panel_detail
-        nonqual_detail = panel_detail
+        intl_detail = qual_detail = nonqual_detail = panel_detail
     else:
-        is_qualifying = panel_detail["qualifying"].fillna(False).astype(bool)
-        qual_detail = panel_detail[is_qualifying]
-        nonqual_detail = panel_detail[~is_qualifying]
+        is_intl = panel_detail["international"].fillna(False).astype(bool)
+        intl_detail = panel_detail[is_intl]
+        domestic = panel_detail[~is_intl]
+        is_qualifying = domestic["qualifying"].fillna(False).astype(bool)
+        qual_detail = domestic[is_qualifying]
+        nonqual_detail = domestic[~is_qualifying]
+    _render_additional_segment_activity_slice(
+        intl_detail,
+        section_subheader="International Activity",
+        expander_widget_key="person_seg_official_intl_exp",
+    )
     _render_additional_segment_activity_slice(
         qual_detail,
         section_subheader="Additional Qualifying Activity",

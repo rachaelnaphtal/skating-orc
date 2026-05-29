@@ -9,8 +9,9 @@ the **Load Competition** page in ``analysis_app.py`` (segments, scores, official
 **Metadata-only** — ``--metadata-only`` only upserts ``public.competition`` (shell row +
 dates/location/name); no segment/score ingest.
 
-URL handling matches the rest of the repo: ``competition.results_url`` is the **base**
-URL without ``/index.asp`` or ``/index.htm``.
+URL handling matches the rest of the repo: ``competition.results_url`` is the full
+results entry URL (typically ending in ``/index.asp`` for classic events). FSM events
+are any URL that does not end with ``/index.asp`` (no assumed ``/index.htm``).
 
 Required CSV columns (discover script):
 
@@ -79,17 +80,10 @@ from ijs_scrape_log import (  # noqa: E402
 )
 
 
-def normalize_ijs_results_base_url(url: str) -> str:
-    u = (url or "").strip()
-    if not u:
-        return u
-    lower = u.lower()
-    for suffix in ("/index.asp", "/index.htm"):
-        if lower.endswith(suffix):
-            u = u[: -len(suffix)]
-            lower = u.lower()
-            break
-    return u.rstrip("/")
+from ijs_results_urls import (  # noqa: E402
+    is_fsm_results_url,
+    results_url_for_storage,
+)
 
 
 def parse_mdy_or_iso(s: str) -> date | None:
@@ -144,7 +138,7 @@ def row_ok_for_load(row: dict[str, str]) -> bool:
         return False
     if not str(row.get("competition_name", "")).strip():
         return False
-    url = normalize_ijs_results_base_url(str(row.get("url", "")))
+    url = results_url_for_storage(str(row.get("url", "")))
     if not url:
         return False
     return True
@@ -171,15 +165,21 @@ def _resolved_oa_type_id(row: dict[str, str], cli_default: int | None) -> int | 
 
 def _flags_for_row(
     row: dict[str, str], oa_id: int
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
+    q0, n0, i0 = competition_load_flags_from_officials_type_id(oa_id)
+    if i0:
+        return False, False, True
     q_raw = row.get("qualifying")
     n_raw = row.get("nqs")
     q = parse_bool_cell(q_raw) if q_raw is not None and str(q_raw).strip() != "" else None
     n = parse_bool_cell(n_raw) if n_raw is not None and str(n_raw).strip() != "" else None
     if q is not None and n is not None:
-        return q, n
-    q0, n0 = competition_load_flags_from_officials_type_id(oa_id)
-    return q if q is not None else q0, n if n is not None else n0
+        return q, n, False
+    return (
+        q if q is not None else q0,
+        n if n is not None else n0,
+        False,
+    )
 
 
 def _parse_csv_choices(arg: str, choices: tuple[str, ...], label: str) -> tuple[str, ...]:
@@ -374,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         for r in eligible:
-            base = normalize_ijs_results_base_url(r["url"])
+            base = results_url_for_storage(r["url"])
             name = str(r.get("competition_name", "")).strip()[:60]
             sy = _resolved_season_year(r, args.season_year)
             if args.metadata_only:
@@ -394,27 +394,23 @@ def main(argv: list[str] | None = None) -> int:
         errors: list[str] = []
 
         for r in eligible:
-            base_url = normalize_ijs_results_base_url(r["url"])
+            base_url = results_url_for_storage(r["url"])
             sy = _resolved_season_year(r, args.season_year)
             name = str(r.get("competition_name", "")).strip()
             location = str(r.get("location", "")).strip() or None
             start_d = parse_mdy_or_iso(str(r.get("start_date", "")))
             end_d = parse_mdy_or_iso(str(r.get("end_date", "")))
 
+            type_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
+            qualifying, nqs, international = competition_load_flags_from_officials_type_id(
+                type_id
+            )
             q_col = r.get("qualifying")
             n_col = r.get("nqs")
-            qualifying = (
-                parse_bool_cell(q_col)
-                if q_col is not None and str(q_col).strip() != ""
-                else args.default_qualifying
-            )
-            nqs = (
-                parse_bool_cell(n_col)
-                if n_col is not None and str(n_col).strip() != ""
-                else args.default_nqs
-            )
-
-            type_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
+            if q_col is not None and str(q_col).strip() != "":
+                qualifying = parse_bool_cell(q_col)
+            if n_col is not None and str(n_col).strip() != "":
+                nqs = parse_bool_cell(n_col)
 
             try:
                 loader.insert_competition(
@@ -423,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
                     sy,
                     qualifying=qualifying,
                     nqs=nqs,
+                    international=international,
                     officials_analysis_competition_type_id=type_id,
                 )
                 loader.updateCompetition(
@@ -433,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                     name=name,
                     qualifying=qualifying,
                     nqs=nqs,
+                    international=international,
                     officials_analysis_competition_type_id=type_id,
                     update_officials_competition_type=type_id is not None,
                 )
@@ -466,14 +464,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for i, r in enumerate(eligible, start=1):
             raw_url = str(r.get("url", "")).strip()
-            base_url = normalize_ijs_results_base_url(raw_url)
+            stored_url = results_url_for_storage(raw_url)
             name = str(r.get("competition_name", "")).strip()
             sy = _resolved_season_year(r, args.season_year)
             oa_id = _resolved_oa_type_id(r, args.officials_analysis_competition_type_id)
             assert oa_id is not None
-            qualifying, nqs = _flags_for_row(r, oa_id)
+            qualifying, nqs, international = _flags_for_row(r, oa_id)
 
-            isFSM = not raw_url.strip().endswith("index.asp")
+            isFSM = is_fsm_results_url(stored_url)
 
             competition_metadata = {
                 "start_date": parse_mdy_or_iso(str(r.get("start_date", ""))),
@@ -482,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
             }
 
             scrape_kw: dict = dict(
-                base_url=base_url,
+                base_url=stored_url,
                 report_name=name,
                 event_regex=event_regex,
                 only_rule_errors=args.only_rule_errors,
@@ -496,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
                 isFSM=isFSM,
                 qualifying=qualifying,
                 nqs=nqs,
+                international=international,
                 officials_analysis_competition_type_id=oa_id,
                 update_officials_competition_type=True,
                 http_session=http_session,

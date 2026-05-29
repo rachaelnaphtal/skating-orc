@@ -44,9 +44,9 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from officials_competition_types import (  # noqa: E402
-    OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL,
-    OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER,
-    OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS,
+    OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION,
+    OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP,
+    OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION,
 )
 
 
@@ -321,10 +321,10 @@ def is_world_championship_event(event_name: str) -> bool:
 
 def inferred_competition_type_id(event_level: str, event_name: str) -> int:
     if event_level == "International":
-        return OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL
+        return OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION
     if is_world_championship_event(event_name):
-        return OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS
-    return OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER
+        return OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP
+    return OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION
 
 
 def competition_type_id_for_row(
@@ -570,12 +570,12 @@ def load_rows(
         for row in planned:
             if not quiet:
                 print(f"load: {row.event_name}", file=sys.stderr)
-            qualifying = None
-            nqs = None
             start_date = _parse_iso_date(row.start_date)
             end_date = _parse_iso_date(row.end_date)
             type_id = competition_type_id_for_row(row, default_competition_type_id)
-            qualifying, nqs = competition_load_flags_from_officials_type_id(type_id)
+            qualifying, nqs, international = competition_load_flags_from_officials_type_id(
+                type_id
+            )
             if metadata_only:
                 db_loader.insert_competition(
                     row.event_name,
@@ -584,7 +584,7 @@ def load_rows(
                     qualifying=qualifying,
                     nqs=nqs,
                     officials_analysis_competition_type_id=type_id,
-                    international=row.international,
+                    international=international,
                 )
                 db_loader.updateCompetition(
                     row.normalized_results_url,
@@ -596,7 +596,7 @@ def load_rows(
                     nqs=nqs,
                     officials_analysis_competition_type_id=type_id,
                     update_officials_competition_type=True,
-                    international=row.international,
+                    international=international,
                 )
                 db_session.commit()
             else:
@@ -612,7 +612,7 @@ def load_rows(
                     nqs=nqs,
                     officials_analysis_competition_type_id=type_id,
                     update_officials_competition_type=True,
-                    international=row.international,
+                    international=international,
                     http_session=http_session,
                     db_session=db_session,
                     database_loader=db_loader,

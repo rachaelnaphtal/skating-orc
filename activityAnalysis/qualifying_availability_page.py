@@ -20,6 +20,9 @@ try:
         apply_choice_param,
         slug_map_for_labels,
     )
+    from activityAnalysis.qualifying_availability_ingest import (
+        build_qualifying_form_response_view,
+    )
     from activityAnalysis.qualifying_form_store import (
         QUALIFYING_COMPETITION_GROUP_OPTIONS,
         build_qualifying_availability_report,
@@ -46,6 +49,7 @@ except ModuleNotFoundError:
         apply_choice_param,
         slug_map_for_labels,
     )
+    from qualifying_availability_ingest import build_qualifying_form_response_view
     from qualifying_form_store import (
         QUALIFYING_COMPETITION_GROUP_OPTIONS,
         build_qualifying_availability_report,
@@ -145,7 +149,7 @@ def _report_level_options(sub_crit: pd.DataFrame) -> list[str]:
 
 
 _WRAP_REPORT_COLUMNS = frozenset(
-    {"Directory appointments", "Notes", "Role priority"}
+    {"Directory appointments", "Notes", "Conflicts", "Role priority"}
 )
 # In the on-screen table only (still included in CSV download).
 _SCREEN_HIDE_COLUMNS: tuple[str, ...] = ("Email",)
@@ -154,10 +158,12 @@ _SCREEN_HIDE_COLUMNS: tuple[str, ...] = ("Email",)
 _COMPACT_HIDE_COLUMNS: tuple[str, ...] = (
     "Directory appointments",
     "Notes",
+    "Conflicts",
     "Role priority",
 )
 _NUMERIC_REPORT_COLUMNS = frozenset(
     {
+        "Appointment year",
         "Last champs (in role)",
         "Last sectionals (in role)",
         "Last champs (overall)",
@@ -224,19 +230,28 @@ def _availability_report_html_table(
     )
 
 
-def _availability_report_table_css(scroll_height_px: int) -> str:
+def _availability_report_table_css(
+    *,
+    filter_bar_height_px: int,
+    table_scroll_height_px: int,
+) -> str:
     """CSS for iframe table; scroll container must be the wrap div for sticky ``thead``."""
     return f"""
 <style>
 html, body {{
   margin: 0;
   padding: 0;
-  height: 100%;
   overflow: hidden;
+  box-sizing: border-box;
+}}
+*, *::before, *::after {{
+  box-sizing: inherit;
 }}
 #qual-name-filter-bar {{
-  margin: 0 0 0.5rem 0;
-  padding: 0.25rem 0;
+  height: {int(filter_bar_height_px)}px;
+  margin: 0;
+  padding: 0.35rem 0.5rem 0.5rem 0.5rem;
+  overflow: hidden;
 }}
 #qual-name-filter-bar label {{
   display: block;
@@ -248,13 +263,12 @@ html, body {{
   max-width: 24rem;
   padding: 0.35rem 0.5rem;
   font-size: 0.9rem;
-  box-sizing: border-box;
 }}
 #qual-availability-report-wrap {{
-  height: 100%;
-  max-height: {int(scroll_height_px)}px;
+  height: {int(table_scroll_height_px)}px;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
+  padding: 0 0.5rem 1rem 0.5rem;
 }}
 #qual-availability-report {{
   width: 100%;
@@ -355,6 +369,94 @@ _SORTABLE_TABLE_SCRIPT = """
 """
 
 
+def _render_form_response_field_table(rows: list[tuple[str, str]]) -> None:
+    if not rows:
+        return
+    st.dataframe(
+        pd.DataFrame(rows, columns=["Question", "Response"]),
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _render_form_response_longtext_fields(
+    rows: list[tuple[str, str]],
+) -> None:
+    for field, value in rows:
+        st.markdown(f"**{html.escape(field)}**")
+        st.text(value)
+
+
+def _render_official_form_response(payload: dict) -> None:
+    """Readable sections instead of raw ``response_json``."""
+    view = build_qualifying_form_response_view(payload)
+    shown = False
+
+    if view["meta"]:
+        st.markdown("#### Response info")
+        _render_form_response_field_table(view["meta"])
+        shown = True
+    if view["identity"]:
+        st.markdown("#### Contact")
+        _render_form_response_field_table(view["identity"])
+        shown = True
+    if view["opt_out"]:
+        st.markdown("#### Qualifying opt-out")
+        _render_form_response_field_table(view["opt_out"])
+        shown = True
+    if view["form_roles"]:
+        st.markdown("#### Roles checked on form")
+        _render_form_response_field_table(view["form_roles"])
+        shown = True
+    if view["role_priority"]:
+        st.markdown("#### Role priority (1 = highest)")
+        _render_form_response_field_table(view["role_priority"])
+        shown = True
+
+    comp_df = view["competitions"]
+    if comp_df is not None and not comp_df.empty:
+        st.markdown("#### Competition availability")
+        st.dataframe(comp_df, hide_index=True, width="stretch")
+        shown = True
+
+    if view["conflicts"]:
+        st.markdown("#### Conflicts")
+        _render_form_response_longtext_fields(view["conflicts"])
+        shown = True
+    if view["notes"]:
+        st.markdown("#### Notes")
+        _render_form_response_longtext_fields(view["notes"])
+        shown = True
+    if view["other"]:
+        st.markdown("#### Other responses")
+        _render_form_response_field_table(view["other"])
+        shown = True
+
+    if not shown:
+        st.info("No displayable answers in the stored form response.")
+
+
+def _availability_report_iframe_heights(
+    row_count: int,
+    *,
+    compact: bool = False,
+) -> tuple[int, int, int]:
+    """
+    Return (filter_bar_px, table_scroll_px, iframe_px) for the sortable report iframe.
+
+    Uses explicit pixel heights so the table region does not collapse inside ``st.iframe``
+    (flex + ``min-height: 0`` often leaves only one or two visible rows).
+    """
+    row_h = 24 if compact else 34
+    thead_h = 40
+    filter_bar_h = 76
+    n = max(int(row_count), 1)
+    # Visible viewport for the table body; cap height and scroll within the wrap div.
+    table_scroll_h = min(680, max(280, thead_h + n * row_h + 20))
+    iframe_h = filter_bar_h + table_scroll_h
+    return filter_bar_h, table_scroll_h, iframe_h
+
+
 def _render_sortable_availability_table(
     display_df: pd.DataFrame,
     *,
@@ -362,10 +464,15 @@ def _render_sortable_availability_table(
     compact: bool = False,
 ) -> None:
     """Sortable, wrapping HTML table (``st.dataframe`` does not wrap long text well)."""
-    row_h = 22 if compact else 30
-    est_h = min(820, max(160, 100 + len(display_df) * row_h))
+    filter_bar_h, table_scroll_h, iframe_h = _availability_report_iframe_heights(
+        len(display_df),
+        compact=compact,
+    )
     payload = (
-        _availability_report_table_css(est_h)
+        _availability_report_table_css(
+            filter_bar_height_px=filter_bar_h,
+            table_scroll_height_px=table_scroll_h,
+        )
         + "<div id='qual-name-filter-bar'>"
         + "<label for='qual-name-filter'>Search name</label>"
         + "<input type='search' id='qual-name-filter' "
@@ -378,7 +485,7 @@ def _render_sortable_availability_table(
         + "</div>"
         + _SORTABLE_TABLE_SCRIPT
     )
-    st.iframe(payload, height=est_h)
+    st.iframe(payload, height=iframe_h)
 
 
 def render_qualifying_availability_page(
@@ -839,8 +946,8 @@ def render_qualifying_availability_page(
     if in_role_at_id is None:
         st.caption(
             "Select a specific **appointment type** and **discipline** (not "
-            f"``{QUALIFYING_ALL_LABEL}``) to fill **Last champs/sectionals (in role)** "
-            "and **Total comps (2 yr, in role)**."
+            f"``{QUALIFYING_ALL_LABEL}``) to fill **Appointment year**, "
+            "**Last champs/sectionals (in role)**, and **Total comps (2 yr, in role)**."
         )
     season_codes = meta.get("other_comp_season_codes") or []
     if season_codes:
@@ -856,13 +963,12 @@ def render_qualifying_availability_page(
         )
         st.caption(
             f"**Total comps (2 yr)** counts distinct competitions from IJS protocol data "
-            f"(``segment_official``) with USFS season **{codes}**{cal_part} on "
-            "``competition.year``, same source as **Additional Qualifying / "
-            "Nonqualifying Activity** on the per-person report. "
             + (
-                "**Total comps (2 yr, in role)** uses the same seasons but only panels "
-                "matching the selected appointment type and discipline. "
-                if meta.get("show_total_comps_in_role")
+                "**Appointment year** is the year of the most recent active directory "
+                "appointment (achieved date, else appointed) for the selected type and "
+                "discipline. **Total comps (2 yr, in role)** counts linked protocol panels "
+                "for that role and discipline in the same seasons. "
+                if meta.get("show_in_role_columns")
                 else ""
             )
             + "Click a name to open **Per-person assignments**."
@@ -870,10 +976,10 @@ def render_qualifying_availability_page(
 
     n_crit = meta.get("criteria_count", len(criteria_filters))
     show_detail_columns = st.checkbox(
-        "Show directory appointments, notes, and role priority",
+        "Show directory appointments, notes, conflicts, and role priority",
         value=True,
         key="qual_report_show_detail_columns",
-        help="Uncheck for a compact table without the three wide columns at the end.",
+        help="Uncheck for a compact table without the wide columns at the end.",
     )
     st.caption(
         f"**{len(report_df)}** officials · **{n_crit}** criterion row(s) in this view · "
@@ -882,7 +988,7 @@ def render_qualifying_availability_page(
         + (
             ""
             if show_detail_columns
-            else " · compact view (appointments, notes, and role priority hidden)"
+            else " · compact view (appointments, notes, conflicts, and role priority hidden)"
         )
     )
     name_ids = report_df["official_id"].astype(int)
@@ -909,7 +1015,9 @@ def render_qualifying_availability_page(
         oid = int(report_df.loc[report_df["Name"] == pick_name, "official_id"].iloc[0])
         payload = get_official_form_response(pick_form_id, oid)
         if payload:
-            st.json(payload)
+            _render_official_form_response(payload)
+            with st.expander("Raw JSON (debug)", expanded=False):
+                st.json(payload)
         else:
             st.info("No stored form response for this official.")
     on_stop()

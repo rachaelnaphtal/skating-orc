@@ -226,6 +226,22 @@ def _header_is_qualifying_notes_column(header: str) -> bool:
     return False
 
 
+def _header_is_qualifying_conflicts_list_column(header: str) -> bool:
+    """``List of Conflicts`` (or truncated ``List of Conf…``) on the availability form."""
+    cl = header.strip().lower()
+    if cl.startswith("list of conf"):
+        return True
+    return "list of" in cl and "conflict" in cl
+
+
+def _header_is_qualifying_conflicts_upload_column(header: str) -> bool:
+    """``Upload List`` — second conflicts field on the availability form."""
+    cl = header.strip().lower()
+    if cl == "upload list":
+        return True
+    return "upload" in cl and "list" in cl and "conflict" in cl
+
+
 # Short headers for “rank your roles” grid (not “Judge - Singles and Pairs” checkboxes).
 _FORM_ROLE_PRIORITY_HEADERS = frozenset(
     {
@@ -335,6 +351,40 @@ def extract_qualifying_form_notes(response_json: dict[str, Any]) -> str:
         if text:
             parts.append(text)
     return "\n\n".join(parts)
+
+
+def _conflicts_cell_text(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def extract_qualifying_form_conflicts(response_json: dict[str, Any]) -> str:
+    """
+    Concatenate **List of Conflicts** and **Upload List** from a stored form row.
+
+    List-of-conflicts text comes first, then upload list, separated by a blank line when
+    both are present.
+    """
+    list_parts: list[str] = []
+    upload_parts: list[str] = []
+    for key in sorted(response_json.keys()):
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        text = _conflicts_cell_text(response_json.get(key))
+        if not text:
+            continue
+        if _header_is_qualifying_conflicts_list_column(key):
+            list_parts.append(text)
+        elif _header_is_qualifying_conflicts_upload_column(key):
+            upload_parts.append(text)
+    chunks: list[str] = []
+    if list_parts:
+        chunks.append("\n\n".join(list_parts))
+    if upload_parts:
+        chunks.append("\n\n".join(upload_parts))
+    return "\n\n".join(chunks)
 
 
 def row_opts_out_all_qualifying(row: pd.Series) -> bool:
@@ -735,4 +785,196 @@ def melt_competition_availability(
     long = slim.melt(id_vars=[mcol], var_name="competition_prompt", value_name="raw_availability")
     long.rename(columns={mcol: "member_number"}, inplace=True)
     return long
+
+
+def format_form_response_display_value(value: object) -> str:
+    """Human-readable cell value for form response display (not raw JSON)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        if value in (0, 1):
+            return "Yes" if value else "No"
+    if isinstance(value, (list, tuple, set)):
+        parts = [format_form_response_display_value(v) for v in value]
+        joined = "; ".join(p for p in parts if p and p != "—")
+        return joined or "—"
+    text = str(value).strip()
+    return text or "—"
+
+
+def availability_cell_display_label(value: object) -> str:
+    """Short label for a per-competition availability answer."""
+    code = normalize_qualifying_availability_cell(value)
+    labels = {
+        "available": "Available",
+        "not_available": "Not available",
+        "does_not_apply": "Does not apply",
+        "no_response": "No response",
+    }
+    if code in labels and code != "unknown":
+        return labels[code]
+    return format_form_response_display_value(value)
+
+
+def _header_is_identity_column(header: str) -> bool:
+    cl = header.strip().lower()
+    if _COMPETITION_COL_HINT.search(header):
+        return False
+    if "member number" in cl:
+        return True
+    if cl.startswith("first name") or cl.startswith("last name"):
+        return True
+    if cl == "email" or cl.endswith(" email"):
+        return True
+    if cl in ("city", "state", "section", "region"):
+        return True
+    if "airport" in cl:
+        return True
+    return False
+
+
+def _header_is_meta_column(header: str) -> bool:
+    cl = header.strip().lower()
+    if find_completion_status_key([header]):
+        return True
+    if cl in (
+        "timestamp",
+        "submitted",
+        "submission time",
+        "response timestamp",
+        "date submitted",
+    ):
+        return True
+    return "timestamp" in cl
+
+
+def _classify_response_json_key(header: str, *, role_keys: frozenset[str]) -> str:
+    if header.startswith("_"):
+        return "internal"
+    if _COMPETITION_COL_HINT.search(header):
+        return "competition"
+    if _header_is_meta_column(header):
+        return "meta"
+    if _header_is_identity_column(header):
+        return "identity"
+    if _header_is_opt_out_all_qualifying(header):
+        return "opt_out"
+    if _header_is_role_priority_column(header):
+        return "role_priority"
+    if _header_is_qualifying_conflicts_list_column(header):
+        return "conflicts_list"
+    if _header_is_qualifying_conflicts_upload_column(header):
+        return "conflicts_upload"
+    if _header_is_qualifying_notes_column(header):
+        return "notes"
+    if header in role_keys:
+        return "form_role"
+    return "other"
+
+
+def _sorted_response_field_keys(keys: Iterable[str]) -> list[str]:
+    return sorted(
+        (k for k in keys if isinstance(k, str)),
+        key=lambda x: x.casefold(),
+    )
+
+
+def build_qualifying_form_response_view(
+    response_json: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Sectioned view of one stored ``response_json`` for UI display.
+
+    Returns keys: ``meta``, ``identity``, ``opt_out``, ``form_roles``,
+    ``role_priority``, ``competitions`` (DataFrame), ``conflicts``, ``notes``,
+    ``other`` — each a list of ``(field, value)`` tuples except ``competitions``.
+    """
+    empty: dict[str, Any] = {
+        "meta": [],
+        "identity": [],
+        "opt_out": [],
+        "form_roles": [],
+        "role_priority": [],
+        "competitions": pd.DataFrame(),
+        "conflicts": [],
+        "notes": [],
+        "other": [],
+    }
+    if not response_json:
+        return empty
+
+    str_keys = [k for k in response_json if isinstance(k, str)]
+    cols_df = pd.DataFrame(columns=str_keys)
+    role_keys = frozenset(form_self_reported_role_columns(cols_df))
+
+    buckets: dict[str, list[tuple[str, str]]] = {
+        k: [] for k in empty if k != "competitions"
+    }
+    comp_rows: list[dict[str, Any]] = []
+
+    for key in _sorted_response_field_keys(str_keys):
+        bucket = _classify_response_json_key(key, role_keys=role_keys)
+        if bucket == "internal":
+            continue
+        val = response_json.get(key)
+        if bucket == "competition":
+            if normalize_qualifying_availability_cell(val) == "no_response":
+                if format_form_response_display_value(val) == "—":
+                    continue
+            parsed = parse_qualifying_competition_prompt(key)
+            comp_rows.append(
+                {
+                    "Competition": parsed.get("title") or key,
+                    "Location": parsed.get("location") or "",
+                    "Dates": parsed.get("dates") or "",
+                    "Season": parsed.get("year") or "",
+                    "Availability": availability_cell_display_label(val),
+                }
+            )
+            continue
+        if bucket == "form_role":
+            if not is_affirmative_checkbox(val):
+                continue
+            buckets["form_roles"].append((key, "Yes"))
+            continue
+        if bucket == "role_priority":
+            rank = _parse_role_priority_rank(val)
+            if rank is None:
+                continue
+            label = _FORM_PRIORITY_DISPLAY_LABEL.get(key.strip(), key.strip())
+            buckets["role_priority"].append((label, str(rank)))
+            continue
+        display = format_form_response_display_value(val)
+        if display == "—":
+            continue
+        if bucket == "conflicts_list":
+            buckets["conflicts"].append(("List of conflicts", display))
+        elif bucket == "conflicts_upload":
+            buckets["conflicts"].append(("Upload list", display))
+        elif bucket == "notes":
+            buckets["notes"].append((key, display))
+        elif bucket == "opt_out":
+            buckets["opt_out"].append((key, display))
+        else:
+            target = bucket if bucket in buckets else "other"
+            buckets[target].append((key, display))
+
+    buckets["role_priority"].sort(
+        key=lambda item: (int(item[1]), item[0].casefold()),
+    )
+    comp_df = pd.DataFrame(comp_rows)
+    if not comp_df.empty:
+        comp_df = comp_df.sort_values(
+            ["Season", "Competition"],
+            ascending=[False, True],
+            kind="mergesort",
+            na_position="last",
+        ).reset_index(drop=True)
+
+    return {
+        **buckets,
+        "competitions": comp_df,
+    }
 

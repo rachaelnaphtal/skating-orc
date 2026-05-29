@@ -693,21 +693,23 @@ def _competition_metadata_dates_and_location(
     index_url: str,
     *,
     session=None,
-) -> tuple[Any, Any, str]:
+) -> tuple[Any, Any, str | None]:
     """
     Dates/location for ``updateCompetition``: use batch metadata when complete,
     else fill gaps from ``loadCompetitionInfo``.
     """
+    from database_loader import coerce_competition_date, coerce_competition_location
+
     start_date = end_date = None
     location: str | None = None
     if competition_metadata:
-        start_date = competition_metadata.get("start_date")
-        end_date = competition_metadata.get("end_date")
-        loc = competition_metadata.get("location")
-        if loc is not None:
-            location = str(loc).strip()
+        start_date = coerce_competition_date(
+            competition_metadata.get("start_date")
+        )
+        end_date = coerce_competition_date(competition_metadata.get("end_date"))
+        location = coerce_competition_location(competition_metadata.get("location"))
     if start_date and end_date:
-        return start_date, end_date, location or ""
+        return start_date, end_date, location
     fetched_start, fetched_end, fetched_loc = loadCompetitionInfo(
         index_url, session=session
     )
@@ -717,54 +719,48 @@ def _competition_metadata_dates_and_location(
         end_date = fetched_end
     if location is None:
         location = fetched_loc
-    return start_date, end_date, location or ""
+    return start_date, end_date, location
 
 
 def loadCompetitionInfo(base_url, session=None):
-    if base_url.endswith(".htm"):
-        return loadCompetitionInfoFSM(base_url, session=session)
+    from ijs_index_parse import (
+        ijs_index_start_end_and_location,
+        swiss_timing_index_start_end_and_location,
+    )
 
     page_contents = get_page_contents(base_url, session=session)
     if not page_contents:
         _LOG.warning("Empty page fetching competition info %r", base_url)
-        return ("", "", "")
+        return (None, None, None)
     soup = BeautifulSoup(page_contents, "html.parser")
-    start_date, end_date, location = ijs_index_start_end_and_location(soup, base_url)
-    return (start_date, end_date, location)
+
+    start_s, end_s, loc_s = ijs_index_start_end_and_location(soup, base_url)
+    if start_s and end_s:
+        from database_loader import coerce_competition_date, coerce_competition_location
+
+        return (
+            coerce_competition_date(start_s),
+            coerce_competition_date(end_s),
+            coerce_competition_location(loc_s),
+        )
+
+    return swiss_timing_index_start_end_and_location(soup, base_url)
+
 
 def loadCompetitionInfoFSM(base_url, session=None):
-    page_contents = get_page_contents(base_url, session=session)
-    if not page_contents:
-        _LOG.warning("Empty page fetching FSM competition info %r", base_url)
-        return ("", "", "")
-    soup = BeautifulSoup(page_contents, "html.parser")
-
-    caption_rows = soup.find_all("tr", class_="caption3")
-    if caption_rows:
-        td = caption_rows[0].find("td")
-        raw = (td.get_text() if td else "").replace(" ", "")
-        parts = raw.split("-") if raw else []
-        if len(parts) >= 2:
-            start_date, end_date = parts[0], parts[1]
-        elif len(parts) == 1:
-            start_date = end_date = parts[0]
-        else:
-            start_date, end_date = "", ""
-    else:
-        _LOG.warning("No tr.caption3 date row on FSM page %r", base_url)
-        start_date, end_date = "", ""
-    loc_cells = soup.find_all("td", class_="caption3")
-    location = loc_cells[0].text if loc_cells else ""
-    return (start_date, end_date, location)
+    """Backward-compatible alias for :func:`loadCompetitionInfo`."""
+    return loadCompetitionInfo(base_url, session=session)
 
 
 def loadInfoForExistingCompetitions():
     session = get_db_session()
     database_obj = DatabaseLoader(session)
     urls = database_obj.getCompetitionUrlsWithNoLocation()
+    from ijs_results_urls import competition_index_fetch_url
+
     for url in urls:
-        (start_date, end_date, location) = loadCompetitionInfo(
-            f"{url}/index.asp")
+        index_url = competition_index_fetch_url(url)
+        (start_date, end_date, location) = loadCompetitionInfo(index_url)
         database_obj.updateCompetition(
             url, location=location, start_date=start_date, end_date=end_date)
 
@@ -788,9 +784,9 @@ def scrape(
     write_excel=True,
     qualifying=None,
     nqs=None,
+    international=None,
     officials_analysis_competition_type_id=None,
     update_officials_competition_type=False,
-    international=None,
     http_session=None,
     db_session=None,
     database_loader=None,
@@ -864,9 +860,18 @@ def scrape(
         pdf_loop = None
         pdf_browser = None
 
-        url = f"{base_url}/index.asp"
-        if isFSM:
-            url = f"{base_url}/index.htm"
+        from ijs_results_urls import (
+            competition_index_fetch_url,
+            is_fsm_results_url,
+            results_url_for_storage,
+            scrape_join_base,
+        )
+
+        stored_url = results_url_for_storage(base_url)
+        if isFSM is None:
+            isFSM = is_fsm_results_url(stored_url)
+        join_base = scrape_join_base(stored_url)
+        url = competition_index_fetch_url(stored_url)
         page_contents = get_page_contents(url, session=http_session)
         _LOG.debug("GET %s", url)
         # Launch Chromium only after index succeeds and only for classic PDF mode (not FSM).
@@ -894,29 +899,29 @@ def scrape(
         if write_to_database:
             competition_id = database_obj.insert_competition(
                 report_name.replace("_", " "),
-                base_url,
+                stored_url,
                 year,
                 qualifying=qualifying,
                 nqs=nqs,
-                officials_analysis_competition_type_id=officials_analysis_competition_type_id,
                 international=international,
+                officials_analysis_competition_type_id=officials_analysis_competition_type_id,
             )
-            proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
+            proccessed_segments = database_obj.getSegmentNamesForCompetition(stored_url)
             start_date, end_date, location = _competition_metadata_dates_and_location(
                 competition_metadata,
                 url,
                 session=http_session,
             )
             database_obj.updateCompetition(
-                base_url,
+                stored_url,
                 location=location,
                 start_date=start_date,
                 end_date=end_date,
                 qualifying=qualifying,
                 nqs=nqs,
+                international=international,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
                 update_officials_competition_type=update_officials_competition_type,
-                international=international,
             )
             competition_start_date = start_date
             competition_end_date = end_date
@@ -927,7 +932,7 @@ def scrape(
             detailed_rule_errors = []
             if isFSM:
                 judges_and_results_links = get_fsm_judges_and_results_links(
-                    page_contents, f"{base_url}/", session=http_session
+                    page_contents, f"{join_base}/", session=http_session
                 )
                 i = 0
                 for event_info_dict in judges_and_results_links:
@@ -1003,7 +1008,7 @@ def scrape(
                         judgesNames,
                         h1_event_label,
                     ) = findResultsDetailUrlAndJudgesNames(
-                        base_url, segment_href, session=http_session
+                        join_base, segment_href, session=http_session
                     )
                     if not resultsLink:
                         note_warning(
@@ -1025,7 +1030,7 @@ def scrape(
                         all_element_dict,
                         all_pcs_dict,
                     ) = processEvent(
-                        f"{base_url}/{resultsLink}",
+                        f"{join_base}/{resultsLink}",
                         i,
                         judgesNames,
                         workbook,
@@ -1050,7 +1055,7 @@ def scrape(
                     segment_db_key = None
                     if write_to_database:
                         segment_official_rows = _classic_segment_official_rows(
-                            base_url, segment_href, session=http_session
+                            join_base, segment_href, session=http_session
                         )
                         if not segment_official_rows:
                             note_warning(
@@ -1140,7 +1145,7 @@ def scrape(
             database_obj.commit()
         warnings = pop_warnings()
         log_competition_summary(
-            base_url,
+            stored_url,
             segments_written=segment_stats["written"],
             segments_skipped=segment_stats["skipped"],
             warnings=warnings,

@@ -274,14 +274,10 @@ def _streamlit_safe_judge_pivot_display(grid: pd.DataFrame) -> pd.DataFrame:
 
 
 def _competition_results_index_url(results_url: str | None) -> str | None:
-    """USFS/IJS results page URL (base ``results_url`` + ``/index.asp``)."""
-    if not results_url or not str(results_url).strip():
-        return None
-    base = str(results_url).strip().rstrip("/")
-    for suffix in ("/index.asp", "/index.htm"):
-        if base.lower().endswith(suffix):
-            base = base[: -len(suffix)]
-    return f"{base}/index.asp"
+    """USFS/IJS results page URL for links (see ``ijs_results_urls.results_page_url``)."""
+    from ijs_results_urls import results_page_url
+
+    return results_page_url(results_url)
 
 
 def _format_competition_event_dates(start, end) -> str | None:
@@ -3275,9 +3271,11 @@ if page == "Individual Judge Analysis":
                 ]].drop_duplicates()
                 for _, row in unique_competitions.iterrows():
                     if pd.notna(row['competition_url']) and row['competition_url']:
-                        st.markdown(
-                            f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
-                        )
+                        href = _competition_results_index_url(row['competition_url'])
+                        if href:
+                            st.markdown(
+                                f"[{row['competition_name']}]({href})"
+                            )
         else:
             st.info(
                 "No element scores with issues found for selected filters")
@@ -3434,9 +3432,11 @@ if page == "Individual Judge Analysis":
                 ]].drop_duplicates()
                 for _, row in unique_competitions_pcs.iterrows():
                     if pd.notna(row['competition_url']) and row['competition_url']:
-                        st.markdown(
-                            f"[{row['competition_name']}]({row['competition_url']}/index.asp)"
-                        )
+                        href = _competition_results_index_url(row['competition_url'])
+                        if href:
+                            st.markdown(
+                                f"[{row['competition_name']}]({href})"
+                            )
         else:
             st.info("No PCS scores with issues found for selected filters")
 
@@ -3720,7 +3720,9 @@ elif page == "Rule Errors Analysis":
             unique_competitions = display_df[['Competition', 'Competition URL']].drop_duplicates()
             for _, row in unique_competitions.iterrows():
                 if pd.notna(row['Competition URL']) and row['Competition URL']:
-                    st.markdown(f"[{row['Competition']}]({row['Competition URL']}/index.asp)")
+                    href = _competition_results_index_url(row["Competition URL"])
+                    if href:
+                        st.markdown(f"[{row['Competition']}]({href})")
 
 elif page == "Competition Analysis":
     st.header("Competition Analysis")
@@ -4450,13 +4452,16 @@ elif page == "Load Competition":
                 key="load_competition_officials_analysis_ct",
             )
             load_oa_competition_type_id = int(load_oa_competition_type_id)
-            load_qualifying, load_nqs = competition_load_flags_from_officials_type_id(
-                load_oa_competition_type_id
+            load_qualifying, load_nqs, load_international = (
+                competition_load_flags_from_officials_type_id(
+                    load_oa_competition_type_id
+                )
             )
             st.caption(
-                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs}. "
-                "Nonqualifying (id **11**) → qualifying false. NQS (id **10**) → nqs true. "
-                "Adult / Collegiate types (**12–14**) → qualifying true, nqs false."
+                f"Stored flags: **qualifying**={load_qualifying}, **nqs**={load_nqs}, "
+                f"**international**={load_international}. "
+                "International types (**15–17**) → international true, qualifying and nqs false. "
+                "Nonqualifying (id **11**) → qualifying false. NQS (id **10**) → nqs true."
             )
             # pdf_folder = st.text_input(
             #     "PDF output folder (leave blank if not saving PDFs)",
@@ -4525,10 +4530,13 @@ elif page == "Load Competition":
                     import importlib as _il
                     _mod = _il.import_module("downloadResults")
                     scrape_fn = getattr(_mod, "scrape")
-                    isFSM = not base_url.strip().endswith("index.asp")
-                    url=base_url.strip().replace("/index.asp", "").replace("/index.htm", "")
-                    if url.endswith('/'):
-                        url = url[:-1]
+                    from ijs_results_urls import (
+                        is_fsm_results_url,
+                        results_url_for_storage,
+                    )
+
+                    url = results_url_for_storage(base_url)
+                    isFSM = is_fsm_results_url(url)
 
                     event_regex = effective_event_regex(
                         event_regex_custom, load_ev_levels, load_ev_disciplines
@@ -4549,6 +4557,7 @@ elif page == "Load Competition":
                         isFSM=isFSM,
                         qualifying=load_qualifying,
                         nqs=load_nqs,
+                        international=load_international,
                         officials_analysis_competition_type_id=load_oa_competition_type_id,
                         update_officials_competition_type=True,
                     )
