@@ -49,8 +49,10 @@ Database load behavior:
 - `competition.year` uses the compact season code, for example `2526`.
 - `competition.results_url` uses the normalized Detailed Results URL with `/index.htm` or `/index.asp` stripped.
 - `start_date`, `end_date`, and `location` come from the ISU API event metadata.
-- By default no `officials_analysis.competition_type` category is assigned. If you pass `--officials-analysis-competition-type-id ID`, every loaded row gets that type id and the `qualifying` / `nqs` flags are derived from it.
-- Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`. Add `--metadata-only` to only create/update competition rows.
+- `competition.international` is set to `true` for every row loaded by this script.
+- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU events whose name contains `World Championships` use type `15`; all other ISU events use type `16`.
+- `qualifying` and `nqs` are set to `false` for these international type IDs.
+- Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`. Add `--metadata-only` to only create/update competition rows without scraping segments.
 
 # Setup libraries
 install homebrew or anaconda

@@ -428,6 +428,7 @@ class DatabaseLoader:
         nqs=None,
         officials_analysis_competition_type_id=None,
         update_officials_competition_type=False,
+        international=None,
     ):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
         if not existing:
@@ -447,6 +448,8 @@ class DatabaseLoader:
             existing.officials_analysis_competition_type_id = (
                 officials_analysis_competition_type_id
             )
+        if international is not None:
+            existing.international = international
         self._persist()
 
     def refresh_competition_discipline_flags(self, competition_id: int) -> None:
@@ -490,11 +493,21 @@ class DatabaseLoader:
         segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
         return [segment.name for segment in segments]
 
-    def insert_competition(self, name, url, year, qualifying=None, nqs=None, officials_analysis_competition_type_id=None):
+    def insert_competition(
+        self,
+        name,
+        url,
+        year,
+        qualifying=None,
+        nqs=None,
+        officials_analysis_competition_type_id=None,
+        international=None,
+    ):
         existing = self.session.query(Competition).filter_by(results_url=url).first()
         if not existing:
             q_flag = False if qualifying is None else qualifying
             n_flag = False if nqs is None else nqs
+            international_flag = False if international is None else international
             new = Competition(
                 name=name,
                 results_url=url,
@@ -502,6 +515,7 @@ class DatabaseLoader:
                 qualifying=q_flag,
                 nqs=n_flag,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
+                international=international_flag,
             )
             self.session.add(new)
             self._persist()

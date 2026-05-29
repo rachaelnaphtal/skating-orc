@@ -790,6 +790,7 @@ def scrape(
     nqs=None,
     officials_analysis_competition_type_id=None,
     update_officials_competition_type=False,
+    international=None,
     http_session=None,
     db_session=None,
     database_loader=None,
@@ -811,6 +812,9 @@ def scrape(
     Optional ``qualifying`` / ``nqs`` (default ``None``): when loading into the DB, pass
     explicit booleans to set competition flags; ``None`` leaves existing rows unchanged on
     update (new competitions still default both flags to false).
+
+    Optional ``international`` sets ``public.competition.international`` when loading into
+    the DB; ``None`` leaves existing rows unchanged on update.
 
     Optional ``officials_analysis_competition_type_id`` links ``public.competition`` to
     ``officials_analysis.competition_type``. When ``update_officials_competition_type`` is
@@ -895,6 +899,7 @@ def scrape(
                 qualifying=qualifying,
                 nqs=nqs,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
+                international=international,
             )
             proccessed_segments = database_obj.getSegmentNamesForCompetition(base_url)
             start_date, end_date, location = _competition_metadata_dates_and_location(
@@ -911,6 +916,7 @@ def scrape(
                 nqs=nqs,
                 officials_analysis_competition_type_id=officials_analysis_competition_type_id,
                 update_officials_competition_type=update_officials_competition_type,
+                international=international,
             )
             competition_start_date = start_date
             competition_end_date = end_date

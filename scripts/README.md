@@ -299,10 +299,12 @@ Database load behavior:
 - `competition.year` uses the compact season code, e.g. `2526`.
 - `competition.results_url` uses `normalized_results_url`, with `/index.htm` or `/index.asp` stripped.
 - `start_date`, `end_date`, and `location` come from ISU API event metadata.
-- By default no `officials_analysis.competition_type` category is assigned. Add `--officials-analysis-competition-type-id ID` if every loaded row should use an existing type id; `qualifying` / `nqs` flags are derived from that id.
+- `competition.international` is set to `true` for every row loaded by this script.
+- `officials_analysis.competition_type` is inferred automatically: `International` events use type `17`; ISU events whose name contains `World Championships` use type `15`; all other ISU events use type `16`.
+- `qualifying` and `nqs` are set to `false` for these international type IDs. Add `--officials-analysis-competition-type-id ID` only if every loaded row should override the inferred type.
 - Add `--metadata-only` with `--load` to only register competition rows without scraping segments. Without `--metadata-only`, `--load` runs the full segment scrape through `downloadResults.scrape()`.
 
-CSV columns include `season`, `season_year`, `event_level`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
+CSV columns include `season`, `season_year`, `event_level`, `officials_analysis_competition_type_id`, `international`, `event_name`, `isu_event_url`, `detailed_results_url`, `normalized_results_url`, and `is_fsm`. The loader strips `/index.htm` / `/index.asp` for `competition.results_url` and uses Swiss Timing (`index.htm`) mode unless the detailed-results URL explicitly ends in `/index.asp`.
 
 ---
 

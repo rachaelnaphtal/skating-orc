@@ -43,6 +43,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from officials_competition_types import (  # noqa: E402
+    OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL,
+    OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER,
+    OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS,
+)
+
 
 ISU_API_BASE = "https://api.isu-skating.com/api"
 ISU_SITE_BASE = "https://isu.org"
@@ -65,6 +71,8 @@ CSV_FIELDS = (
     "detailed_results_url",
     "normalized_results_url",
     "is_fsm",
+    "officials_analysis_competition_type_id",
+    "international",
     "status",
     "error",
     "fetched_at_utc",
@@ -87,6 +95,8 @@ class ResultRow:
     detailed_results_url: str
     normalized_results_url: str
     is_fsm: bool
+    officials_analysis_competition_type_id: int
+    international: bool
     status: str
     error: str
     fetched_at_utc: str
@@ -107,6 +117,10 @@ class ResultRow:
             "detailed_results_url": self.detailed_results_url,
             "normalized_results_url": self.normalized_results_url,
             "is_fsm": "true" if self.is_fsm else "false",
+            "officials_analysis_competition_type_id": str(
+                self.officials_analysis_competition_type_id
+            ),
+            "international": "true" if self.international else "false",
             "status": self.status,
             "error": self.error,
             "fetched_at_utc": self.fetched_at_utc,
@@ -301,6 +315,26 @@ def parse_event_levels_arg(raw: str | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(parts))
 
 
+def is_world_championship_event(event_name: str) -> bool:
+    return "world championships" in (event_name or "").lower()
+
+
+def inferred_competition_type_id(event_level: str, event_name: str) -> int:
+    if event_level == "International":
+        return OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL
+    if is_world_championship_event(event_name):
+        return OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS
+    return OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER
+
+
+def competition_type_id_for_row(
+    row: ResultRow, override_competition_type_id: int | None = None
+) -> int:
+    if override_competition_type_id is not None:
+        return override_competition_type_id
+    return row.officials_analysis_competition_type_id
+
+
 def fetch_events_for_season(
     session: requests.Session,
     season: str,
@@ -405,6 +439,7 @@ def collect_result_rows(
                     print(f"{status}: {season} {event_level} | {name}", file=sys.stderr)
 
                 if results_url or include_missing:
+                    competition_type_id = inferred_competition_type_id(event_level, name)
                     rows.append(
                         ResultRow(
                             season=season,
@@ -423,6 +458,8 @@ def collect_result_rows(
                             detailed_results_url=results_url,
                             normalized_results_url=normalized,
                             is_fsm=is_fsm_results_url(results_url),
+                            officials_analysis_competition_type_id=competition_type_id,
+                            international=True,
                             status=status,
                             error=error,
                             fetched_at_utc=fetched_at,
@@ -507,9 +544,11 @@ def load_rows(
 
     if dry_run:
         for row in planned:
+            type_id = competition_type_id_for_row(row, default_competition_type_id)
             print(
                 f"DRY RUN load {row.season_year} | "
                 f"{row.event_level} | "
+                f"type={type_id} | international=true | "
                 f"{'FSM' if row.is_fsm else 'classic'} | "
                 f"{row.normalized_results_url} | {row.event_name}"
             )
@@ -535,10 +574,8 @@ def load_rows(
             nqs = None
             start_date = _parse_iso_date(row.start_date)
             end_date = _parse_iso_date(row.end_date)
-            if default_competition_type_id is not None:
-                qualifying, nqs = competition_load_flags_from_officials_type_id(
-                    default_competition_type_id
-                )
+            type_id = competition_type_id_for_row(row, default_competition_type_id)
+            qualifying, nqs = competition_load_flags_from_officials_type_id(type_id)
             if metadata_only:
                 db_loader.insert_competition(
                     row.event_name,
@@ -546,7 +583,8 @@ def load_rows(
                     row.season_year,
                     qualifying=qualifying,
                     nqs=nqs,
-                    officials_analysis_competition_type_id=default_competition_type_id,
+                    officials_analysis_competition_type_id=type_id,
+                    international=row.international,
                 )
                 db_loader.updateCompetition(
                     row.normalized_results_url,
@@ -556,9 +594,9 @@ def load_rows(
                     name=row.event_name,
                     qualifying=qualifying,
                     nqs=nqs,
-                    officials_analysis_competition_type_id=default_competition_type_id,
-                    update_officials_competition_type=default_competition_type_id
-                    is not None,
+                    officials_analysis_competition_type_id=type_id,
+                    update_officials_competition_type=True,
+                    international=row.international,
                 )
                 db_session.commit()
             else:
@@ -572,9 +610,9 @@ def load_rows(
                     isFSM=row.is_fsm,
                     qualifying=qualifying,
                     nqs=nqs,
-                    officials_analysis_competition_type_id=default_competition_type_id,
-                    update_officials_competition_type=default_competition_type_id
-                    is not None,
+                    officials_analysis_competition_type_id=type_id,
+                    update_officials_competition_type=True,
+                    international=row.international,
                     http_session=http_session,
                     db_session=db_session,
                     database_loader=db_loader,
@@ -664,7 +702,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--officials-analysis-competition-type-id",
         type=int,
         default=None,
-        help="Optional default officials_analysis.competition_type id for loaded rows.",
+        help=(
+            "Override inferred officials_analysis.competition_type id for loaded rows. "
+            "Default inference: International=17, ISU World Championships=15, other ISU=16."
+        ),
     )
     p.add_argument(
         "--quiet",

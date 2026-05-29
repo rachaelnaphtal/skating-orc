@@ -2,8 +2,10 @@ from datetime import date
 
 from scripts.load_isu_figure_skating_results import (
     choose_default_seasons,
+    inferred_competition_type_id,
     extract_detailed_results_url,
     is_fsm_results_url,
+    is_world_championship_event,
     normalize_results_base_url,
     parse_event_levels_arg,
     parse_seasons_arg,
@@ -11,6 +13,7 @@ from scripts.load_isu_figure_skating_results import (
     season_title_from_compact_code,
     seasons_for_calendar_year,
 )
+from officials_competition_types import competition_load_flags_from_officials_type_id
 
 
 def test_normalize_results_base_url_strips_index_files():
@@ -82,6 +85,33 @@ def test_parse_event_levels_arg():
     assert parse_event_levels_arg(None) == ("ISU",)
     assert parse_event_levels_arg("ISU,International") == ("ISU", "International")
     assert parse_event_levels_arg("All") == ("ISU", "International")
+
+
+def test_inferred_competition_type_id():
+    assert (
+        inferred_competition_type_id(
+            "International", "Lake Placid International Ice Dance Competition 2025"
+        )
+        == 17
+    )
+    assert (
+        inferred_competition_type_id("ISU", "ISU Figure Skating World Championships 2026")
+        == 15
+    )
+    assert inferred_competition_type_id("ISU", "ISU Grand Prix Final 2025") == 16
+
+
+def test_international_competition_type_flags_are_not_domestic_qualifying():
+    assert competition_load_flags_from_officials_type_id(15) == (False, False)
+    assert competition_load_flags_from_officials_type_id(16) == (False, False)
+    assert competition_load_flags_from_officials_type_id(17) == (False, False)
+
+
+def test_world_championship_detection():
+    assert is_world_championship_event("ISU Figure Skating World Championships 2026")
+    assert not is_world_championship_event(
+        "ISU Figure Skating World Junior Championships 2026"
+    )
 
 
 def test_extract_detailed_results_url_from_anchor():

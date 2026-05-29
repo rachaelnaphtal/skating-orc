@@ -17,6 +17,9 @@ OFFICIALS_COMPETITION_TYPE_ID_NQS = 10
 OFFICIALS_COMPETITION_TYPE_ID_ADULT_CHAMPIONSHIPS = 12
 OFFICIALS_COMPETITION_TYPE_ID_ADULT_SECTIONAL = 13
 OFFICIALS_COMPETITION_TYPE_ID_COLLEGIATE_CHAMPIONSHIPS = 14
+OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS = 15
+OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER = 16
+OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL = 17
 
 # Analytics competition-scope keys (single select → SQL filter on public.competition link)
 COMPETITION_SCOPE_ALL = "all"
@@ -51,8 +54,18 @@ ADULT_AND_COLLEGIATE_TYPE_IDS = frozenset(
         OFFICIALS_COMPETITION_TYPE_ID_COLLEGIATE_CHAMPIONSHIPS,
     }
 )
+INTERNATIONAL_TYPE_IDS = frozenset(
+    {
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_WORLD_CHAMPIONSHIPS,
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_OTHER,
+        OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL,
+    }
+)
 
 OFFICIALS_COMPETITION_TYPE_DISPLAY_NAMES: dict[int, str] = {
+    17: "International",
+    16: "ISU",
+    15: "ISU World Championships",
     14: "Collegiate Championships",
     13: "Adult Sectional",
     12: "Adult Championships",
@@ -95,9 +108,13 @@ def competition_load_flags_from_officials_type_id(type_id: int) -> tuple[bool, b
     """
     (qualifying_column, nqs_column) for ``public.competition`` when loading results.
 
-    qualifying=True for all types except nonqualifying (11). NQS=True only for type 10.
-    Adult / Collegiate types (12–14) are qualifying and not NQS, same as other non-11 types.
+    qualifying=True for domestic qualifying-like types except nonqualifying (11) and the
+    international bucket types (15–17). NQS=True only for type 10.
+    Adult / Collegiate types (12–14) are qualifying and not NQS.
     """
     nqs = type_id == OFFICIALS_COMPETITION_TYPE_ID_NQS
-    qualifying = type_id != OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING
+    qualifying = (
+        type_id != OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING
+        and type_id not in INTERNATIONAL_TYPE_IDS
+    )
     return qualifying, nqs
