@@ -128,7 +128,12 @@ class DatabaseLoader:
         ``official_id`` is set from (in order): ``judge_official_link`` for the judge
         row from ``insert_judge``; else ``public.official_name_alias`` on the
         normalized scraped name; else exact match on ``officials.full_name``;
-        else high-confidence fuzzy match. ``appointment_type_id`` follows role labels.
+        else high-confidence fuzzy match on the US directory.
+
+        When no US match, ``isu_official_id`` uses the same order against the ISU roster
+        (``judge_isu_official_link``, ``isu_official_name_alias``, exact, fuzzy).
+
+        ``appointment_type_id`` follows role labels.
         """
         if not rows:
             return
@@ -136,6 +141,7 @@ class DatabaseLoader:
             SegmentOfficial.segment_id == segment_id
         ).delete(synchronize_session=False)
         choices_cache: dict[int, str] | None = None
+        isu_choices_cache: dict[int, str] | None = None
         for r in rows:
             official_name = normalize_scraped_judge_name(r["name"])
             role = r["role"]
@@ -152,11 +158,25 @@ class DatabaseLoader:
                 oid = self._official_id_from_fuzzy_directory_name(
                     official_name, choices_cache
                 )
+            isu_oid = None
+            if oid is None:
+                isu_oid = self._isu_official_id_from_judge_id(judge_id)
+                if isu_oid is None:
+                    isu_oid = self._isu_official_id_from_name_alias(official_name)
+                if isu_oid is None:
+                    isu_oid = self._isu_official_id_from_exact_name(official_name)
+                if isu_oid is None:
+                    if isu_choices_cache is None:
+                        isu_choices_cache = self._load_isu_official_choices()
+                    isu_oid = self._isu_official_id_from_fuzzy_name(
+                        official_name, isu_choices_cache
+                    )
             self.session.add(
                 SegmentOfficial(
                     segment_id=segment_id,
                     official_name=official_name,
                     official_id=oid,
+                    isu_official_id=isu_oid,
                     role=role,
                     appointment_type_id=appt_type_id,
                 )
@@ -435,6 +455,77 @@ class DatabaseLoader:
         if not row or row[0] is None:
             return None
         return int(row[0])
+
+    def _load_isu_official_choices(self) -> dict[int, str]:
+        try:
+            rows = self.session.execute(
+                text("""
+                    SELECT id, TRIM(full_name) AS full_name
+                    FROM officials_analysis.isu_official
+                    WHERE full_name IS NOT NULL AND TRIM(full_name) <> ''
+                """)
+            ).mappings().all()
+        except Exception:
+            return {}
+        return {int(r["id"]): str(r["full_name"]) for r in rows}
+
+    def _isu_official_id_from_judge_id(self, judge_id: int) -> int | None:
+        try:
+            row = self.session.execute(
+                text(
+                    "SELECT isu_official_id FROM judge_isu_official_link "
+                    "WHERE judge_id = :jid LIMIT 1"
+                ),
+                {"jid": judge_id},
+            ).first()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
+
+    def _isu_official_id_from_name_alias(self, official_name: str) -> int | None:
+        norm = _normalize_person_name(official_name)
+        if not norm:
+            return None
+        try:
+            row = self.session.execute(
+                text(
+                    "SELECT isu_official_id FROM public.isu_official_name_alias "
+                    "WHERE alias_normalized = :n LIMIT 1"
+                ),
+                {"n": norm},
+            ).first()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
+
+    def _isu_official_id_from_exact_name(self, official_name: str) -> int | None:
+        norm = _normalize_person_name(official_name)
+        if not norm:
+            return None
+        try:
+            rows = self.session.execute(
+                text("""
+                    SELECT id FROM officials_analysis.isu_official
+                    WHERE name_normalized = :norm
+                       OR lower(regexp_replace(trim(full_name), '\\s+', ' ', 'g')) = :norm
+                    LIMIT 2
+                """),
+                {"norm": norm},
+            ).fetchall()
+        except Exception:
+            return None
+        if len(rows) != 1:
+            return None
+        return int(rows[0][0])
+
+    def _isu_official_id_from_fuzzy_name(
+        self, official_name: str, choices: dict[int, str]
+    ) -> int | None:
+        return self._official_id_from_fuzzy_directory_name(official_name, choices)
 
     def getCompetitionUrlsWithNoLocation(self):
         competitions = (self.session.query(Competition).filter(Competition.location == None).all())

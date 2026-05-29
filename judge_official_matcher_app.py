@@ -30,19 +30,29 @@ def _official_labels() -> dict[int, str]:
         return core.fetch_official_choices(conn)
 
 
+@st.cache_data(ttl=120)
+def _isu_official_labels() -> dict[int, str]:
+    eng = _engine()
+    with eng.connect() as conn:
+        return core.fetch_isu_official_choices(conn)
+
+
 def _load_unmapped(limit: int) -> list[dict]:
     eng = _engine()
     with eng.connect() as conn:
-        rows = core.fetch_unmapped_judges(conn, limit=limit)
+        rows = core.fetch_judges_needing_link(conn, limit=limit)
     return [dict(r) for r in rows]
 
 
 def _build_review_table(
     judges: list[dict],
     labels: dict[int, str],
+    isu_labels: dict[int, str],
     *,
     default_link_min_score: float,
+    default_isu_link_min_score: float,
     id_to_display: dict[int, str],
+    isu_id_to_display: dict[int, str],
 ) -> pd.DataFrame:
     rows_out: list[dict] = []
     for j in judges:
@@ -52,22 +62,44 @@ def _build_review_table(
         if best:
             oid, sc, lbl = best[0]
             official_id: int | None = int(oid)
-            score = round(float(sc), 1)
-            directory_name = lbl
-            directory_official = id_to_display.get(official_id, lbl)
+            us_score = round(float(sc), 1)
+            us_directory_name = lbl
+            us_directory_official = id_to_display.get(official_id, lbl)
         else:
             official_id = None
-            score = 0.0
-            directory_name = ""
-            directory_official = ""
-        decision = "Link" if score >= default_link_min_score and official_id else "Skip"
+            us_score = 0.0
+            us_directory_name = ""
+            us_directory_official = ""
+
+        isu_best = core.suggest_matches(name, isu_labels, top=1, min_score=0.0)
+        if isu_best:
+            ioid, isu_sc, isu_lbl = isu_best[0]
+            isu_official_id: int | None = int(ioid)
+            isu_score = round(float(isu_sc), 1)
+            isu_directory_name = isu_lbl
+            isu_directory_official = isu_id_to_display.get(isu_official_id, isu_lbl)
+        else:
+            isu_official_id = None
+            isu_score = 0.0
+            isu_directory_name = ""
+            isu_directory_official = ""
+
+        if us_score >= default_link_min_score and official_id:
+            decision = "Link US"
+        elif isu_score >= default_isu_link_min_score and isu_official_id:
+            decision = "Link ISU"
+        else:
+            decision = "Skip"
         rows_out.append(
             {
                 "judge_id": jid,
                 "protocol_name": name,
-                "match_score": score,
-                "directory_name": directory_name,
-                "directory_official": directory_official,
+                "us_match_score": us_score,
+                "us_suggested": us_directory_name,
+                "us_directory_official": us_directory_official,
+                "isu_match_score": isu_score,
+                "isu_suggested": isu_directory_name,
+                "isu_directory_official": isu_directory_official,
                 "decision": decision,
             }
         )
@@ -137,11 +169,12 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
     if flash:
         st.success(flash)
 
-    st.title("Judge ↔ US directory matcher")
+    st.title("Judge ↔ directory matcher")
     st.caption(
-        "Links `public.judge` rows to **`officials_analysis.officials`** (same database as the "
-        "activity tracker). International judges: set decision to **Outside** so auto-matcher "
-        "stops suggesting US roster rows."
+        "Links protocol names to the **USFS directory** (`officials_analysis.officials`) and/or "
+        "the **ISU roster** (`officials_analysis.isu_official`). US matches are tried first at "
+        "scrape time; ISU is used when there is no US link. Load ISU lists with "
+        "`scripts/load_isu_officials_pdf.py`."
     )
 
     try:
@@ -159,22 +192,39 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         st.stop()
 
     labels = _official_labels()
+    isu_labels = _isu_official_labels()
     full_select_options, display_to_id, id_to_display = core.official_select_display_maps(
         labels
     )
-    st.sidebar.metric("Officials in directory (with name)", len(labels))
+    isu_select_options, isu_display_to_id, isu_id_to_display = (
+        core.isu_official_select_display_maps(isu_labels)
+    )
+    st.sidebar.metric("US directory officials", len(labels))
+    st.sidebar.metric("ISU roster officials", len(isu_labels))
 
     max_rows = st.sidebar.number_input("Max unmapped judges to load", 10, 5000, 400, 10)
-    auto_min = st.sidebar.slider("Auto-link: minimum fuzzy score", 50.0, 100.0, 92.0, 1.0)
+    auto_min = st.sidebar.slider("Auto-link US: minimum fuzzy score", 50.0, 100.0, 92.0, 1.0)
+    auto_isu_min = st.sidebar.slider(
+        "Auto-link ISU: minimum fuzzy score", 50.0, 100.0, 92.0, 1.0
+    )
     default_link = st.sidebar.slider(
-        "Table default: pre-select Link when score ≥", 50.0, 100.0, 85.0, 1.0
+        "Table default: Link US when score ≥", 50.0, 100.0, 85.0, 1.0
+    )
+    default_isu_link = st.sidebar.slider(
+        "Table default: Link ISU when score ≥ (if US below threshold)",
+        50.0,
+        100.0,
+        85.0,
+        1.0,
     )
 
     judges = _load_unmapped(int(max_rows))
     st.sidebar.metric("Unmapped judges (loaded)", len(judges))
 
     if not judges:
-        st.info("No unmapped judges — everyone has a row in `judge_official_link`.")
+        st.info(
+            "No judges need linking — everyone has a US linked row or an ISU roster link."
+        )
         st.stop()
 
     workflow = st.radio(
@@ -253,30 +303,56 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         "then **Apply decisions in table**."
     )
 
-    if st.button(
-        f"Auto-link every loaded unmapped judge whose best match score ≥ {auto_min:.0f}",
-        type="primary",
-    ):
-        with st.spinner("Writing links…"):
-            linked, skipped = core.auto_link_by_score(
-                eng,
-                officials=labels,
-                min_score=float(auto_min),
-                limit_judges=int(max_rows),
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button(
+            f"Auto-link US (score ≥ {auto_min:.0f})",
+            type="primary",
+        ):
+            with st.spinner("Writing US links…"):
+                linked, skipped = core.auto_link_by_score(
+                    eng,
+                    officials=labels,
+                    min_score=float(auto_min),
+                    limit_judges=int(max_rows),
+                )
+            st.session_state["_matcher_flash"] = (
+                f"US auto-linked **{linked}** judge(s). Skipped: **{skipped}**."
             )
-        st.session_state["_matcher_flash"] = (
-            f"Auto-linked **{linked}** judge(s). Skipped: **{skipped}**."
-        )
-        _official_labels.clear()
-        st.rerun()
+            _official_labels.clear()
+            _isu_official_labels.clear()
+            st.rerun()
+    with col_b:
+        if st.button(
+            f"Auto-link ISU (score ≥ {auto_isu_min:.0f})",
+            type="primary",
+            disabled=len(isu_labels) == 0,
+        ):
+            with st.spinner("Writing ISU links…"):
+                linked, skipped = core.auto_link_isu_by_score(
+                    eng,
+                    isu_officials=isu_labels,
+                    min_score=float(auto_isu_min),
+                    limit_judges=int(max_rows),
+                )
+            st.session_state["_matcher_flash"] = (
+                f"ISU auto-linked **{linked}** judge(s). Skipped: **{skipped}**."
+            )
+            _official_labels.clear()
+            _isu_official_labels.clear()
+            st.rerun()
 
     df = _build_review_table(
         judges,
         labels,
+        isu_labels,
         default_link_min_score=float(default_link),
+        default_isu_link_min_score=float(default_isu_link),
         id_to_display=id_to_display,
+        isu_id_to_display=isu_id_to_display,
     )
-    pinned = {str(x) for x in df["directory_official"].dropna() if str(x).strip()}
+    pinned = {str(x) for x in df["us_directory_official"].dropna() if str(x).strip()}
+    isu_pinned = {str(x) for x in df["isu_directory_official"].dropna() if str(x).strip()}
     name_filter = st.sidebar.text_input(
         "Filter directory names",
         value="",
@@ -289,8 +365,13 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         name_filter,
         pinned=pinned,
     )
+    isu_select_filtered = _filter_official_select_options(
+        isu_select_options,
+        name_filter,
+        pinned=isu_pinned,
+    )
     if name_filter.strip() and len(select_options) <= 1:
-        st.sidebar.caption("No matches — clear or broaden the filter.")
+        st.sidebar.caption("No US matches — clear or broaden the filter.")
 
     edited = st.data_editor(
         df,
@@ -301,27 +382,43 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                 disabled=True,
                 width="medium",
             ),
-            "match_score": st.column_config.NumberColumn(
-                "Match",
+            "us_match_score": st.column_config.NumberColumn(
+                "US",
                 disabled=True,
                 width="small",
                 format="%.0f",
             ),
-            "directory_name": st.column_config.TextColumn(
-                "Suggested",
+            "us_suggested": st.column_config.TextColumn(
+                "US suggested",
                 disabled=True,
                 width="medium",
             ),
-            "directory_official": st.column_config.SelectboxColumn(
-                "Directory pick",
-                help="Directory entry to link (duplicate names show · id …).",
+            "us_directory_official": st.column_config.SelectboxColumn(
+                "US pick",
                 options=select_options,
+                required=False,
+                width="medium",
+            ),
+            "isu_match_score": st.column_config.NumberColumn(
+                "ISU",
+                disabled=True,
+                width="small",
+                format="%.0f",
+            ),
+            "isu_suggested": st.column_config.TextColumn(
+                "ISU suggested",
+                disabled=True,
+                width="medium",
+            ),
+            "isu_directory_official": st.column_config.SelectboxColumn(
+                "ISU pick",
+                options=isu_select_filtered,
                 required=False,
                 width="medium",
             ),
             "decision": st.column_config.SelectboxColumn(
                 "Decision",
-                options=["Skip", "Link", "Outside"],
+                options=["Skip", "Link US", "Link ISU", "Outside"],
                 required=True,
                 width="small",
             ),
@@ -342,22 +439,21 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
             if dec == "Skip":
                 continue
             if dec == "Outside":
-                core.upsert_outside(eng, jid, note="matcher: outside directory")
+                core.upsert_outside(eng, jid, note="matcher: outside both directories")
                 applied += 1
                 continue
-            if dec == "Link":
-                disp = row.get("directory_official")
+            if dec == "Link US":
+                disp = row.get("us_directory_official")
                 if disp is None or (isinstance(disp, float) and pd.isna(disp)) or str(disp).strip() == "":
                     errors.append(
-                        f"Judge {jid}: Link selected — pick a **Directory official** or change decision."
+                        f"Judge {jid}: Link US — pick a **US directory official** or change decision."
                     )
                     continue
                 disp_s = str(disp).strip()
                 oid_int = display_to_id.get(disp_s)
                 if oid_int is None:
                     errors.append(
-                        f"Judge {jid}: could not resolve directory row {disp_s!r}. "
-                        "Adjust the filter so that name appears in the list, then re-select."
+                        f"Judge {jid}: could not resolve US row {disp_s!r}."
                     )
                     continue
                 if not core.official_exists(eng, oid_int):
@@ -365,13 +461,36 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
                         f"Judge {jid}: official_id {oid_int} not found in officials_analysis.officials."
                     )
                     continue
-                core.upsert_link(eng, jid, oid_int, note="matcher: approved")
+                core.upsert_link(eng, jid, oid_int, note="matcher: US approved")
+                applied += 1
+                continue
+            if dec == "Link ISU":
+                disp = row.get("isu_directory_official")
+                if disp is None or (isinstance(disp, float) and pd.isna(disp)) or str(disp).strip() == "":
+                    errors.append(
+                        f"Judge {jid}: Link ISU — pick an **ISU roster official** or change decision."
+                    )
+                    continue
+                disp_s = str(disp).strip()
+                ioid_int = isu_display_to_id.get(disp_s)
+                if ioid_int is None:
+                    errors.append(
+                        f"Judge {jid}: could not resolve ISU row {disp_s!r}."
+                    )
+                    continue
+                if not core.isu_official_exists(eng, ioid_int):
+                    errors.append(
+                        f"Judge {jid}: isu_official_id {ioid_int} not found."
+                    )
+                    continue
+                core.upsert_isu_link(eng, jid, ioid_int, note="matcher: ISU approved")
                 applied += 1
         if errors:
             for e in errors:
                 st.warning(e)
         st.session_state["_matcher_flash"] = f"Applied **{applied}** row(s) from the table."
         _official_labels.clear()
+        _isu_official_labels.clear()
         st.rerun()
 
 
