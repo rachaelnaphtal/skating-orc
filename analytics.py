@@ -55,9 +55,54 @@ def _normalize_person_name_key(s: str) -> str:
         return ""
     t = unicodedata.normalize("NFKC", str(s))
     t = t.strip().lower()
-    t = re.sub(r"[-_/.,;:+]+", " ", t)
+    t = re.sub(r"[-_/.,;:'\"`]+", " ", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
+
+
+def _given_name_parts_equivalent(a: str, b: str) -> bool:
+    """True when given-name tokens match aside from case, initials, or common shortenings."""
+    if a == b:
+        return True
+    if not a or not b:
+        return a == b
+    if len(a) == 1 or len(b) == 1:
+        return a[0] == b[0]
+    if a.startswith(b) or b.startswith(a):
+        return True
+    return False
+
+
+def _person_name_tokens_equivalent(ta: list[str], tb: list[str]) -> bool:
+    """Same name tokens in any order (e.g. ``Christian Baumann`` vs ``BAUMANN Christian``)."""
+    if not ta or not tb:
+        return ta == tb
+    if sorted(ta) == sorted(tb):
+        return True
+    if len(ta) < 2 or len(tb) < 2:
+        return False
+    if ta[-1] != tb[-1]:
+        return False
+    ga, gb = " ".join(ta[:-1]), " ".join(tb[:-1])
+    if not ga or not gb:
+        return True
+    return _given_name_parts_equivalent(ga, gb)
+
+
+def _person_names_equivalent_for_display(a: str, b: str) -> bool:
+    """
+    Whether two display names refer to the same person for identity labels.
+
+    Matches exact normalized forms, the same tokens in either order (protocol
+    ``FAMILY Given`` vs directory ``Given Family``), or western-order family name
+    with compatible given names (e.g. ``Christopher Buchanan`` vs ``Chris BUCHANAN``).
+    """
+    ka, kb = _normalize_person_name_key(a), _normalize_person_name_key(b)
+    if not ka or not kb:
+        return ka == kb
+    if ka == kb:
+        return True
+    return _person_name_tokens_equivalent(ka.split(), kb.split())
 
 
 def _union_find_parent(parent: dict[int, int], x: int) -> int:
@@ -90,11 +135,20 @@ def _identity_label_for_merged_jids(
     fallback_suffix: str,
 ) -> str:
     names = sorted({judge_map[j][0] for j in jids}, key=str.lower)
-    dn_key = _normalize_person_name_key(directory_name)
     by_norm: dict[str, str] = {}
     for n in names:
+        if directory_name and _person_names_equivalent_for_display(n, directory_name):
+            continue
         nk = _normalize_person_name_key(n)
-        if nk == dn_key:
+        merged = False
+        for ek in list(by_norm.keys()):
+            if _person_names_equivalent_for_display(by_norm[ek], n):
+                prev = by_norm.pop(ek)
+                keep = n if len(n.strip()) > len(prev.strip()) else prev
+                by_norm[_normalize_person_name_key(keep)] = keep
+                merged = True
+                break
+        if merged:
             continue
         prev = by_norm.get(nk)
         if prev is None or len(n.strip()) > len(prev.strip()):
@@ -104,6 +158,8 @@ def _identity_label_for_merged_jids(
         if alias_names:
             return f"{directory_name} · " + " · ".join(alias_names)
         return directory_name
+    if alias_names:
+        return " · ".join(alias_names) + fallback_suffix
     return " · ".join(names) + fallback_suffix
 
 
