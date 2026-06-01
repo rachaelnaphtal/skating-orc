@@ -29,6 +29,27 @@ OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL = frozenset(
     }
 )
 
+# Adult / Collegiate types — excluded from national qualifying activity counts.
+OFFICIALS_COMPETITION_TYPE_IDS_ADULT_COLLEGIATE = frozenset(
+    {
+        OFFICIALS_COMPETITION_TYPE_ID_ADULT_CHAMPIONSHIPS,
+        OFFICIALS_COMPETITION_TYPE_ID_ADULT_SECTIONAL,
+        OFFICIALS_COMPETITION_TYPE_ID_COLLEGIATE_CHAMPIONSHIPS,
+    }
+)
+
+# ISU rule wording: "ISU Event" (Championship + ISU Competition) vs "International Competition" (type 17).
+OFFICIALS_COMPETITION_TYPE_IDS_ISU_EVENT = frozenset(
+    {
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP,
+        OFFICIALS_COMPETITION_TYPE_ID_ISU_COMPETITION,
+    }
+)
+
+OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL_COMPETITION_ONLY = frozenset(
+    {OFFICIALS_COMPETITION_TYPE_ID_INTERNATIONAL_COMPETITION}
+)
+
 # Analytics competition-scope keys (single select → SQL filter on public.competition link)
 COMPETITION_SCOPE_ALL = "all"
 COMPETITION_SCOPE_QUALIFYING = "qualifying"

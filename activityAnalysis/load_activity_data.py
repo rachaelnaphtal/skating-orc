@@ -40,12 +40,29 @@ DEFAULT_ACTIVITY_DB_URL = "sqlite:////tmp/activity_tracker.db"
 
 
 def _resolve_database_url():
-    database_url = os.environ.get("DATABASE_URL", "").strip()
-    if not database_url:
-        return DEFAULT_ACTIVITY_DB_URL
-    if database_url.startswith("postgres://"):
-        return database_url.replace("postgres://", "postgresql://", 1)
-    return database_url
+    """
+    Same resolution as ``database.py`` when ``DATABASE_URL`` is set or Streamlit
+    secrets are available; otherwise sqlite demo DB (``DEFAULT_ACTIVITY_DB_URL``).
+    """
+    env_url = os.environ.get("DATABASE_URL", "").strip()
+    try:
+        from database import (
+            _streamlit_secrets_available,
+            resolve_database_url as _resolve_judging_db_url,
+        )
+
+        if env_url or _streamlit_secrets_available():
+            url, _source = _resolve_judging_db_url()
+            if url and str(url).strip():
+                return str(url).strip()
+    except Exception:
+        pass
+
+    if env_url:
+        if env_url.startswith("postgres://"):
+            return env_url.replace("postgres://", "postgresql://", 1)
+        return env_url
+    return DEFAULT_ACTIVITY_DB_URL
 
 
 def activity_database_is_postgresql() -> bool:
@@ -985,6 +1002,8 @@ def sectional_qualified_level_ids(appointment_type_id) -> list:
 # here — 8 is ``SCORING_SECTIONAL_LEVEL2_ID``; older code mistakenly compared SP to 8.
 SINGLES_DISCIPLINE_ID = 1
 SINGLES_PAIRS_APPT_TYPES = {1, 4}  # Competition Judge, Referee
+# Protocol ``segment_official.appointment_type_id``: Technical Specialist, Technical Controller.
+TC_TS_SEGMENT_APPOINTMENT_TYPE_IDS = frozenset({9, 11})
 
 
 def _resolve_discipline_ids(discipline_id, appointment_type_id):
@@ -2196,6 +2215,9 @@ def segment_discipline_type_ids_for_directory(
     for d in resolved:
         if d == SINGLES_DISCIPLINE_ID:
             out.add(NQS_SEGMENT_DISCIPLINE_TYPE_SINGLES)
+            if atid in TC_TS_SEGMENT_APPOINTMENT_TYPE_IDS:
+                # ISU Rules 414/415: Pair skating service counts toward Singles (not reverse).
+                out.add(NQS_SEGMENT_DISCIPLINE_TYPE_PAIRS)
         elif d == DISC_PAIRS_ID:
             out.add(NQS_SEGMENT_DISCIPLINE_TYPE_PAIRS)
         elif d == DISC_DANCE_ID:

@@ -749,11 +749,27 @@ class DatabaseLoader:
         return existing.id
 
     def insert_segment(self, segment_name, competition_id):
+        from segment_level import classify_segment_level_for_row
+
         is_freeskate = "free" in segment_name.lower()
         discipline_type_id = self.insert_discipline_type(segment_name)
+        comp = self.session.get(Competition, competition_id)
+        level_result = classify_segment_level_for_row(
+            segment_name,
+            (comp.name if comp else "") or "",
+            comp.international if comp is not None else False,
+            discipline_type_id=discipline_type_id,
+        )
         existing = self.session.query(Segment).filter_by(name=segment_name, competition_id=competition_id).first()
         if not existing:
-            new = Segment(name=segment_name, competition_id=competition_id, freeskate=is_freeskate, discipline_type_id=discipline_type_id)
+            new = Segment(
+                name=segment_name,
+                competition_id=competition_id,
+                freeskate=is_freeskate,
+                discipline_type_id=discipline_type_id,
+                level=level_result.level,
+                level_source=level_result.source,
+            )
             self.session.add(new)
             self._flush()
             self.refresh_competition_discipline_flags(competition_id)
@@ -761,6 +777,8 @@ class DatabaseLoader:
             return new.id
         existing.discipline_type_id = discipline_type_id
         existing.freeskate = is_freeskate
+        existing.level = level_result.level
+        existing.level_source = level_result.source
         self._flush()
         self.refresh_competition_discipline_flags(competition_id)
         self._persist()

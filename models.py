@@ -549,6 +549,8 @@ class Segment(Base):
     competition_id: Mapped[int] = mapped_column(Integer)
     freeskate: Mapped[Optional[bool]] = mapped_column(Boolean)
     discipline_type_id: Mapped[Optional[int]] = mapped_column(Integer)
+    level: Mapped[Optional[str]] = mapped_column(String)
+    level_source: Mapped[Optional[str]] = mapped_column(String)
 
     competition: Mapped['Competition'] = relationship('Competition', back_populates='segment')
     discipline_type: Mapped[Optional['DisciplineType']] = relationship('DisciplineType', back_populates='segment')

@@ -171,14 +171,17 @@ def _bind_engine(url: str, source: str) -> None:
     # Heroku/RDS hobby tiers often allow ~20 connections per role; keep the pool small.
     pool_size = int(os.getenv("SQLALCHEMY_POOL_SIZE", "2"))
     max_overflow = int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "0"))
-    _engine = create_engine(
-        url,
-        echo=False,
-        pool_pre_ping=True,
-        pool_recycle=int(os.getenv("SQLALCHEMY_POOL_RECYCLE", "300")),
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-    )
+    engine_kwargs: dict = {
+        "echo": False,
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.getenv("SQLALCHEMY_POOL_RECYCLE", "300")),
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
+    }
+    connect_timeout = os.getenv("SQLALCHEMY_CONNECT_TIMEOUT", "").strip()
+    if connect_timeout.isdigit():
+        engine_kwargs["connect_args"] = {"connect_timeout": int(connect_timeout)}
+    _engine = create_engine(url, **engine_kwargs)
     _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
 
 

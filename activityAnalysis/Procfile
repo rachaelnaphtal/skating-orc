@@ -1,1 +1,1 @@
-web: streamlit run activityAnalysis/activity_tracker_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+web: sh setup.sh && streamlit run ${STREAMLIT_APP:-activityAnalysis/activity_tracker_app.py} --server.port=$PORT --server.address=0.0.0.0 --server.headless=true

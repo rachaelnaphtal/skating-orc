@@ -58,6 +58,7 @@ section = st.radio(
         "Manage judge emails",
         "Email competition reports",
         "Public ↔ officials competition types",
+        "International requirement rules",
         "Merge judges",
     ],
     horizontal=True,
@@ -74,5 +75,7 @@ elif section == "Email competition reports":
     adm.render_email_competition_reports()
 elif section == "Public ↔ officials competition types":
     adm.render_public_competition_officials_types_breakdown()
+elif section == "International requirement rules":
+    adm.render_international_requirement_rules()
 else:
     adm.render_merge_judges()

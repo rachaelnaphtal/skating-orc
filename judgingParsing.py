@@ -107,6 +107,34 @@ def parse_scores(pdf_path, event_regex="", use_gcp=False, isFSM=False):
                 return process_fsm_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
             return process_scores(pdf, event_regex=event_regex, use_gcp=use_gcp)
 
+def _fsm_normalize_pdf_text(text: str) -> str:
+    return (
+        text.replace("\xa0", "")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("ﬁ", "fi")
+    )
+
+
+def _fsm_strip_element_number(line: str, element_number: int) -> tuple[str, int, bool]:
+    """
+    Strip a leading PDF element index and sync the expected counter to it.
+
+    The index must be followed by an element code (not a decimal TES total like
+    ``38.50 49.26``). Returns ``jumped`` when the PDF index is more than one
+    ahead of our counter (skipped elements).
+    """
+    m = re.match(r"^(\d+)\s+(?=[A-Za-z0-9*<>!])", line)
+    if not m:
+        return line, element_number, False
+    pdf_num = int(m.group(1))
+    jumped = pdf_num > element_number + 1
+    if pdf_num > element_number:
+        element_number = pdf_num
+    return line[m.end() :], element_number, jumped
+
+
 def parse_fsm_element_judge_scores(raw: str) -> tuple[list[float | None], int | None]:
     """
     Parse the judge-GOE token run from an FSM element line.
@@ -216,11 +244,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
         # -----------------------------
         # Strong normalization
         # -----------------------------
-        text = (
-            text.replace("\xa0", "")
-                .replace("–", "-")
-                .replace("ﬁ", "fi")
-        )
+        text = _fsm_normalize_pdf_text(text)
 
         raw_lines = text.split("\n")
         lines = [
@@ -301,19 +325,15 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             # -----------------------------
             # Element regex (robust)
             # -----------------------------
-            if line.startswith(str(element_number)) :
-                line=line[len(str(element_number)):]
-            elif line.startswith(str(element_number+1)):
+            line, element_number, jumped = _fsm_strip_element_number(
+                line, element_number
+            )
+            if jumped:
                 _parsing_log(
-                    f"error parsing line for {skater_name} {event_name} {lines[i-1]}",
+                    f"element number catch-up for {skater_name} {event_name} "
+                    f"(previous line: {lines[i - 1]!r})",
                     issue=True,
                 )
-                element_number=element_number+1
-                line=line[len(str(element_number)):]
-            
-            if "- - - -" in line:
-                element_number=element_number+1
-                continue
 
             element_match = match_element_fsm(line)
 
@@ -448,7 +468,7 @@ def match_element_fsm(line):
         (-?\d+(?:\.\d+)?)                      # GOE
 
         \s+
-        ((?:-?\d+\s+){2,8}-?\d+)               # Judge scores (3–9 integers)
+        ((?:(?:-?\d+|-)\s+){2,8}(?:-?\d+|-))   # Judge GOEs (3–9; ``-`` = missing)
 
         (?:\s+(\d+(?:\.\d+)?))?                # Optional bonus (e.g. 1.00)
 
@@ -1099,22 +1119,25 @@ def match_skater(line, has_bonus):
         )
 
 def match_skater_fsm(line):
+    """
+    FSM skater header: order, name (unicode / may include NOC), start #, total, TES, PCS, deductions.
+    """
     return re.match(
         r"""
         ^
-        (\d+)                                           # 1- Skate order
+        (\d+)                              # 1- skate order
         \s+
-        ([A-Za-z0-9\-'/\.]+(?:\s+[A-Za-z0-9\-'/\.]+)*)  # 2- Name / club
+        (.+?)                              # 2- name (may include 3-letter NOC before start #)
         \s+
-        (\d+)                                           # 3- Start order
+        (\d{1,3})                          # 3- start order
         \s+
-        (-?\d+\.\d+)                                   # 4- Total
+        (-?\d+\.\d+)                       # 4- total
         \s+
-        (-?\d+\.\d+)                                   # 5- TES
+        (-?\d+\.\d+)                       # 5- TES
         \s+
-        (-?\d+\.\d+)                                   # 6- PCS
+        (-?\d+\.\d+)                       # 6- PCS
         \s+
-        (-?\d+\.\d+)                                   # 7- Deductions
+        (-?\d+\.\d+)                       # 7- deductions
         $
         """,
         line,

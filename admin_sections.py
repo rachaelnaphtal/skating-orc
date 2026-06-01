@@ -9,6 +9,7 @@ import sys
 import tempfile
 import traceback as _tb
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -539,3 +540,166 @@ def render_judge_directory_matcher_embedded() -> None:
     from judge_official_matcher_app import render_judge_official_matcher
 
     render_judge_official_matcher(embedded=True)
+
+
+def render_international_requirement_rules() -> None:
+    """Edit ISU maintain / promote thresholds (Rules 412–416, 828–862)."""
+    from load_activity_data import activity_database_is_postgresql
+    import international_requirements as ir
+
+    st.subheader("International requirement rules")
+    st.caption(
+        "Thresholds for ISU maintain / promote service checks in the International Officials app. "
+        "Apply migrations **017** and **018** before editing. "
+        "Seminars, exams, and age limits are not stored here."
+    )
+
+    if not activity_database_is_postgresql():
+        st.error("Requires PostgreSQL with ``officials_analysis.international_requirement_*`` tables.")
+        return
+
+    rule_sets = ir.load_requirement_rule_sets_admin()
+    if rule_sets.empty:
+        st.warning("No rule sets found — run migration 017/018 or check database connection.")
+        return
+
+    tab_sets, tab_rules = st.tabs(["Rule sets", "Rules"])
+
+    with tab_sets:
+        st.write("Edit season window, labels, and active flag. Save per row.")
+        display_cols = [
+            "id",
+            "isu_rule_ref",
+            "purpose",
+            "label",
+            "appointment_type_id",
+            "discipline_id",
+            "listing_tier",
+            "sport",
+            "season_window",
+            "sort_order",
+            "active",
+        ]
+        view = rule_sets[display_cols].copy()
+        edited = st.data_editor(
+            view,
+            num_rows="fixed",
+            disabled=["id", "isu_rule_ref", "purpose", "appointment_type_id", "discipline_id", "listing_tier", "sport"],
+            column_config={
+                "active": st.column_config.CheckboxColumn("Active"),
+                "season_window": st.column_config.NumberColumn("Season window", min_value=1, max_value=10),
+            },
+            key="admin_intl_req_rule_sets",
+        )
+
+        if st.button("Save rule set changes", type="primary", key="admin_intl_req_save_sets"):
+            changed = 0
+            for _, row in edited.iterrows():
+                orig = rule_sets.loc[rule_sets["id"] == row["id"]].iloc[0]
+                if (
+                    int(row["season_window"]) != int(orig["season_window"])
+                    or str(row["label"]) != str(orig["label"])
+                    or int(row["sort_order"]) != int(orig["sort_order"])
+                    or bool(row["active"]) != bool(orig["active"])
+                ):
+                    ir.update_requirement_rule_set(
+                        int(row["id"]),
+                        label=str(row["label"]),
+                        season_window=int(row["season_window"]),
+                        sort_order=int(row["sort_order"]),
+                        active=bool(row["active"]),
+                    )
+                    changed += 1
+            if changed:
+                st.success(f"Updated {changed} rule set(s).")
+                st.rerun()
+            else:
+                st.info("No changes to save.")
+
+    with tab_rules:
+        rs_options = {
+            f"{r.isu_rule_ref} — {r.label} (id {r.id})": int(r.id)
+            for r in rule_sets.sort_values(["sort_order", "id"]).itertuples()
+        }
+        selected_label = st.selectbox("Rule set", list(rs_options.keys()), key="admin_intl_req_rs_pick")
+        rs_id = rs_options[selected_label]
+
+        rules = ir.load_requirement_rules_admin(rs_id)
+        if rules.empty:
+            st.info("No rules for this set.")
+            return
+
+        def _fmt_int_array(arr: Any) -> str:
+            if arr is None or (isinstance(arr, float) and pd.isna(arr)):
+                return ""
+            return ", ".join(str(int(x)) for x in arr)
+
+        def _fmt_str_array(arr: Any) -> str:
+            if arr is None or (isinstance(arr, float) and pd.isna(arr)):
+                return ""
+            return ", ".join(str(x) for x in arr)
+
+        rules_view = rules.copy()
+        rules_view["role_appointment_type_ids"] = rules_view["role_appointment_type_ids"].map(_fmt_int_array)
+        rules_view["competition_type_ids"] = rules_view["competition_type_ids"].map(_fmt_int_array)
+        rules_view["segment_levels"] = rules_view["segment_levels"].map(_fmt_str_array)
+
+        if rules_view["metric"].eq("competition_alternatives").any():
+            st.json(rules.loc[rules["metric"] == "competition_alternatives", "metric_config"].iloc[0])
+
+        edited_rules = st.data_editor(
+            rules_view,
+            num_rows="fixed",
+            disabled=["id", "rule_set_id", "metric", "metric_config"],
+            column_config={
+                "require_championship_or_olympic": st.column_config.CheckboxColumn("Championship/Olympic only"),
+                "include_qualifying_national": st.column_config.CheckboxColumn("Include qualifying national"),
+                "min_value": st.column_config.NumberColumn("Min value", min_value=0),
+            },
+            key="admin_intl_req_rules",
+        )
+
+        st.caption(
+            "Role IDs: 1=Judge, 4=Referee, 8=Data Operator, 9=TS, 11=TC. "
+            "Competition types: 15=ISU Championship, 16=ISU Competition, 17=International. "
+            "**Include qualifying national**: also count ``qualifying = true`` (not adult/collegiate). "
+            "**competition_alternatives** rules use ``metric_config`` JSON (see migration 020 / Rule 861.4.b)."
+        )
+
+        if st.button("Save rule changes", type="primary", key="admin_intl_req_save_rules"):
+            changed = 0
+            for _, row in edited_rules.iterrows():
+                orig = rules.loc[rules["id"] == row["id"]].iloc[0]
+                kwargs: dict[str, Any] = {}
+                if int(row["min_value"]) != int(orig["min_value"]):
+                    kwargs["min_value"] = int(row["min_value"])
+                if str(row.get("display_label") or "") != str(orig.get("display_label") or ""):
+                    kwargs["display_label"] = str(row["display_label"])
+                if int(row["sort_order"]) != int(orig["sort_order"]):
+                    kwargs["sort_order"] = int(row["sort_order"])
+                if bool(row["require_championship_or_olympic"]) != bool(orig["require_championship_or_olympic"]):
+                    kwargs["require_championship_or_olympic"] = bool(row["require_championship_or_olympic"])
+                if bool(row.get("include_qualifying_national", False)) != bool(
+                    orig.get("include_qualifying_national", False)
+                ):
+                    kwargs["include_qualifying_national"] = bool(row["include_qualifying_national"])
+
+                for col, parser in (
+                    ("role_appointment_type_ids", _fmt_int_array),
+                    ("competition_type_ids", _fmt_int_array),
+                    ("segment_levels", _fmt_str_array),
+                ):
+                    new_val = str(row[col] or "").strip()
+                    old_val = parser(orig[col])
+                    if new_val != old_val:
+                        kwargs[col] = new_val
+
+                if kwargs:
+                    ir.update_requirement_rule(int(row["id"]), **kwargs)
+                    changed += 1
+
+            if changed:
+                st.success(f"Updated {changed} rule(s).")
+                st.rerun()
+            else:
+                st.info("No changes to save.")
