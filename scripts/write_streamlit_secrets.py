@@ -16,6 +16,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from urllib.parse import quote_plus
+
 from gcs_credentials import fix_pem_private_key, service_account_info_from_env
 
 
@@ -78,13 +80,35 @@ def _append_gcs_section(lines: list[str]) -> None:
         lines.append('"""')
 
 
+def _database_url_from_env() -> str:
+    """Heroku / deploy: PG_DB_URL, then DATABASE_URL, then DB_* components."""
+    pg_url = (os.environ.get("PG_DB_URL") or "").strip()
+    if pg_url:
+        return pg_url
+
+    db_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if db_url:
+        return db_url
+
+    host = (os.environ.get("DB_HOST") or "").strip()
+    port = (os.environ.get("DB_PORT") or "5432").strip()
+    database = (os.environ.get("DB_NAME") or "").strip()
+    username = (os.environ.get("DB_USERNAME") or "").strip()
+    password = os.environ.get("DB_PASSWORD") or ""
+    if host and database and username:
+        user = quote_plus(username)
+        pwd = quote_plus(password)
+        return f"postgresql://{user}:{pwd}@{host}:{port}/{database}"
+    return ""
+
+
 def main() -> None:
     streamlit_dir = Path.home() / ".streamlit"
     streamlit_dir.mkdir(parents=True, exist_ok=True)
     out = streamlit_dir / "secrets.toml"
 
     lines: list[str] = []
-    pg_url = os.environ.get("PG_DB_URL", "")
+    pg_url = _database_url_from_env()
     lines.append(f'DATABASE_URL = {_toml_quote(pg_url)}')
     lines.append("")
     lines.append("[connections.postgresql]")

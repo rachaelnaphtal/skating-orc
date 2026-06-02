@@ -20,8 +20,10 @@ heroku git:remote -a your-intl-officials-app -r intl-officials
 
 heroku config:set STREAMLIT_APP=activityAnalysis/international_officials_app.py -a your-intl-officials-app
 
-# Same database secrets as your other deployed apps:
+# Same database secrets as your other deployed apps (at least one is required):
+# Option A — full URL (Heroku Postgres addon sets DATABASE_URL automatically; or copy from existing app):
 heroku config:set PG_DB_URL='postgresql://...' -a your-intl-officials-app
+# Option B — component vars (setup.sh builds the URL for Streamlit secrets):
 heroku config:set DB_HOST=... DB_PORT=5432 DB_NAME=... DB_USERNAME=... DB_PASSWORD=... -a your-intl-officials-app
 
 # Optional GCS (if you use cloud storage features):

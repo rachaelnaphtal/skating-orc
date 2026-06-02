@@ -119,6 +119,11 @@ def _database_url_from_streamlit_secrets() -> tuple[str | None, str]:
         if built:
             return built, "secrets:connections.postgresql-local"
 
+    pg_conn = st.secrets.get("connections", {}).get("postgresql")
+    built = _url_from_connection_section(pg_conn)
+    if built and not _is_local_database_url(built):
+        return built, "secrets:connections.postgresql"
+
     if not use_cloud and db_url:
         return _normalize_database_url(str(db_url)), "secrets:DATABASE_URL"
 
@@ -141,6 +146,10 @@ def resolve_database_url() -> tuple[str, str]:
 
     if env_url:
         return _normalize_database_url(env_url), "environment:DATABASE_URL"
+
+    pg_db_url = (os.getenv("PG_DB_URL") or "").strip()
+    if pg_db_url:
+        return _normalize_database_url(pg_db_url), "environment:PG_DB_URL"
 
     if secrets_url:
         return secrets_url, secrets_source
