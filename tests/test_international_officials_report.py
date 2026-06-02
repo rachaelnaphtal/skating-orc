@@ -72,6 +72,8 @@ def test_bulk_reports_zip_filename():
 
 def test_build_appointment_detail_pdf_magic_bytes():
     pdf = build_appointment_detail_pdf(_minimal_context())
+    assert isinstance(pdf, bytes)
+    assert not isinstance(pdf, bytearray)
     assert pdf[:4] == b"%PDF"
     assert len(pdf) > 200
 

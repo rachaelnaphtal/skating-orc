@@ -370,6 +370,15 @@ def _pdf_write_panel_table(pdf: _ReportPDF, detail: pd.DataFrame) -> None:
         pdf.ln()
 
 
+def _binary_output_bytes(out: bytes | bytearray | str) -> bytes:
+    """Streamlit download widgets require ``bytes``, not ``bytearray``."""
+    if isinstance(out, bytes):
+        return out
+    if isinstance(out, bytearray):
+        return bytes(out)
+    return out.encode("latin-1")
+
+
 def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
     if FPDF is None:
         raise RuntimeError("fpdf2 is required for PDF export (pip install fpdf2)")
@@ -422,7 +431,7 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
     _pdf_write_panel_table(pdf, ctx.panel_detail)
 
     out = pdf.output()
-    return out if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
+    return _binary_output_bytes(out)
 
 
 def build_bulk_appointment_reports_zip(
