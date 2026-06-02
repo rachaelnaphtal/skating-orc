@@ -22,7 +22,14 @@ from database import ensure_database_for_streamlit
 
 ensure_database_for_streamlit()
 
-from app_query_params import qp_get, sync_query_params
+from app_query_params import (
+    apply_bool_param,
+    apply_int_select_param,
+    mark_query_params_applied,
+    qp_get,
+    query_params_changed,
+    sync_query_params,
+)
 from activityAnalysis.international_officials_data import (
     COUNTABLE_SEGMENT_LEVELS,
     DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL,
@@ -49,6 +56,10 @@ from activityAnalysis.international_officials_detail import (
     parse_appointment_detail_params,
     render_appointment_detail_report,
 )
+from activityAnalysis.international_officials_report import (
+    build_bulk_appointment_reports_zip,
+    bulk_reports_zip_filename,
+)
 from activityAnalysis.international_requirements import evaluate_requirements_summary_df
 from activityAnalysis.load_activity_data import activity_database_is_postgresql, get_engine
 from activityAnalysis.officials_analysis_models import Appointments
@@ -63,6 +74,7 @@ st.set_page_config(
 
 _CACHE_TTL_SEC = 120
 _ALL_LABEL = "(All)"
+_INTL_QP_FLAG = "_intl_officials_qp_tuple"
 
 
 @st.cache_data(ttl=_CACHE_TTL_SEC)
@@ -151,6 +163,37 @@ def _load_summary(
             listing_season_code=listing_season_code,
         )
     return summary, report_season_codes
+
+
+def _build_bulk_appointment_reports_zip(
+    summary: pd.DataFrame,
+    report_season_codes: list[int],
+    *,
+    listing_season_code: int,
+    report_season_window: int,
+    active_only: bool,
+) -> tuple[bytes, str]:
+    """One PDF per summary row, packaged as a ZIP (requirements always included)."""
+    zip_name = bulk_reports_zip_filename(
+        listing_season_code=listing_season_code,
+        report_season_window=report_season_window,
+    )
+    if summary.empty:
+        return b"", zip_name
+
+    official_ids = summary["official_id"].astype(int).unique().tolist()
+    panel = load_international_panel_segments_bulk(
+        official_ids, season_codes=report_season_codes
+    )
+    zip_bytes = build_bulk_appointment_reports_zip(
+        summary,
+        listing_season_code=listing_season_code,
+        report_season_codes=report_season_codes,
+        report_season_window=report_season_window,
+        active_only=active_only,
+        panel_bulk=panel,
+    )
+    return zip_bytes, zip_name
 
 
 @st.cache_data(ttl=_CACHE_TTL_SEC)
@@ -247,16 +290,23 @@ def _render_appointment_detail_from_query_params() -> bool:
         return False
 
     listing_season_code = int(
-        params["listing_season_code"] or REPORT_LISTING_SEASON_DEFAULT
+        st.session_state.get("intl_listing_season")
+        or params["listing_season_code"]
+        or REPORT_LISTING_SEASON_DEFAULT
     )
     report_season_window = int(
-        params["report_season_window"] or REPORT_SEASON_WINDOW_DEFAULT
+        st.session_state.get("intl_report_season_window")
+        or params["report_season_window"]
+        or REPORT_SEASON_WINDOW_DEFAULT
+    )
+    active_only = bool(
+        st.session_state.get("intl_active_only", params["active_only"])
     )
     summary, report_season_codes = _load_summary(
         params["appointment_type_id"],
         params["discipline_id"],
         params["official_id"],
-        params["active_only"],
+        active_only,
         False,
         listing_season_code,
         report_season_window,
@@ -284,7 +334,7 @@ def _render_appointment_detail_from_query_params() -> bool:
         listing_season_code=listing_season_code,
         report_season_window=report_season_window,
         report_season_codes=report_season_codes,
-        active_only=params["active_only"],
+        active_only=active_only,
         panel_bulk=panel,
         nav_appointments=nav_appointments,
     )
@@ -310,15 +360,43 @@ if st.sidebar.button("Refresh data"):
 
 _on_detail_page = qp_get("view") == "appointment"
 
+if query_params_changed(_INTL_QP_FLAG):
+    apply_int_select_param(
+        "listing", "intl_listing_season", REPORT_LISTING_SEASON_OPTIONS
+    )
+    apply_int_select_param(
+        "seasons", "intl_report_season_window", REPORT_SEASON_WINDOW_OPTIONS
+    )
+    apply_bool_param("active", "intl_active_only")
+    if qp_get("req") is not None:
+        apply_bool_param("req", "intl_include_requirements")
+    mark_query_params_applied(_INTL_QP_FLAG)
+
+if "intl_listing_season" not in st.session_state:
+    st.session_state["intl_listing_season"] = REPORT_LISTING_SEASON_DEFAULT
+if "intl_report_season_window" not in st.session_state:
+    st.session_state["intl_report_season_window"] = REPORT_SEASON_WINDOW_DEFAULT
+if "intl_active_only" not in st.session_state:
+    st.session_state["intl_active_only"] = (
+        qp_get("active") != "0" if qp_get("active") is not None else True
+    )
+if "intl_include_requirements" not in st.session_state:
+    if _on_detail_page:
+        st.session_state["intl_include_requirements"] = True
+    elif qp_get("req") is not None:
+        st.session_state["intl_include_requirements"] = qp_get("req") == "1"
+    else:
+        st.session_state["intl_include_requirements"] = False
+
 active_only = st.sidebar.checkbox(
     "Active appointments only",
-    value=qp_get("active") != "0" if qp_get("active") is not None else True,
+    key="intl_active_only",
     help="When checked, only directory appointments with active = true are included.",
 )
 
 include_requirements = st.sidebar.checkbox(
     "Include ISU maintain / promote checks",
-    value=True if _on_detail_page else qp_get("req") == "1",
+    key="intl_include_requirements",
     disabled=_on_detail_page,
     help=(
         "Adds Maintain and Promote columns on the summary list (slower). "
@@ -331,7 +409,7 @@ include_requirements = st.sidebar.checkbox(
 listing_season_code = st.sidebar.selectbox(
     "Listing season",
     options=list(REPORT_LISTING_SEASON_OPTIONS),
-    index=list(REPORT_LISTING_SEASON_OPTIONS).index(REPORT_LISTING_SEASON_DEFAULT),
+    key="intl_listing_season",
     format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
     help="ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one.",
 )
@@ -339,7 +417,7 @@ listing_season_code = st.sidebar.selectbox(
 report_season_window = st.sidebar.selectbox(
     "Seasons in report",
     options=list(REPORT_SEASON_WINDOW_OPTIONS),
-    index=list(REPORT_SEASON_WINDOW_OPTIONS).index(REPORT_SEASON_WINDOW_DEFAULT),
+    key="intl_report_season_window",
     help="Filter competition/segment counts and detail to this many seasons before the listing season.",
 )
 
@@ -349,11 +427,12 @@ st.sidebar.caption(
     + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
 )
 
-if not _on_detail_page:
-    sync_query_params(
-        req="1" if include_requirements else "0",
-        active="1" if active_only else "0",
-    )
+sync_query_params(
+    listing=str(int(listing_season_code)),
+    seasons=str(int(report_season_window)),
+    req="1" if include_requirements else "0",
+    active="1" if active_only else "0",
+)
 
 if _render_appointment_detail_from_query_params():
     st.stop()
@@ -471,6 +550,67 @@ m3.metric("Competitions (panel)", total_competitions)
 m4.metric("Segments (panel)", total_segments)
 
 st.subheader("Summary by appointment")
+dl_col, _ = st.columns([2, 5])
+with dl_col:
+    bulk_zip_key = (
+        appt_id,
+        disc_id,
+        official_id,
+        active_only,
+        int(listing_season_code),
+        int(report_season_window),
+        total_appointments,
+    )
+    if st.session_state.get("intl_bulk_zip_key") != bulk_zip_key:
+        st.session_state.pop("intl_bulk_zip", None)
+        st.session_state.pop("intl_bulk_zip_name", None)
+
+    try:
+        if st.button(
+            "Download all PDFs (ZIP)",
+            type="primary",
+            use_container_width=True,
+            help=(
+                f"Build one PDF per appointment row ({total_appointments} report"
+                f"{'s' if total_appointments != 1 else ''}). "
+                "Includes full requirement breakdowns."
+            ),
+        ):
+            with st.spinner("Building PDF reports…"):
+                zip_bytes, zip_name = _build_bulk_appointment_reports_zip(
+                    summary,
+                    report_season_codes,
+                    listing_season_code=int(listing_season_code),
+                    report_season_window=int(report_season_window),
+                    active_only=active_only,
+                )
+            if zip_bytes:
+                st.session_state["intl_bulk_zip"] = zip_bytes
+                st.session_state["intl_bulk_zip_name"] = zip_name
+                st.session_state["intl_bulk_zip_key"] = bulk_zip_key
+            else:
+                st.session_state.pop("intl_bulk_zip", None)
+                st.session_state.pop("intl_bulk_zip_name", None)
+                st.session_state.pop("intl_bulk_zip_key", None)
+
+        zip_bytes = st.session_state.get("intl_bulk_zip")
+        zip_name = st.session_state.get("intl_bulk_zip_name")
+        if (
+            zip_bytes
+            and zip_name
+            and st.session_state.get("intl_bulk_zip_key") == bulk_zip_key
+        ):
+            st.download_button(
+                "Save ZIP file",
+                data=zip_bytes,
+                file_name=zip_name,
+                mime="application/zip",
+                use_container_width=True,
+                on_click="ignore",
+            )
+    except RuntimeError as exc:
+        st.caption(str(exc))
+
 summary_display = summary.rename(
     columns={
         "official_name": "Official",

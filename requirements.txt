@@ -1,3 +1,4 @@
+fpdf2>=2.8.0
 beautifulsoup4>=4.14.3
 cloud-sql-python-connector>=1.20.2
 gcsfs>=2026.3.0

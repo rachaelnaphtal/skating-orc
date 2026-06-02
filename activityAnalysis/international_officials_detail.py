@@ -40,6 +40,12 @@ try:
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
+    from activityAnalysis.international_officials_report import (
+        AppointmentDetailContext,
+        appointment_detail_pdf_filename,
+        build_appointment_detail_context,
+        build_appointment_detail_pdf,
+    )
     from activityAnalysis.load_activity_data import get_engine
 except ModuleNotFoundError:
     from international_listing_seasons import (
@@ -61,6 +67,12 @@ except ModuleNotFoundError:
         format_competition_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
+    )
+    from international_officials_report import (
+        AppointmentDetailContext,
+        appointment_detail_pdf_filename,
+        build_appointment_detail_context,
+        build_appointment_detail_pdf,
     )
     from load_activity_data import get_engine
 
@@ -466,20 +478,73 @@ def render_appointment_detail_report(
     active_only: bool,
     panel_bulk: pd.DataFrame | None = None,
     nav_appointments: pd.DataFrame | None = None,
+    detail_context: AppointmentDetailContext | None = None,
 ) -> None:
     """Full activity + requirement breakdown for one summary row."""
-    official_id = int(summary_row["official_id"])
-    appointment_type_id = int(summary_row["appointment_type_id"])
-    discipline_id = _nullable_int_for_sql(summary_row.get("discipline_id"))
-    official_name = (summary_row.get("official_name") or "").strip() or f"Official {official_id}"
-    appointment_type = summary_row.get("appointment_type") or ""
-    discipline = summary_row.get("discipline") or "—"
-    appointment_level = summary_row.get("appointment_level") or ""
-    appointment_level_id = summary_row.get("appointment_level_id")
+    ctx = detail_context or build_appointment_detail_context(
+        summary_row,
+        listing_season_code=listing_season_code,
+        report_season_codes=report_season_codes,
+        active_only=active_only,
+        panel_bulk=panel_bulk,
+    )
+    official_id = ctx.official_id
+    appointment_type_id = ctx.appointment_type_id
+    discipline_id = ctx.discipline_id
+    official_name = ctx.official_name
+    appointment_type = ctx.appointment_type
+    discipline = ctx.discipline
+    appointment_level = ctx.appointment_level
+    maintain_primary = ctx.maintain_primary
+    promote_primary = ctx.promote_primary
+    show_promote = ctx.show_promote
+    listing_tier = ctx.listing_tier
 
-    if st.button("← Back to summary", type="secondary"):
-        clear_appointment_detail_params()
-        st.rerun()
+    nav_col, back_col, pdf_col = st.columns([5, 1, 2])
+    with back_col:
+        if st.button("← Back", type="secondary", help="Back to summary"):
+            clear_appointment_detail_params()
+            st.rerun()
+    with pdf_col:
+        pdf_cache_key = (
+            official_id,
+            appointment_type_id,
+            discipline_id,
+            listing_season_code,
+            report_season_window,
+        )
+        if st.session_state.get("intl_detail_pdf_key") != pdf_cache_key:
+            st.session_state.pop("intl_detail_pdf", None)
+            st.session_state.pop("intl_detail_pdf_name", None)
+
+        try:
+            if st.button(
+                "Download PDF",
+                type="primary",
+                use_container_width=True,
+                key="intl_detail_pdf_btn",
+            ):
+                with st.spinner("Building PDF…"):
+                    st.session_state["intl_detail_pdf"] = build_appointment_detail_pdf(ctx)
+                    st.session_state["intl_detail_pdf_name"] = appointment_detail_pdf_filename(
+                        ctx
+                    )
+                    st.session_state["intl_detail_pdf_key"] = pdf_cache_key
+
+            if (
+                st.session_state.get("intl_detail_pdf_key") == pdf_cache_key
+                and st.session_state.get("intl_detail_pdf")
+            ):
+                st.download_button(
+                    "Save PDF",
+                    data=st.session_state["intl_detail_pdf"],
+                    file_name=st.session_state["intl_detail_pdf_name"],
+                    mime="application/pdf",
+                    use_container_width=True,
+                    on_click="ignore",
+                )
+        except RuntimeError as exc:
+            st.caption(str(exc))
 
     if nav_appointments is not None:
         render_detail_appointment_nav(
@@ -498,63 +563,9 @@ def render_appointment_detail_report(
         f" · Listing {format_usfs_season_code(listing_season_code)}"
     )
 
-    panel = panel_bulk
-    if panel is None:
-        panel = load_international_panel_segments_bulk([official_id])
-
-    from sqlalchemy.orm import Session
-
-    with Session(get_engine()) as session:
-        isu_level_id = _isu_level_id(session)
-        international_level_id = _international_level_id(session)
-    isu_listing_keys = _batch_isu_listing_keys([official_id])
-    show_promote = should_evaluate_promote_requirements(
-        official_id,
-        appointment_type_id,
-        discipline_id,
-        appointment_level,
-        appointment_level_id,
-        isu_level_id=isu_level_id,
-        isu_listing_keys=isu_listing_keys,
-    )
-
-    maintain_evals = evaluate_requirements_for_appointment(
-        official_id,
-        appointment_type_id,
-        discipline_id,
-        "maintain",
-        listing_season_code=listing_season_code,
-        panel_bulk=panel,
-        isu_level_id=isu_level_id,
-        isu_listing_keys=isu_listing_keys,
-    )
-    listing_tier = directory_listing_tier_for_level(
-        appointment_level,
-        level_id=appointment_level_id,
-        isu_level_id=isu_level_id,
-        international_level_id=international_level_id,
-    )
-    tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
-    maintain_primary = _primary_requirement_evaluation(tier_rules)
-
-    promote_primary: RequirementEvaluation | None = None
-    if show_promote:
-        promote_evals = evaluate_requirements_for_appointment(
-            official_id,
-            appointment_type_id,
-            discipline_id,
-            "promote",
-            listing_season_code=listing_season_code,
-            panel_bulk=panel,
-            isu_level_id=isu_level_id,
-            isu_listing_keys=isu_listing_keys,
-        )
-        promote_applicable = [e for e in promote_evals if not e.not_applicable]
-        promote_primary = _primary_requirement_evaluation(promote_applicable)
-
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Competitions", int(summary_row.get("competition_count") or 0))
-    c2.metric("Segments", int(summary_row.get("segment_count") or 0))
+    c1.metric("Competitions", ctx.competition_count)
+    c2.metric("Segments", ctx.segment_count)
     c3.metric("Maintain", _requirement_metric_label(maintain_primary))
     c4.metric(
         "Promote",
@@ -575,11 +586,9 @@ def render_appointment_detail_report(
             maintain_primary,
         )
 
-    if not show_promote:
+    if ctx.promote_note:
         st.markdown("### Promote")
-        st.info(
-            "Promotion checks apply to International-level appointments not yet ISU-listed."
-        )
+        st.info(ctx.promote_note)
     elif promote_primary is None:
         st.markdown("### Promote to ISU")
         st.info("No promotion requirement profile applies.")
@@ -587,14 +596,7 @@ def render_appointment_detail_report(
         _render_requirement_evaluation("Promote to ISU", promote_primary)
 
     st.markdown("### Panel activity (this appointment)")
-    detail = get_international_official_activity_detail(
-        appointment_type_id=appointment_type_id,
-        discipline_id=discipline_id,
-        official_id=official_id,
-        active_appointments_only=active_only,
-        panel_bulk=panel,
-        season_codes=report_season_codes,
-    )
+    detail = ctx.panel_detail.copy()
     if detail.empty:
         st.info("No matching panel segments in the selected seasons.")
         return
