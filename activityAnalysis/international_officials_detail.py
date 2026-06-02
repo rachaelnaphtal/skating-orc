@@ -209,20 +209,29 @@ def _primary_requirement_evaluation(
 
 
 def _streamlit_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce numpy/pandas scalars so Streamlit/pyarrow can serialize the frame."""
-    out = df.copy()
-    if "Season" in out.columns:
-        out["Season"] = out["Season"].map(
-            lambda y: format_usfs_season_code(int(y)) if pd.notna(y) else ""
-        )
-    for col in out.columns:
+    """Build a plain string dataframe so Streamlit/pyarrow never sees numpy int64 metadata."""
+    if df.empty:
+        return pd.DataFrame(columns=list(df.columns))
+
+    work = df.reset_index(drop=True).copy()
+    if "competition_year" in work.columns:
+        if "Season" in work.columns:
+            work = work.drop(columns=["competition_year"])
+        else:
+            work = work.rename(columns={"competition_year": "Season"})
+
+    columns = list(work.columns)
+    data: dict[str, list[str]] = {}
+    for col in columns:
         if col == "Season":
-            continue
-        if pd.api.types.is_integer_dtype(out[col]):
-            out[col] = out[col].map(lambda v: int(v) if pd.notna(v) else None)
-        elif pd.api.types.is_float_dtype(out[col]):
-            out[col] = out[col].map(lambda v: float(v) if pd.notna(v) else None)
-    return out
+            data[col] = [
+                format_usfs_season_code(int(v)) if pd.notna(v) else ""
+                for v in work[col]
+            ]
+        else:
+            data[col] = ["" if pd.isna(v) else str(v) for v in work[col]]
+
+    return pd.DataFrame(data, columns=columns)
 
 
 def _render_qualifying_activity_table(activity: pd.DataFrame | None, *, caption: str) -> None:
