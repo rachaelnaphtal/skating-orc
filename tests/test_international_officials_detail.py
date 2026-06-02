@@ -1,7 +1,26 @@
 import pandas as pd
 import pyarrow as pa
 
-from activityAnalysis.international_officials_detail import _streamlit_safe_dataframe
+from activityAnalysis.international_officials_detail import (
+    _appointment_nav_key,
+    _appointment_nav_label,
+    _streamlit_safe_dataframe,
+)
+
+
+def test_appointment_nav_label_includes_discipline():
+    row = pd.Series(
+        {
+            "official_id": 1,
+            "official_name": "Jane Doe",
+            "appointment_type": "International Judge",
+            "discipline_id": 2,
+            "discipline": "Singles",
+        }
+    )
+    assert _appointment_nav_label(row) == "Jane Doe — International Judge — Singles"
+    assert _appointment_nav_key(1, 12, 2) == (1, 12, 2)
+    assert _appointment_nav_key(1, 16, pd.NA) == (1, 16, None)
 
 
 def test_streamlit_safe_dataframe_converts_int64_season():

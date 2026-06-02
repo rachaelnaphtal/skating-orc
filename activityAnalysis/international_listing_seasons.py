@@ -12,11 +12,6 @@ from datetime import date
 
 import pandas as pd
 
-try:
-    from activityAnalysis.load_activity_data import calendar_years_for_usfs_season_codes
-except ModuleNotFoundError:
-    from load_activity_data import calendar_years_for_usfs_season_codes
-
 REPORT_LISTING_SEASON_DEFAULT = 2627
 REPORT_LISTING_SEASON_OPTIONS: tuple[int, ...] = (2627, 2728)
 REPORT_SEASON_WINDOW_OPTIONS: tuple[int, ...] = (2, 3, 4)
@@ -73,18 +68,25 @@ def competition_year_matches_seasons(
     year_val: object,
     season_codes: list[int],
 ) -> bool:
+    """True when ``competition.year`` is a USFS season code (e.g. ``2526``)."""
     if year_val is None or (isinstance(year_val, float) and pd.isna(year_val)):
         return False
     text_val = str(year_val).strip()
     if not text_val.isdigit():
         return False
-    n = int(text_val)
-    if n in season_codes:
-        return True
-    calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-    if len(text_val) == 4 and n in calendar_years:
-        return True
-    return False
+    return int(text_val) in {int(x) for x in season_codes}
+
+
+def season_year_sql_predicate(alias: str = "c") -> str:
+    """SQL fragment: ``competition.year`` equals a USFS season code (``2526``, …)."""
+    return f"""
+              AND btrim({alias}.year::text) IN :season_year_codes
+"""
+
+
+def season_codes_as_bind_strings(season_codes: list[int]) -> list[str]:
+    """Bind values for ``season_year_sql_predicate`` (``competition.year`` is text-like)."""
+    return [str(int(x)) for x in season_codes]
 
 
 def filter_panel_to_season_codes(

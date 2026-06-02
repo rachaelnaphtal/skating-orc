@@ -22,6 +22,7 @@ from database import ensure_database_for_streamlit
 
 ensure_database_for_streamlit()
 
+from app_query_params import qp_get, sync_query_params
 from activityAnalysis.international_officials_data import (
     COUNTABLE_SEGMENT_LEVELS,
     DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL,
@@ -196,6 +197,13 @@ def _load_segment_detail(
 
 
 @st.cache_data(ttl=_CACHE_TTL_SEC)
+def _load_detail_nav_appointments(active_only: bool):
+    return get_international_officials_for_filters(
+        active_appointments_only=active_only,
+    )
+
+
+@st.cache_data(ttl=_CACHE_TTL_SEC)
 def _load_appointment_data_date():
     with Session(get_engine()) as session:
         return session.execute(select(sqlfunc.max(Appointments.achieved_date))).scalar()
@@ -249,7 +257,7 @@ def _render_appointment_detail_from_query_params() -> bool:
         params["discipline_id"],
         params["official_id"],
         params["active_only"],
-        params["include_requirements"],
+        False,
         listing_season_code,
         report_season_window,
     )
@@ -270,14 +278,15 @@ def _render_appointment_detail_from_query_params() -> bool:
     panel = load_international_panel_segments_bulk(
         official_ids, season_codes=report_season_codes
     )
+    nav_appointments = _load_detail_nav_appointments(params["active_only"])
     render_appointment_detail_report(
         summary_row=row,
         listing_season_code=listing_season_code,
         report_season_window=report_season_window,
         report_season_codes=report_season_codes,
         active_only=params["active_only"],
-        include_requirements=params["include_requirements"],
         panel_bulk=panel,
+        nav_appointments=nav_appointments,
     )
     appt_date = _load_appointment_data_date()
     if appt_date is not None:
@@ -299,16 +308,24 @@ if st.sidebar.button("Refresh data"):
     st.cache_data.clear()
     st.rerun()
 
+_on_detail_page = qp_get("view") == "appointment"
+
 active_only = st.sidebar.checkbox(
     "Active appointments only",
-    value=True,
+    value=qp_get("active") != "0" if qp_get("active") is not None else True,
     help="When checked, only directory appointments with active = true are included.",
 )
 
 include_requirements = st.sidebar.checkbox(
     "Include ISU maintain / promote checks",
-    value=False,
-    help="Adds Maintain and Promote columns (slower on the full list). Uses the same panel data as competition counts.",
+    value=True if _on_detail_page else qp_get("req") == "1",
+    disabled=_on_detail_page,
+    help=(
+        "Adds Maintain and Promote columns on the summary list (slower). "
+        "Appointment detail pages always show full requirement breakdowns."
+        if not _on_detail_page
+        else "Maintain and promote checks are always shown on appointment detail pages."
+    ),
 )
 
 listing_season_code = st.sidebar.selectbox(
@@ -331,6 +348,12 @@ st.sidebar.caption(
     "Report seasons: "
     + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
 )
+
+if not _on_detail_page:
+    sync_query_params(
+        req="1" if include_requirements else "0",
+        active="1" if active_only else "0",
+    )
 
 if _render_appointment_detail_from_query_params():
     st.stop()
@@ -471,7 +494,6 @@ summary_display["Report"] = summary.apply(
         listing_season_code=int(listing_season_code),
         report_season_window=int(report_season_window),
         active_only=active_only,
-        include_requirements=include_requirements,
     ),
     axis=1,
 )

@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from app_query_params import qp_get, qp_get_int
+    from app_query_params import qp_get, qp_get_int, sync_query_params
 except ModuleNotFoundError:
     import os
     import sys
@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _root not in sys.path:
         sys.path.insert(0, _root)
-    from app_query_params import qp_get, qp_get_int
+    from app_query_params import qp_get, qp_get_int, sync_query_params
 
 try:
     from activityAnalysis.international_listing_seasons import (
@@ -132,7 +132,6 @@ def appointment_detail_query_params(
     listing_season_code: int,
     report_season_window: int,
     active_only: bool,
-    include_requirements: bool,
 ) -> dict[str, str]:
     return {
         "view": "appointment",
@@ -142,7 +141,6 @@ def appointment_detail_query_params(
         "listing": str(int(listing_season_code)),
         "seasons": str(int(report_season_window)),
         "active": "1" if active_only else "0",
-        "req": "1" if include_requirements else "0",
     }
 
 
@@ -154,7 +152,6 @@ def appointment_detail_url(
     listing_season_code: int,
     report_season_window: int,
     active_only: bool,
-    include_requirements: bool,
 ) -> str:
     """Full URL for a per-appointment report (for ``LinkColumn``)."""
     params = appointment_detail_query_params(
@@ -164,7 +161,6 @@ def appointment_detail_url(
         listing_season_code=listing_season_code,
         report_season_window=report_season_window,
         active_only=active_only,
-        include_requirements=include_requirements,
     )
     try:
         base = urlsplit(str(st.context.url))
@@ -188,7 +184,6 @@ def parse_appointment_detail_params() -> dict[str, Any] | None:
         "listing_season_code": qp_get_int("listing"),
         "report_season_window": qp_get_int("seasons"),
         "active_only": qp_get("active") != "0",
-        "include_requirements": qp_get("req") != "0",
     }
 
 
@@ -196,6 +191,139 @@ def clear_appointment_detail_params() -> None:
     for key in ("view", "oid", "atid", "did", "listing", "seasons", "active", "req"):
         if key in st.query_params:
             del st.query_params[key]
+
+
+def _appointment_nav_key(
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: Any,
+) -> tuple[int, int, int | None]:
+    return (
+        int(official_id),
+        int(appointment_type_id),
+        _nullable_int_for_sql(discipline_id),
+    )
+
+
+def _appointment_nav_label(row: pd.Series) -> str:
+    name = (row.get("official_name") or "").strip() or f"Official {row['official_id']}"
+    appt = (row.get("appointment_type") or "Appointment").strip()
+    disc = row.get("discipline")
+    if disc is not None and str(disc).strip() and not pd.isna(disc):
+        return f"{name} — {appt} — {disc}"
+    return f"{name} — {appt}"
+
+
+def _navigate_to_appointment_detail(
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: Any,
+    listing_season_code: int,
+    report_season_window: int,
+    active_only: bool,
+) -> None:
+    sync_query_params(
+        **appointment_detail_query_params(
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            discipline_id=discipline_id,
+            listing_season_code=listing_season_code,
+            report_season_window=report_season_window,
+            active_only=active_only,
+        )
+    )
+    st.rerun()
+
+
+def render_detail_appointment_nav(
+    *,
+    nav_appointments: pd.DataFrame,
+    current_official_id: int,
+    current_appointment_type_id: int,
+    current_discipline_id: Any,
+    listing_season_code: int,
+    report_season_window: int,
+    active_only: bool,
+) -> None:
+    """Selectbox + prev/next to jump between appointment detail reports."""
+    if nav_appointments.empty:
+        return
+
+    sorted_nav = nav_appointments.sort_values(
+        by=["official_name", "appointment_type", "discipline"],
+        na_position="last",
+    ).reset_index(drop=True)
+    options: list[tuple[int, int, int | None]] = []
+    labels: dict[tuple[int, int, int | None], str] = {}
+    for _, row in sorted_nav.iterrows():
+        key = _appointment_nav_key(
+            int(row["official_id"]),
+            int(row["appointment_type_id"]),
+            row["discipline_id"],
+        )
+        if key in labels:
+            continue
+        options.append(key)
+        labels[key] = _appointment_nav_label(row)
+
+    if len(options) <= 1:
+        return
+
+    current_key = _appointment_nav_key(
+        current_official_id,
+        current_appointment_type_id,
+        current_discipline_id,
+    )
+    if current_key not in options:
+        options.insert(0, current_key)
+        labels[current_key] = "Current appointment"
+
+    current_index = options.index(current_key)
+    prev_col, select_col, next_col = st.columns([1, 6, 1])
+    with prev_col:
+        if st.button("◀", help="Previous appointment", disabled=current_index <= 0):
+            prev = options[current_index - 1]
+            _navigate_to_appointment_detail(
+                official_id=prev[0],
+                appointment_type_id=prev[1],
+                discipline_id=prev[2],
+                listing_season_code=listing_season_code,
+                report_season_window=report_season_window,
+                active_only=active_only,
+            )
+    with next_col:
+        if st.button(
+            "▶",
+            help="Next appointment",
+            disabled=current_index >= len(options) - 1,
+        ):
+            nxt = options[current_index + 1]
+            _navigate_to_appointment_detail(
+                official_id=nxt[0],
+                appointment_type_id=nxt[1],
+                discipline_id=nxt[2],
+                listing_season_code=listing_season_code,
+                report_season_window=report_season_window,
+                active_only=active_only,
+            )
+    with select_col:
+        selected = st.selectbox(
+            "Jump to appointment",
+            options=options,
+            index=current_index,
+            format_func=lambda k: labels[k],
+            key="intl_officials_detail_nav",
+        )
+    if selected != current_key:
+        _navigate_to_appointment_detail(
+            official_id=selected[0],
+            appointment_type_id=selected[1],
+            discipline_id=selected[2],
+            listing_season_code=listing_season_code,
+            report_season_window=report_season_window,
+            active_only=active_only,
+        )
 
 
 def _primary_requirement_evaluation(
@@ -321,6 +449,14 @@ def _render_requirement_evaluation(title: str, ev: RequirementEvaluation) -> Non
     )
 
 
+def _requirement_metric_label(ev: RequirementEvaluation | None) -> str:
+    if ev is None:
+        return "N/A"
+    if ev.not_applicable:
+        return "N/A"
+    return "Yes" if ev.meets else "No"
+
+
 def render_appointment_detail_report(
     *,
     summary_row: pd.Series,
@@ -328,8 +464,8 @@ def render_appointment_detail_report(
     report_season_window: int,
     report_season_codes: list[int],
     active_only: bool,
-    include_requirements: bool,
     panel_bulk: pd.DataFrame | None = None,
+    nav_appointments: pd.DataFrame | None = None,
 ) -> None:
     """Full activity + requirement breakdown for one summary row."""
     official_id = int(summary_row["official_id"])
@@ -345,15 +481,23 @@ def render_appointment_detail_report(
         clear_appointment_detail_params()
         st.rerun()
 
+    if nav_appointments is not None:
+        render_detail_appointment_nav(
+            nav_appointments=nav_appointments,
+            current_official_id=official_id,
+            current_appointment_type_id=appointment_type_id,
+            current_discipline_id=discipline_id,
+            listing_season_code=listing_season_code,
+            report_season_window=report_season_window,
+            active_only=active_only,
+        )
+
     st.title(official_name)
     st.caption(
         f"{appointment_type} · {discipline} · {appointment_level or 'Level unknown'}"
         f" · Listing {format_usfs_season_code(listing_season_code)}"
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Competitions", int(summary_row.get("competition_count") or 0))
-    c2.metric("Segments", int(summary_row.get("segment_count") or 0))
     panel = panel_bulk
     if panel is None:
         panel = load_international_panel_segments_bulk([official_id])
@@ -374,67 +518,73 @@ def render_appointment_detail_report(
         isu_listing_keys=isu_listing_keys,
     )
 
-    if include_requirements:
-        c3.metric("Maintain", summary_row.get("maintain") or "N/A")
-        promote_val = summary_row.get("promote") or ("—" if not show_promote else "N/A")
-        c4.metric("Promote", promote_val)
+    maintain_evals = evaluate_requirements_for_appointment(
+        official_id,
+        appointment_type_id,
+        discipline_id,
+        "maintain",
+        listing_season_code=listing_season_code,
+        panel_bulk=panel,
+        isu_level_id=isu_level_id,
+        isu_listing_keys=isu_listing_keys,
+    )
+    listing_tier = directory_listing_tier_for_level(
+        appointment_level,
+        level_id=appointment_level_id,
+        isu_level_id=isu_level_id,
+        international_level_id=international_level_id,
+    )
+    tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
+    maintain_primary = _primary_requirement_evaluation(tier_rules)
+
+    promote_primary: RequirementEvaluation | None = None
+    if show_promote:
+        promote_evals = evaluate_requirements_for_appointment(
+            official_id,
+            appointment_type_id,
+            discipline_id,
+            "promote",
+            listing_season_code=listing_season_code,
+            panel_bulk=panel,
+            isu_level_id=isu_level_id,
+            isu_listing_keys=isu_listing_keys,
+        )
+        promote_applicable = [e for e in promote_evals if not e.not_applicable]
+        promote_primary = _primary_requirement_evaluation(promote_applicable)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Competitions", int(summary_row.get("competition_count") or 0))
+    c2.metric("Segments", int(summary_row.get("segment_count") or 0))
+    c3.metric("Maintain", _requirement_metric_label(maintain_primary))
+    c4.metric(
+        "Promote",
+        _requirement_metric_label(promote_primary) if show_promote else "—",
+    )
 
     st.caption(
         "Activity seasons shown: "
         + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
     )
 
-    if include_requirements:
-        maintain_evals = evaluate_requirements_for_appointment(
-            official_id,
-            appointment_type_id,
-            discipline_id,
-            "maintain",
-            listing_season_code=listing_season_code,
-            panel_bulk=panel,
-            isu_level_id=isu_level_id,
-            isu_listing_keys=isu_listing_keys,
+    if maintain_primary is None:
+        st.markdown(f"### Maintain ({listing_tier_display_label(listing_tier)} listing)")
+        st.info("No matching requirement rules configured.")
+    else:
+        _render_requirement_evaluation(
+            f"Maintain ({listing_tier_display_label(listing_tier)} listing)",
+            maintain_primary,
         )
-        listing_tier = directory_listing_tier_for_level(
-            appointment_level,
-            level_id=appointment_level_id,
-            isu_level_id=isu_level_id,
-            international_level_id=international_level_id,
-        )
-        tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
-        maintain_primary = _primary_requirement_evaluation(tier_rules)
-        if maintain_primary is None:
-            st.markdown(f"### Maintain ({listing_tier_display_label(listing_tier)} listing)")
-            st.info("No matching requirement rules configured.")
-        else:
-            _render_requirement_evaluation(
-                f"Maintain ({listing_tier_display_label(listing_tier)} listing)",
-                maintain_primary,
-            )
 
-        if not show_promote:
-            st.markdown("### Promote")
-            st.info(
-                "Promotion checks apply to International-level appointments not yet ISU-listed."
-            )
-        else:
-            promote_evals = evaluate_requirements_for_appointment(
-                official_id,
-                appointment_type_id,
-                discipline_id,
-                "promote",
-                listing_season_code=listing_season_code,
-                panel_bulk=panel,
-                isu_level_id=isu_level_id,
-                isu_listing_keys=isu_listing_keys,
-            )
-            promote_applicable = [e for e in promote_evals if not e.not_applicable]
-            promote_primary = _primary_requirement_evaluation(promote_applicable)
-            if promote_primary is None:
-                st.markdown("### Promote to ISU")
-                st.info("No promotion requirement profile applies.")
-            else:
-                _render_requirement_evaluation("Promote to ISU", promote_primary)
+    if not show_promote:
+        st.markdown("### Promote")
+        st.info(
+            "Promotion checks apply to International-level appointments not yet ISU-listed."
+        )
+    elif promote_primary is None:
+        st.markdown("### Promote to ISU")
+        st.info("No promotion requirement profile applies.")
+    else:
+        _render_requirement_evaluation("Promote to ISU", promote_primary)
 
     st.markdown("### Panel activity (this appointment)")
     detail = get_international_official_activity_detail(

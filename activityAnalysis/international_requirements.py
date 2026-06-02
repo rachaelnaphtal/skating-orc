@@ -29,9 +29,13 @@ try:
         _nullable_int_for_sql,
         national_segment_appointment_type_id,
     )
+    from activityAnalysis.international_listing_seasons import (
+        competition_year_matches_seasons,
+        season_codes_as_bind_strings,
+        season_year_sql_predicate,
+    )
     from activityAnalysis.load_activity_data import (
         activity_database_is_postgresql,
-        calendar_years_for_usfs_season_codes,
         engine,
     )
     from activityAnalysis.officials_analysis_models import (
@@ -50,9 +54,13 @@ except ModuleNotFoundError:
         _nullable_int_for_sql,
         national_segment_appointment_type_id,
     )
+    from international_listing_seasons import (
+        competition_year_matches_seasons,
+        season_codes_as_bind_strings,
+        season_year_sql_predicate,
+    )
     from load_activity_data import (
         activity_database_is_postgresql,
-        calendar_years_for_usfs_season_codes,
         engine,
     )
     from officials_analysis_models import (
@@ -292,19 +300,6 @@ def isu_season_codes_preceding_july1(listing_calendar_year: int, n: int) -> list
     return codes
 
 
-def _season_year_sql_predicate(alias: str = "c") -> str:
-    return f"""
-              AND btrim({alias}.year::text) ~ '^[0-9]+$'
-              AND (
-                (btrim({alias}.year::text)::integer IN :season_year_codes)
-                OR (
-                  btrim({alias}.year::text) ~ '^[0-9]{{4}}$'
-                  AND btrim({alias}.year::text)::integer IN :calendar_year_codes
-                )
-              )
-"""
-
-
 def _is_championship_or_olympic(competition_type_id: Any, competition_name: str) -> bool:
     try:
         if int(competition_type_id) == OFFICIALS_COMPETITION_TYPE_ID_ISU_CHAMPIONSHIP:
@@ -313,24 +308,6 @@ def _is_championship_or_olympic(competition_type_id: Any, competition_name: str)
         pass
     name = (competition_name or "").lower()
     return "olympic" in name or "owg" in name
-
-
-def _competition_year_matches_seasons(
-    year_val: Any,
-    season_codes: list[int],
-    calendar_years: list[int],
-) -> bool:
-    if year_val is None or (isinstance(year_val, float) and pd.isna(year_val)):
-        return False
-    text_val = str(year_val).strip()
-    if not text_val.isdigit():
-        return False
-    n = int(text_val)
-    if n in season_codes:
-        return True
-    if len(text_val) == 4 and n in calendar_years:
-        return True
-    return False
 
 
 def _competition_matches_scope(
@@ -372,13 +349,10 @@ def _competition_count_from_panel(
 ) -> int:
     if panel.empty or not season_codes:
         return 0
-    calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-    if not calendar_years:
-        return 0
 
     df = panel
     season_mask = df["competition_year"].apply(
-        lambda y: _competition_year_matches_seasons(y, season_codes, calendar_years)
+        lambda y: competition_year_matches_seasons(y, season_codes)
     )
     df = df.loc[season_mask]
     if df.empty:
@@ -453,12 +427,9 @@ def _filter_panel_for_competition_metric(
 ) -> pd.DataFrame:
     if panel.empty or not season_codes:
         return panel.iloc[0:0]
-    calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-    if not calendar_years:
-        return panel.iloc[0:0]
 
     season_mask = panel["competition_year"].apply(
-        lambda y: _competition_year_matches_seasons(y, season_codes, calendar_years)
+        lambda y: competition_year_matches_seasons(y, season_codes)
     )
     df = panel.loc[season_mask]
     if df.empty:
@@ -637,12 +608,9 @@ def _panel_after_season_and_level(
 ) -> pd.DataFrame:
     if panel.empty or not season_codes:
         return panel.iloc[0:0]
-    calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-    if not calendar_years:
-        return panel.iloc[0:0]
     df = panel.loc[
         panel["competition_year"].apply(
-            lambda y: _competition_year_matches_seasons(y, season_codes, calendar_years)
+            lambda y: competition_year_matches_seasons(y, season_codes)
         )
     ]
     return df.loc[df["segment_level"].isin(segment_levels)]
@@ -1079,9 +1047,6 @@ def get_panel_competitions_for_requirements(
         return pd.DataFrame(columns=cols)
 
     levels = sorted(segment_levels or COUNTABLE_SEGMENT_LEVELS)
-    calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-    if not calendar_years:
-        return pd.DataFrame(columns=cols)
 
     disc_clause, disc_params = _discipline_match_sql(
         intl_appointment_type_id=intl_appointment_type_id,
@@ -1119,22 +1084,10 @@ def get_panel_competitions_for_requirements(
             FROM public.segment_official so
             INNER JOIN public.segment s ON s.id = so.segment_id
             INNER JOIN public.competition c ON c.id = s.competition_id
-            WHERE (
-                  so.official_id = :official_id
-                  OR EXISTS (
-                      SELECT 1
-                      FROM public.judge_official_link jol
-                      INNER JOIN public.judge j ON j.id = jol.judge_id
-                      WHERE jol.official_id = :official_id
-                        AND jol.status = 'linked'
-                        AND jol.official_id IS NOT NULL
-                        AND so.official_name IS NOT NULL
-                        AND lower(btrim(j.name)) = lower(btrim(so.official_name))
-                  )
-            )
+            WHERE so.official_id = :official_id
               AND so.appointment_type_id IN :national_role_ids
 {comp_scope_sql}              AND s.level IN :segment_levels
-{_season_year_sql_predicate()}              {disc_clause}
+{season_year_sql_predicate()}              {disc_clause}
             GROUP BY c.id, c.year, c.name, c.officials_analysis_competition_type_id
             """
         )
@@ -1144,7 +1097,6 @@ def get_panel_competitions_for_requirements(
             bindparam("competition_type_ids", expanding=True),
             bindparam("segment_levels", expanding=True),
             bindparam("season_year_codes", expanding=True),
-            bindparam("calendar_year_codes", expanding=True),
         )
     )
     params: dict[str, Any] = {
@@ -1152,8 +1104,7 @@ def get_panel_competitions_for_requirements(
         "national_role_ids": [int(x) for x in national_role_ids],
         "competition_type_ids": [int(x) for x in competition_type_ids],
         "segment_levels": levels,
-        "season_year_codes": [int(x) for x in season_codes],
-        "calendar_year_codes": [int(x) for x in calendar_years],
+        "season_year_codes": season_codes_as_bind_strings(season_codes),
     }
     if "segment_discipline_type_ids" in disc_params:
         stmt = stmt.bindparams(bindparam("segment_discipline_type_ids", expanding=True))

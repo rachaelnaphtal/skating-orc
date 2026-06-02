@@ -52,7 +52,7 @@ def test_filter_panel_to_season_codes():
         ]
     )
     filtered = filter_panel_to_season_codes(panel, [2425, 2526])
-    assert len(filtered) == 2
-    assert set(filtered["competition_id"]) == {1, 3}
+    assert len(filtered) == 1
+    assert set(filtered["competition_id"]) == {1}
     assert competition_year_matches_seasons(2526, [2425, 2526])
-    assert competition_year_matches_seasons(2025, [2425, 2526])
+    assert not competition_year_matches_seasons(2025, [2425, 2526])

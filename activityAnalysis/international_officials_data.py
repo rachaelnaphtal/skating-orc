@@ -16,11 +16,14 @@ try:
     from activityAnalysis.load_activity_data import (
         NO_DISCIPLINE_DIRECTORY_ID,
         activity_database_is_postgresql,
-        calendar_years_for_usfs_season_codes,
         engine,
         segment_discipline_type_ids_for_directory,
     )
-    from activityAnalysis.international_listing_seasons import filter_panel_to_season_codes
+    from activityAnalysis.international_listing_seasons import (
+        filter_panel_to_season_codes,
+        season_codes_as_bind_strings,
+        season_year_sql_predicate,
+    )
     from activityAnalysis.officials_analysis_models import (
         AppointmentTypes,
         Appointments,
@@ -32,11 +35,14 @@ except ModuleNotFoundError:
     from load_activity_data import (
         NO_DISCIPLINE_DIRECTORY_ID,
         activity_database_is_postgresql,
-        calendar_years_for_usfs_season_codes,
         engine,
         segment_discipline_type_ids_for_directory,
     )
-    from international_listing_seasons import filter_panel_to_season_codes
+    from international_listing_seasons import (
+        filter_panel_to_season_codes,
+        season_codes_as_bind_strings,
+        season_year_sql_predicate,
+    )
     from officials_analysis_models import (
         AppointmentTypes,
         Appointments,
@@ -459,20 +465,6 @@ def competition_scope_label(competition_type_id: Any, competition_qualifying: An
     return "Other"
 
 
-def _competition_season_sql_predicate(alias: str = "c") -> str:
-    """Match USFS season codes and 4-digit calendar years on ``competition.year``."""
-    return f"""
-              AND btrim({alias}.year::text) ~ '^[0-9]+$'
-              AND (
-                (btrim({alias}.year::text)::integer IN :season_year_codes)
-                OR (
-                  btrim({alias}.year::text) ~ '^[0-9]{{4}}$'
-                  AND btrim({alias}.year::text)::integer IN :calendar_year_codes
-                )
-              )
-"""
-
-
 def load_international_panel_segments_bulk(
     official_ids: list[int],
     *,
@@ -482,7 +474,7 @@ def load_international_panel_segments_bulk(
     One query: Junior/Senior panel segments at international competitions (types 15–17)
     and US national qualifying competitions (``competition.qualifying = true``).
 
-    Resolves ``segment_official`` rows linked by ``official_id`` or judge name match.
+    Only ``segment_official`` rows with ``official_id`` set are included.
     """
     cols = [
         "official_id",
@@ -511,14 +503,14 @@ def load_international_panel_segments_bulk(
 
     season_sql = ""
     if season_codes:
-        season_sql = _competition_season_sql_predicate("c")
+        season_sql = season_year_sql_predicate("c")
 
     nat_qual_or = _national_qualifying_competition_sql_or()
     stmt = (
         text(
             f"""
             SELECT
-                resolved.official_id,
+                so.official_id,
                 so.appointment_type_id AS national_appointment_type_id,
                 s.discipline_type_id AS segment_discipline_type_id,
                 c.id AS competition_id,
@@ -538,23 +530,8 @@ def load_international_panel_segments_bulk(
             INNER JOIN public.segment s ON s.id = so.segment_id
             INNER JOIN public.competition c ON c.id = s.competition_id
             LEFT JOIN public.discipline_type dt ON dt.id = s.discipline_type_id
-            INNER JOIN LATERAL (
-                SELECT COALESCE(
-                    so.official_id,
-                    (
-                        SELECT jol.official_id
-                        FROM public.judge_official_link jol
-                        INNER JOIN public.judge j ON j.id = jol.judge_id
-                        WHERE jol.status = 'linked'
-                          AND jol.official_id IS NOT NULL
-                          AND jol.official_id IN :official_ids
-                          AND so.official_name IS NOT NULL
-                          AND lower(btrim(j.name)) = lower(btrim(so.official_name))
-                        LIMIT 1
-                    )
-                ) AS official_id
-            ) resolved ON true
-            WHERE resolved.official_id IN :official_ids
+            WHERE so.official_id IS NOT NULL
+              AND so.official_id IN :official_ids
               AND s.level IN :segment_levels
               AND (
                 c.officials_analysis_competition_type_id IN :competition_type_ids
@@ -574,15 +551,8 @@ def load_international_panel_segments_bulk(
         "segment_levels": level_list,
     }
     if season_codes:
-        calendar_years = calendar_years_for_usfs_season_codes(season_codes)
-        if not calendar_years:
-            return pd.DataFrame(columns=cols)
-        stmt = stmt.bindparams(
-            bindparam("season_year_codes", expanding=True),
-            bindparam("calendar_year_codes", expanding=True),
-        )
-        params["season_year_codes"] = [int(x) for x in season_codes]
-        params["calendar_year_codes"] = [int(x) for x in calendar_years]
+        stmt = stmt.bindparams(bindparam("season_year_codes", expanding=True))
+        params["season_year_codes"] = season_codes_as_bind_strings(season_codes)
     try:
         with Session(engine) as session:
             rows = session.execute(stmt, params).mappings().all()
