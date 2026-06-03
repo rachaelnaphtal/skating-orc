@@ -91,6 +91,7 @@ class Officials(Base):
     city: Mapped[Optional[str]] = mapped_column(Text)
     state: Mapped[Optional[str]] = mapped_column(Text)
     region: Mapped[Optional[str]] = mapped_column(Text)
+    date_of_birth: Mapped[Optional[datetime.date]] = mapped_column(Date)
     last_modified: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True), server_default=text('CURRENT_TIMESTAMP'))
 
     appointments: Mapped[List['Appointments']] = relationship('Appointments', back_populates='official')

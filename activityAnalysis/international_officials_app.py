@@ -47,8 +47,16 @@ from activityAnalysis.international_listing_seasons import (
     REPORT_LISTING_SEASON_OPTIONS,
     REPORT_SEASON_WINDOW_DEFAULT,
     REPORT_SEASON_WINDOW_OPTIONS,
+    age_listing_column_label,
+    format_listing_reference_july1,
+    format_promote_first_eligible_display,
     format_usfs_season_code,
+    promote_first_eligible_column_label,
+    years_in_grade_listing_column_label,
     season_codes_preceding_listing,
+)
+from activityAnalysis.international_official_demographics import (
+    enrich_summary_with_listing_demographics,
 )
 from activityAnalysis.international_officials_detail import (
     appointment_detail_url,
@@ -60,7 +68,13 @@ from activityAnalysis.international_officials_report import (
     build_bulk_appointment_reports_zip,
     bulk_reports_zip_filename,
 )
-from activityAnalysis.international_requirements import evaluate_requirements_summary_df
+from activityAnalysis.international_segment_eligibility import (
+    enrich_panel_with_rule411_eligibility,
+)
+from activityAnalysis.international_requirements import (
+    enrich_summary_with_promote_first_eligible,
+    evaluate_requirements_summary_df,
+)
 from activityAnalysis.load_activity_data import activity_database_is_postgresql, get_engine
 from activityAnalysis.officials_analysis_models import Appointments
 from sqlalchemy import func as sqlfunc, select
@@ -156,6 +170,13 @@ def _load_summary(
         panel_bulk=panel,
         season_codes=report_season_codes,
     )
+    if not summary.empty:
+        summary = enrich_summary_with_listing_demographics(
+            summary, listing_season_code=listing_season_code
+        )
+        summary = enrich_summary_with_promote_first_eligible(
+            summary, listing_season_code=listing_season_code
+        )
     if include_requirements and not summary.empty:
         summary = evaluate_requirements_summary_df(
             summary,
@@ -411,7 +432,11 @@ listing_season_code = st.sidebar.selectbox(
     options=list(REPORT_LISTING_SEASON_OPTIONS),
     key="intl_listing_season",
     format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
-    help="ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one.",
+    help=(
+        "ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one. "
+        "Age and years in grade use the listing reference date "
+        f"(e.g. {format_listing_reference_july1(2627)} for 26-27)."
+    ),
 )
 
 report_season_window = st.sidebar.selectbox(
@@ -425,6 +450,9 @@ report_season_codes = season_codes_preceding_listing(listing_season_code, report
 st.sidebar.caption(
     "Report seasons: "
     + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
+)
+st.sidebar.caption(
+    f"Age / years in grade reference: {format_listing_reference_july1(listing_season_code)}"
 )
 
 sync_query_params(
@@ -611,6 +639,16 @@ with dl_col:
     except RuntimeError as exc:
         st.caption(str(exc))
 
+def _format_demographic_column(val) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "—"
+    return str(int(val))
+
+
+_age_col_label = age_listing_column_label(listing_season_code)
+_yrs_in_grade_col_label = years_in_grade_listing_column_label(listing_season_code)
+_promote_first_col_label = promote_first_eligible_column_label()
+
 summary_display = summary.rename(
     columns={
         "official_name": "Official",
@@ -620,12 +658,30 @@ summary_display = summary.rename(
         "discipline": "Discipline",
         "competition_count": "Competitions",
         "segment_count": "Segments",
+        "age_as_of_listing": _age_col_label,
+        "years_in_grade": _yrs_in_grade_col_label,
+        "promote_first_eligible_listing": _promote_first_col_label,
         "maintain": "Maintain",
         "maintain_note": "Maintain detail",
         "promote": "Promote",
         "promote_note": "Promote detail",
     }
 )
+for col in (_age_col_label, _yrs_in_grade_col_label):
+    if col in summary_display.columns:
+        summary_display[col] = summary_display[col].map(_format_demographic_column)
+
+if _promote_first_col_label in summary_display.columns:
+    summary_display[_promote_first_col_label] = summary.apply(
+        lambda r: format_promote_first_eligible_display(
+            None
+            if pd.isna(r.get("promote_first_eligible_listing"))
+            else int(r["promote_first_eligible_listing"]),
+            current_listing_season_code=int(listing_season_code),
+        ),
+        axis=1,
+    )
+
 summary_display["Report"] = summary.apply(
     lambda r: appointment_detail_url(
         official_id=int(r["official_id"]),
@@ -651,6 +707,9 @@ show_cols = [
         "Discipline",
         "Competitions",
         "Segments",
+        _age_col_label,
+        _yrs_in_grade_col_label,
+        _promote_first_col_label,
         *(
             [
                 "Maintain",
@@ -694,6 +753,14 @@ st.dataframe(
                 "Distinct Junior/Senior segments on panel in the selected role and discipline "
                 f"for seasons {', '.join(format_usfs_season_code(c) for c in report_season_codes)}."
             ),
+        ),
+        _promote_first_col_label: st.column_config.TextColumn(
+            _promote_first_col_label,
+            help=(
+                "First listing season when promote year-in-grade requirements are met "
+                "(July 1 reference). Competition requirements may still apply."
+            ),
+            width="small",
         ),
         "Maintain": st.column_config.TextColumn(
             "Maintain",
@@ -744,6 +811,7 @@ if show_segment_detail:
             "competitions (Junior/Senior only)."
         )
     else:
+        detail = enrich_panel_with_rule411_eligibility(detail)
         detail_display = detail.rename(
             columns={
                 "official_name": "Official",
@@ -756,6 +824,9 @@ if show_segment_detail:
                 "segment_name": "Segment",
                 "segment_level": "Level",
                 "segment_discipline": "Segment discipline",
+                "rule411_entry_count": "Entries",
+                "rule411_distinct_noc_count": "Nations",
+                "rule411_status": "Rule 411",
             }
         )
         show_cols = [
@@ -771,6 +842,9 @@ if show_segment_detail:
                 "Segment",
                 "Level",
                 "Segment discipline",
+                "Entries",
+                "Nations",
+                "Rule 411",
                 "start_date",
                 "end_date",
                 "results_url",
@@ -785,6 +859,11 @@ if show_segment_detail:
                 "Official": st.column_config.TextColumn("Official", width="medium"),
                 "Competition": st.column_config.TextColumn("Competition", width="large"),
                 "Segment": st.column_config.TextColumn("Segment", width="medium"),
+                "Rule 411": st.column_config.TextColumn(
+                    "Rule 411",
+                    help="Whether this international segment meets ISU entry/member minimums.",
+                    width="small",
+                ),
                 "results_url": st.column_config.LinkColumn("Results", display_text="Open"),
             },
         )

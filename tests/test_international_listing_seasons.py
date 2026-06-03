@@ -13,10 +13,14 @@ from activityAnalysis.international_listing_seasons import (
     competition_year_matches_seasons,
     default_listing_season_code,
     filter_panel_to_season_codes,
+    format_listing_reference_july1,
+    format_promote_first_eligible_display,
     format_usfs_season_code,
     listing_calendar_year,
     listing_calendar_year_from_season_code,
+    listing_reference_july1,
     listing_season_code_from_calendar_year,
+    listing_season_codes_for_projection,
     season_codes_preceding_listing,
 )
 
@@ -26,6 +30,25 @@ def test_season_codes_preceding_listing():
     assert season_codes_preceding_listing(2728, 3) == [2425, 2526, 2627]
     assert season_codes_preceding_listing(2627, 4) == [2223, 2324, 2425, 2526]
     assert season_codes_preceding_listing(2627, 2) == [2425, 2526]
+
+
+def test_listing_reference_july1():
+    assert listing_reference_july1(2627) == date(2026, 7, 1)
+    assert listing_reference_july1(2728) == date(2027, 7, 1)
+    assert format_listing_reference_july1(2627) == "as of July 1, 2026"
+
+
+def test_listing_season_codes_for_projection():
+    codes = listing_season_codes_for_projection(years_ahead=2)
+    assert 2627 in codes
+    assert 2728 in codes
+    assert 2829 in codes
+
+
+def test_format_promote_first_eligible_display():
+    assert format_promote_first_eligible_display(None, current_listing_season_code=2627) == "—"
+    assert format_promote_first_eligible_display(2627, current_listing_season_code=2627) == "2026"
+    assert format_promote_first_eligible_display(2728, current_listing_season_code=2627) == "2027"
 
 
 def test_listing_season_code_mapping():

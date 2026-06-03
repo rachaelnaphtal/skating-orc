@@ -6,6 +6,7 @@ import io
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -16,7 +17,17 @@ except ModuleNotFoundError:
     FPDF = None  # type: ignore[misc, assignment]
 
 try:
-    from activityAnalysis.international_listing_seasons import format_usfs_season_code
+    from activityAnalysis.international_listing_seasons import (
+        format_listing_reference_july1,
+        format_promote_first_eligible_display,
+        format_usfs_season_code,
+    )
+    from activityAnalysis.international_official_demographics import (
+        appointment_demographics_row,
+        load_grade_dates_for_appointments,
+        load_official_birthdates,
+        load_official_international_appointment_rows,
+    )
     from activityAnalysis.international_officials_data import (
         _nullable_int_for_sql,
         get_international_official_activity_detail,
@@ -24,18 +35,32 @@ try:
     )
     from activityAnalysis.international_requirements import (
         RequirementEvaluation,
+        _appointment_context,
+        _appointment_context_from_batch,
+        _batch_appointment_contexts,
         _batch_isu_listing_keys,
         _international_level_id,
         _isu_level_id,
         directory_listing_tier_for_level,
         evaluate_requirements_for_appointment,
+        first_listing_season_eligible_for_promote_years,
         format_competition_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
     from activityAnalysis.load_activity_data import get_engine
 except ModuleNotFoundError:
-    from international_listing_seasons import format_usfs_season_code
+    from international_listing_seasons import (
+        format_listing_reference_july1,
+        format_promote_first_eligible_display,
+        format_usfs_season_code,
+    )
+    from international_official_demographics import (
+        appointment_demographics_row,
+        load_grade_dates_for_appointments,
+        load_official_birthdates,
+        load_official_international_appointment_rows,
+    )
     from international_officials_data import (
         _nullable_int_for_sql,
         get_international_official_activity_detail,
@@ -43,11 +68,15 @@ except ModuleNotFoundError:
     )
     from international_requirements import (
         RequirementEvaluation,
+        _appointment_context,
+        _appointment_context_from_batch,
+        _batch_appointment_contexts,
         _batch_isu_listing_keys,
         _international_level_id,
         _isu_level_id,
         directory_listing_tier_for_level,
         evaluate_requirements_for_appointment,
+        first_listing_season_eligible_for_promote_years,
         format_competition_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
@@ -91,6 +120,15 @@ class AppointmentDetailContext:
     show_promote: bool
     promote_note: str | None
     panel_detail: pd.DataFrame
+    age_as_of_listing: int | None = None
+    years_in_grade: int | None = None
+    grade_date: date | None = None
+    promote_first_eligible_listing: int | None = None
+    promote_first_eligible_display: str = "—"
+
+
+def _demographics_display_value(value: int | None) -> str:
+    return "—" if value is None else str(int(value))
 
 
 def sanitize_pdf_filename(text: str, *, max_len: int = 80) -> str:
@@ -137,6 +175,8 @@ def build_appointment_detail_context(
     report_season_codes: list[int],
     active_only: bool,
     panel_bulk: pd.DataFrame | None = None,
+    birthdates: dict[int, Any] | None = None,
+    grade_dates: dict[tuple[int, int, int | None], Any] | None = None,
 ) -> AppointmentDetailContext:
     official_id = int(summary_row["official_id"])
     appointment_type_id = int(summary_row["appointment_type_id"])
@@ -218,6 +258,56 @@ def build_appointment_detail_context(
         season_codes=report_season_codes,
     )
 
+    grade_key = (official_id, appointment_type_id, discipline_id)
+    if birthdates is None:
+        birthdates = load_official_birthdates([official_id])
+    if grade_dates is None:
+        grade_dates = load_grade_dates_for_appointments([grade_key])
+    grade_date = grade_dates.get(grade_key)
+    demo = appointment_demographics_row(
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        listing_season_code=listing_season_code,
+        birthdates=birthdates,
+        grade_dates=grade_dates,
+    )
+
+    first_promote: int | None = None
+    if show_promote:
+        cached = summary_row.get("promote_first_eligible_listing")
+        if cached is not None and not pd.isna(cached):
+            first_promote = int(cached)
+        else:
+            appointment_rows = load_official_international_appointment_rows(
+                [official_id]
+            ).get(official_id, [])
+            appointment_contexts = _batch_appointment_contexts([official_id])
+            appt_ctx = _appointment_context_from_batch(
+                appointment_contexts,
+                official_id,
+                appointment_type_id,
+                summary_row.get("discipline_id"),
+            )
+            first_promote = first_listing_season_eligible_for_promote_years(
+                official_id=official_id,
+                appointment_type_id=appointment_type_id,
+                directory_discipline_id=summary_row.get("discipline_id"),
+                appointment_level=appointment_level,
+                appointment_level_id=appointment_level_id,
+                appointment_rows=appointment_rows,
+                appt_ctx=appt_ctx,
+                listing_season_code=listing_season_code,
+                rules_df=None,
+                international_level_id=international_level_id,
+                isu_level_id=isu_level_id,
+                isu_listing_keys=isu_listing_keys,
+            )
+    promote_first_display = format_promote_first_eligible_display(
+        first_promote,
+        current_listing_season_code=listing_season_code,
+    )
+
     return AppointmentDetailContext(
         official_id=official_id,
         appointment_type_id=appointment_type_id,
@@ -236,6 +326,11 @@ def build_appointment_detail_context(
         show_promote=show_promote,
         promote_note=promote_note,
         panel_detail=panel_detail,
+        age_as_of_listing=demo["age_as_of_listing"],
+        years_in_grade=demo["years_in_grade"],
+        grade_date=grade_date,
+        promote_first_eligible_listing=first_promote,
+        promote_first_eligible_display=promote_first_display,
     )
 
 
@@ -399,6 +494,18 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
         "Activity seasons: "
         + ", ".join(format_usfs_season_code(c) for c in ctx.report_season_codes),
     )
+    as_of = format_listing_reference_july1(ctx.listing_season_code)
+    demo_lines = [
+        f"Age {as_of}: {_demographics_display_value(ctx.age_as_of_listing)}",
+        f"Years in grade {as_of}: {_demographics_display_value(ctx.years_in_grade)}",
+    ]
+    if ctx.grade_date is not None:
+        demo_lines.append(f"Grade date (achieved or appointed): {ctx.grade_date.isoformat()}")
+    if ctx.show_promote:
+        demo_lines.append(
+            f"First promote year (years): {ctx.promote_first_eligible_display}"
+        )
+    _pdf_write_body(pdf, "   ".join(demo_lines))
     _pdf_write_body(
         pdf,
         f"Competitions: {ctx.competition_count}   Segments: {ctx.segment_count}   "
@@ -458,6 +565,18 @@ def build_bulk_appointment_reports_zip(
             int(oid): group for oid, group in panel.groupby("official_id", sort=False)
         }
 
+    official_ids = summary["official_id"].astype(int).unique().tolist()
+    birthdates = load_official_birthdates(official_ids)
+    grade_keys = [
+        (
+            int(r["official_id"]),
+            int(r["appointment_type_id"]),
+            _nullable_int_for_sql(r.get("discipline_id")),
+        )
+        for _, r in summary.iterrows()
+    ]
+    grade_dates = load_grade_dates_for_appointments(grade_keys)
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for _, row in summary.iterrows():
@@ -471,6 +590,8 @@ def build_bulk_appointment_reports_zip(
                 report_season_codes=report_season_codes,
                 active_only=active_only,
                 panel_bulk=sub_panel,
+                birthdates=birthdates,
+                grade_dates=grade_dates,
             )
             pdf_bytes = build_appointment_detail_pdf(ctx)
             zf.writestr(appointment_detail_pdf_filename(ctx), pdf_bytes)

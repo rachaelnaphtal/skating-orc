@@ -119,7 +119,7 @@ WHERE rs.isu_rule_ref = '413.3.c' AND rs.purpose = 'promote' AND rs.discipline_i
   );
 
 -- ---------------------------------------------------------------------------
--- Technical Controller promote to ISU (414.3.c) — Singles/Pairs and Dance
+-- Technical Controller promote to ISU (414.3.c) — Pairs and Ice Dance
 -- ---------------------------------------------------------------------------
 INSERT INTO officials_analysis.international_requirement_rule_set (
     isu_rule_ref, purpose, label, appointment_type_id, discipline_id,
@@ -129,7 +129,7 @@ SELECT v.isu_rule_ref, v.purpose, v.label, v.appointment_type_id, v.discipline_i
     v.listing_tier, v.season_window, v.sport, v.sort_order
 FROM (
     VALUES
-        ('414.3.c', 'promote', 'ISU Technical Controller — promote (Singles/Pairs)', 15, 9, 'international', 4, 'figure', 60),
+        ('414.3.c', 'promote', 'ISU Technical Controller — promote (Pairs)', 15, 8, 'international', 4, 'figure', 60),
         ('414.3.c', 'promote', 'ISU Technical Controller — promote (Ice Dance)', 15, 4, 'international', 4, 'figure', 65)
 ) AS v(isu_rule_ref, purpose, label, appointment_type_id, discipline_id, listing_tier, season_window, sport, sort_order)
 WHERE NOT EXISTS (
@@ -164,7 +164,7 @@ WHERE rs.isu_rule_ref = '414.3.c' AND rs.purpose = 'promote' AND rs.appointment_
   );
 
 -- ---------------------------------------------------------------------------
--- Technical Specialist promote to ISU (415.3.c) — Singles/Pairs and Dance
+-- Technical Specialist promote to ISU (415.3.c) — Pairs and Ice Dance
 -- ---------------------------------------------------------------------------
 INSERT INTO officials_analysis.international_requirement_rule_set (
     isu_rule_ref, purpose, label, appointment_type_id, discipline_id,
@@ -174,7 +174,7 @@ SELECT v.isu_rule_ref, v.purpose, v.label, v.appointment_type_id, v.discipline_i
     v.listing_tier, v.season_window, v.sport, v.sort_order
 FROM (
     VALUES
-        ('415.3.c', 'promote', 'ISU Technical Specialist — promote (Singles/Pairs)', 14, 9, 'international', 4, 'figure', 70),
+        ('415.3.c', 'promote', 'ISU Technical Specialist — promote (Pairs)', 14, 8, 'international', 4, 'figure', 70),
         ('415.3.c', 'promote', 'ISU Technical Specialist — promote (Ice Dance)', 14, 4, 'international', 4, 'figure', 75)
 ) AS v(isu_rule_ref, purpose, label, appointment_type_id, discipline_id, listing_tier, season_window, sport, sort_order)
 WHERE NOT EXISTS (

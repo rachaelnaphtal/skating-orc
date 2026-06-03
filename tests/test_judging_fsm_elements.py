@@ -85,6 +85,24 @@ def test_match_skater_fsm_unicode_name_and_noc():
     assert float(m.group(5)) == 41.73
 
 
+def test_infer_panel_judge_names_when_panel_empty():
+    from judgingParsing import infer_panel_judge_names_from_parsed_scores
+
+    elements = {
+        "Skater A": [{"Element": "3Lz", "Scores": [2, 1, 0, -1, 2, 2, 1]}],
+    }
+    assert infer_panel_judge_names_from_parsed_scores(elements, {}, []) == [
+        "Judge 1",
+        "Judge 2",
+        "Judge 3",
+        "Judge 4",
+        "Judge 5",
+        "Judge 6",
+        "Judge 7",
+    ]
+    assert infer_panel_judge_names_from_parsed_scores(elements, {}, ["Ann"]) == ["Ann"]
+
+
 def test_all_dash_element_rows_skip_database_scores():
     """Parsed dash columns become None; no element_score_per_judge rows are built."""
     judges = ["J1", "J2", "J3", "J4", "J5"]

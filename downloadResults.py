@@ -308,6 +308,11 @@ def get_fsm_judges_and_results_links(page_contents, base_url, session=None):
         judges = [
             r["name"] for r in segment_official_rows if _role_is_panel_judge(r["role"])
         ]
+        if not judges:
+            note_warning(
+                f"No judges on panel page {row['panel_href']!r} "
+                f"({row['cover_label']}); will infer from protocol PDF if available"
+            )
 
         panels.append({
             "judges": judges,
@@ -970,37 +975,45 @@ def scrape(
                 for event_info_dict in judges_and_results_links:
                     judges = event_info_dict["judges"]
                     scores_url = event_info_dict["scores_url"]
-                    (
-                        event_name,
-                        total_errors,
-                        num_starts,
-                        allowed_errors,
-                        rule_errors,
-                        all_element_dict,
-                        all_pcs_dict,
-                    ) = processEvent(
-                        scores_url,
-                        i,
-                        judges,
-                        workbook,
-                        i,
-                        event_regex,
-                        pdf_folder,
-                        excel_folder,
-                        only_rule_errors=only_rule_errors,
-                        use_gcp=use_gcp,
-                        create_thrown_out_analysis=add_additional_analysis
-                        or write_to_database,
-                        judge_filter=judge_filter,
-                        use_html=use_html,
-                        isFSM=True,
-                        pdf_browser=pdf_browser,
-                        pdf_loop=pdf_loop,
-                        http_session=http_session,
-                        write_excel=write_excel,
-                        competition_start_date=competition_start_date,
-                        competition_end_date=competition_end_date,
-                    )
+                    cover_label = event_info_dict.get("cover_label") or ""
+                    try:
+                        (
+                            event_name,
+                            total_errors,
+                            num_starts,
+                            allowed_errors,
+                            rule_errors,
+                            all_element_dict,
+                            all_pcs_dict,
+                        ) = processEvent(
+                            scores_url,
+                            i,
+                            judges,
+                            workbook,
+                            i,
+                            event_regex,
+                            pdf_folder,
+                            excel_folder,
+                            only_rule_errors=only_rule_errors,
+                            use_gcp=use_gcp,
+                            create_thrown_out_analysis=add_additional_analysis
+                            or write_to_database,
+                            judge_filter=judge_filter,
+                            use_html=use_html,
+                            isFSM=True,
+                            pdf_browser=pdf_browser,
+                            pdf_loop=pdf_loop,
+                            http_session=http_session,
+                            write_excel=write_excel,
+                            competition_start_date=competition_start_date,
+                            competition_end_date=competition_end_date,
+                        )
+                    except Exception as exc:
+                        note_warning(
+                            f"Failed to parse segment {cover_label!r} ({scores_url}): {exc}"
+                        )
+                        i = i + 1
+                        continue
                     segment_official_rows = None
                     segment_db_key = None
                     if write_to_database:

@@ -229,7 +229,15 @@ _QUALIFYING_COMPETITION_COLUMNS = [
     "competition_scope",
     "competition_type",
     "panel_roles",
+    "results_url",
 ]
+
+
+def _first_non_empty_url(series: pd.Series) -> str | None:
+    for val in series:
+        if val is not None and not pd.isna(val) and str(val).strip():
+            return str(val).strip()
+    return None
 
 _ISU_ROSTER_APPOINTMENT_TYPE: dict[int, str] = {
     12: "Judge",
@@ -282,6 +290,44 @@ except ModuleNotFoundError:
         listing_calendar_year_from_season_code,
         season_codes_preceding_listing,
     )
+
+try:
+    from activityAnalysis.international_official_demographics import (
+        APPOINTMENT_TYPE_ID_JUDGE,
+        APPOINTMENT_TYPE_ID_REFEREE,
+        APPOINTMENT_TYPE_ID_TECHNICAL_SPECIALIST,
+        first_listing_season_meeting_appointment_criteria,
+        first_listing_season_meeting_min_years_on_grade_date,
+        grade_date_for_time_in_grade,
+        load_official_international_appointment_rows,
+        max_years_for_appointment_criteria,
+        related_discipline_ids_for_tc_prerequisite,
+        years_detail_label,
+        years_in_grade_at_listing,
+    )
+except ModuleNotFoundError:
+    from international_official_demographics import (
+        APPOINTMENT_TYPE_ID_JUDGE,
+        APPOINTMENT_TYPE_ID_REFEREE,
+        APPOINTMENT_TYPE_ID_TECHNICAL_SPECIALIST,
+        first_listing_season_meeting_appointment_criteria,
+        first_listing_season_meeting_min_years_on_grade_date,
+        grade_date_for_time_in_grade,
+        load_official_international_appointment_rows,
+        max_years_for_appointment_criteria,
+        related_discipline_ids_for_tc_prerequisite,
+        years_detail_label,
+        years_in_grade_at_listing,
+    )
+
+PROMOTE_YEARS_METRICS = frozenset(
+    {
+        "years_in_grade",
+        "years_isu_judge",
+        "years_intl_referee",
+        "years_tc_prerequisite",
+    }
+)
 
 
 def isu_season_codes_preceding_july1(listing_calendar_year: int, n: int) -> list[int]:
@@ -459,7 +505,15 @@ def _filter_panel_for_competition_metric(
                 axis=1,
             )
         ]
-    return df
+
+    try:
+        from activityAnalysis.international_segment_eligibility import (
+            filter_panel_to_rule411_eligible,
+        )
+    except ModuleNotFoundError:
+        from international_segment_eligibility import filter_panel_to_rule411_eligible
+
+    return filter_panel_to_rule411_eligible(df)
 
 
 def _aggregate_qualifying_competitions(panel_segments: pd.DataFrame) -> pd.DataFrame:
@@ -484,6 +538,15 @@ def _aggregate_qualifying_competitions(panel_segments: pd.DataFrame) -> pd.DataF
             competition_qualifying=("competition_qualifying", "first"),
         )
     )
+    if "results_url" in panel_segments.columns:
+        urls = (
+            panel_segments.groupby("competition_id")["results_url"]
+            .apply(_first_non_empty_url)
+            .reset_index(name="results_url")
+        )
+        grouped = grouped.merge(urls, on="competition_id", how="left")
+    else:
+        grouped["results_url"] = None
     roles = (
         panel_segments.groupby("competition_id")
         .apply(_roles_for_group, include_groups=False)
@@ -613,7 +676,18 @@ def _panel_after_season_and_level(
             lambda y: competition_year_matches_seasons(y, season_codes)
         )
     ]
-    return df.loc[df["segment_level"].isin(segment_levels)]
+    df = df.loc[df["segment_level"].isin(segment_levels)]
+    if df.empty:
+        return df
+
+    try:
+        from activityAnalysis.international_segment_eligibility import (
+            filter_panel_to_rule411_eligible,
+        )
+    except ModuleNotFoundError:
+        from international_segment_eligibility import filter_panel_to_rule411_eligible
+
+    return filter_panel_to_rule411_eligible(df)
 
 
 def _row_matches_competition_scope(
@@ -642,6 +716,46 @@ def _row_matches_competition_scope(
             ct, competition_qualifying, (), include_qualifying_national=True
         )
     return False
+
+
+def _competition_count_after_rule411(
+    panel: pd.DataFrame,
+    *,
+    season_codes: list[int],
+    segment_levels: frozenset[str],
+    competition_type_ids: tuple[int, ...] = (15, 16, 17),
+    include_qualifying_national: bool = False,
+    scope: str | None = None,
+) -> int:
+    """Distinct competitions on Rule-411-eligible segments (optional ISU scope filter)."""
+    df = _panel_after_season_and_level(
+        panel, season_codes=season_codes, segment_levels=segment_levels
+    )
+    if df.empty:
+        return 0
+    if scope:
+        mask = df.apply(
+            lambda r: _row_matches_competition_scope(
+                r.get("competition_type_id"),
+                r.get("competition_qualifying"),
+                scope,
+            ),
+            axis=1,
+        )
+        df = df.loc[mask]
+        return int(df["competition_id"].nunique()) if not df.empty else 0
+
+    comp_ids = {int(x) for x in competition_type_ids}
+    mask = df.apply(
+        lambda r: _competition_matches_scope(
+            r.get("competition_type_id"),
+            r.get("competition_qualifying"),
+            tuple(comp_ids),
+            include_qualifying_national=include_qualifying_national,
+        ),
+        axis=1,
+    )
+    return int(df.loc[mask, "competition_id"].nunique())
 
 
 def _count_competitions_for_scope(
@@ -993,29 +1107,35 @@ def _evaluate_tc_ts_promote_isu(
     competition_type_ids: tuple[int, ...],
     include_qualifying_national: bool,
 ) -> tuple[bool, str]:
-    """TC/TS ISU promotion: minimum competitions with at least one International Competition."""
+    """
+    TC/TS ISU promotion: minimum competitions with at least one International Competition.
+
+    Per ISU Rule 411, "International Competition" includes ISU Events (types 15–16) and
+    International Senior/Junior Competitions (type 17), not type 17 alone.
+    """
     config = _parse_metric_config(metric_config)
     min_total = int(config.get("min_competitions", 3))
     min_intl = int(config.get("min_international_competition", 1))
 
-    total = _competition_count_from_panel(
+    total = _competition_count_after_rule411(
         panel,
         season_codes=season_codes,
-        competition_type_ids=competition_type_ids,
         segment_levels=segment_levels,
+        competition_type_ids=competition_type_ids,
         include_qualifying_national=include_qualifying_national,
     )
-    intl_only = _count_competitions_for_scope(
+    intl_only = _competition_count_after_rule411(
         panel,
-        "international_competition",
         season_codes=season_codes,
         segment_levels=segment_levels,
+        scope="international_all",
     )
 
     met = total >= min_total and intl_only >= min_intl
     detail = (
         f"{total}/{min_total} competitions, "
-        f"{intl_only}/{min_intl} International Competition(s)"
+        f"{intl_only}/{min_intl} International Competition(s) "
+        "(ISU Event or International Competition)"
     )
     return met, detail
 
@@ -1322,6 +1442,7 @@ def _batch_appointment_contexts(
                 Appointments.appointment_type_id,
                 Appointments.discipline_id,
                 Appointments.appointed_date,
+                Appointments.achieved_date,
                 Appointments.level_id,
                 Levels.name.label("level_name"),
                 Appointments.active,
@@ -1425,13 +1546,314 @@ def _batch_isu_listing_keys(official_ids: list[int]) -> set[tuple[int, int, int 
     return keys
 
 
-def _seasons_since_appointed(appointed_date: date | None, listing_year: int) -> float:
-    if appointed_date is None:
-        return 0.0
-    # ISU "seasons in grade": count Jul–Jun seasons from appointment season through listing season.
-    appt_season_start = appointed_date.year if appointed_date.month >= 7 else appointed_date.year - 1
-    listing_season_start = listing_year - 1
-    return max(0.0, float(listing_season_start - appt_season_start + 1))
+def _years_in_grade_for_current_appointment(
+    appt_ctx: dict[str, Any],
+    *,
+    listing_season_code: int,
+) -> int:
+    grade_date = grade_date_for_time_in_grade(
+        appt_ctx.get("achieved_date"),
+        appt_ctx.get("appointed_date"),
+    )
+    return years_in_grade_at_listing(grade_date, listing_season_code=listing_season_code) or 0
+
+
+def _tc_prerequisite_years_count(
+    appointment_rows: list[dict[str, Any]],
+    metric_config: Any,
+    *,
+    directory_discipline_id: Any,
+    listing_season_code: int,
+    international_level_id: int,
+    isu_level_id: int,
+) -> tuple[int, int, int, int]:
+    """Intl Judge, Intl Referee, ISU TS years and best-of for TC promote prerequisite."""
+    config = _parse_metric_config(metric_config)
+    related = config.get("related_discipline_ids")
+    if related:
+        discipline_ids = [int(x) for x in related]
+    else:
+        discipline_ids = related_discipline_ids_for_tc_prerequisite(directory_discipline_id)
+
+    judge_years = max_years_for_appointment_criteria(
+        appointment_rows,
+        listing_season_code=listing_season_code,
+        appointment_type_id=APPOINTMENT_TYPE_ID_JUDGE,
+        level_id=int(international_level_id),
+        discipline_ids=discipline_ids or None,
+    )
+    referee_years = max_years_for_appointment_criteria(
+        appointment_rows,
+        listing_season_code=listing_season_code,
+        appointment_type_id=APPOINTMENT_TYPE_ID_REFEREE,
+        level_id=int(international_level_id),
+        discipline_ids=discipline_ids or None,
+    )
+    ts_disc = _nullable_int_for_sql(directory_discipline_id)
+    ts_years = 0
+    if ts_disc is not None:
+        ts_years = max_years_for_appointment_criteria(
+            appointment_rows,
+            listing_season_code=listing_season_code,
+            appointment_type_id=APPOINTMENT_TYPE_ID_TECHNICAL_SPECIALIST,
+            level_id=int(isu_level_id),
+            discipline_ids=[ts_disc],
+        )
+    return judge_years, referee_years, ts_years, max(judge_years, referee_years, ts_years)
+
+
+def _evaluate_years_tc_prerequisite(
+    appointment_rows: list[dict[str, Any]],
+    metric_config: Any,
+    *,
+    directory_discipline_id: Any,
+    listing_season_code: int,
+    international_level_id: int,
+    isu_level_id: int,
+) -> tuple[int, str]:
+    """TC promote: years as intl Judge, intl Referee (related disciplines), or ISU TS."""
+    judge_years, referee_years, ts_years, actual = _tc_prerequisite_years_count(
+        appointment_rows,
+        metric_config,
+        directory_discipline_id=directory_discipline_id,
+        listing_season_code=listing_season_code,
+        international_level_id=international_level_id,
+        isu_level_id=isu_level_id,
+    )
+    try:
+        from activityAnalysis.international_listing_seasons import format_listing_reference_july1
+    except ModuleNotFoundError:
+        from international_listing_seasons import format_listing_reference_july1
+
+    detail = (
+        f"years ({format_listing_reference_july1(listing_season_code)}; "
+        f"Intl Judge {judge_years}, Intl Referee {referee_years}, ISU TS {ts_years})"
+    )
+    return actual, detail
+
+
+def _promote_year_rule_rows_for_appointment(
+    rules_df: pd.DataFrame,
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    appointment_level_id: Any,
+    international_level_id: int,
+    isu_level_id: int,
+    isu_listing_keys: set[tuple[int, int, int | None]] | None,
+) -> list[pd.Series]:
+    """Active promote rules with year-based metrics that apply to this appointment."""
+    if rules_df.empty or "purpose" not in rules_df.columns:
+        promote = rules_df
+    else:
+        promote = rules_df.loc[rules_df["purpose"] == "promote"]
+    if promote.empty:
+        return []
+
+    out: list[pd.Series] = []
+    for rule_set_id, group in promote.groupby("rule_set_id", sort=False):
+        head = group.iloc[0]
+        if int(head["appointment_type_id"]) != int(appointment_type_id):
+            continue
+        applies, _ = _rule_set_applies(
+            head,
+            appointment_type_id=appointment_type_id,
+            directory_discipline_id=directory_discipline_id,
+            appointment_level_id=_nullable_int_for_sql(appointment_level_id),
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
+            purpose="promote",
+            official_id=official_id,
+            isu_listing_keys=isu_listing_keys,
+        )
+        if not applies:
+            continue
+        for _, rule_row in group.sort_values("rule_sort_order").iterrows():
+            if str(rule_row["metric"]) in PROMOTE_YEARS_METRICS:
+                out.append(rule_row)
+    return out
+
+
+def _first_listing_season_for_promote_year_rule(
+    rule_row: pd.Series,
+    *,
+    appointment_rows: list[dict[str, Any]],
+    appt_ctx: dict[str, Any],
+    directory_discipline_id: Any,
+    international_level_id: int,
+    isu_level_id: int,
+) -> int | None:
+    """First listing season when one promote year rule is satisfied."""
+    metric = str(rule_row["metric"])
+    min_years = int(rule_row["min_value"])
+
+    if metric == "years_in_grade":
+        grade_date = grade_date_for_time_in_grade(
+            appt_ctx.get("achieved_date"),
+            appt_ctx.get("appointed_date"),
+        )
+        return first_listing_season_meeting_min_years_on_grade_date(grade_date, min_years)
+
+    if metric == "years_isu_judge":
+        return first_listing_season_meeting_appointment_criteria(
+            appointment_rows,
+            min_years,
+            appointment_type_id=APPOINTMENT_TYPE_ID_JUDGE,
+            level_id=int(isu_level_id),
+        )
+
+    if metric == "years_intl_referee":
+        disc = _nullable_int_for_sql(directory_discipline_id)
+        return first_listing_season_meeting_appointment_criteria(
+            appointment_rows,
+            min_years,
+            appointment_type_id=APPOINTMENT_TYPE_ID_REFEREE,
+            level_id=int(international_level_id),
+            discipline_ids=[disc] if disc is not None else None,
+        )
+
+    if metric == "years_tc_prerequisite":
+        config = _parse_metric_config(rule_row.get("metric_config"))
+        related = config.get("related_discipline_ids")
+        if related:
+            discipline_ids = [int(x) for x in related]
+        else:
+            discipline_ids = related_discipline_ids_for_tc_prerequisite(
+                directory_discipline_id
+            )
+        try:
+            from activityAnalysis.international_listing_seasons import (
+                listing_season_codes_for_projection,
+            )
+        except ModuleNotFoundError:
+            from international_listing_seasons import listing_season_codes_for_projection
+
+        for code in listing_season_codes_for_projection():
+            _, _, _, actual = _tc_prerequisite_years_count(
+                appointment_rows,
+                rule_row.get("metric_config"),
+                directory_discipline_id=directory_discipline_id,
+                listing_season_code=int(code),
+                international_level_id=international_level_id,
+                isu_level_id=isu_level_id,
+            )
+            if actual >= min_years:
+                return int(code)
+        return None
+
+    return None
+
+
+def first_listing_season_eligible_for_promote_years(
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    appointment_level: Any,
+    appointment_level_id: Any,
+    appointment_rows: list[dict[str, Any]],
+    appt_ctx: dict[str, Any],
+    listing_season_code: int,
+    rules_df: pd.DataFrame | None,
+    international_level_id: int,
+    isu_level_id: int,
+    isu_listing_keys: set[tuple[int, int, int | None]] | None,
+) -> int | None:
+    """
+    First listing season when all promote year requirements are met.
+
+    Returns ``None`` when promotion does not apply or required dates are missing.
+    """
+    if not should_evaluate_promote_requirements(
+        official_id,
+        appointment_type_id,
+        directory_discipline_id,
+        appointment_level,
+        appointment_level_id,
+        isu_level_id=isu_level_id,
+        isu_listing_keys=isu_listing_keys,
+    ):
+        return None
+
+    active_rules = rules_df if rules_df is not None else _load_rule_sets(purpose="promote")
+    year_rules = _promote_year_rule_rows_for_appointment(
+        active_rules,
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+        appointment_level_id=appointment_level_id,
+        international_level_id=international_level_id,
+        isu_level_id=isu_level_id,
+        isu_listing_keys=isu_listing_keys,
+    )
+    if not year_rules:
+        return None
+
+    first_seasons: list[int] = []
+    for rule_row in year_rules:
+        first = _first_listing_season_for_promote_year_rule(
+            rule_row,
+            appointment_rows=appointment_rows,
+            appt_ctx=appt_ctx,
+            directory_discipline_id=directory_discipline_id,
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
+        )
+        if first is None:
+            return None
+        first_seasons.append(int(first))
+    return max(first_seasons)
+
+
+def enrich_summary_with_promote_first_eligible(
+    summary: pd.DataFrame,
+    *,
+    listing_season_code: int,
+    rules_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Add ``promote_first_eligible_listing`` (USFS season code int, e.g. 2627)."""
+    if summary.empty or not activity_database_is_postgresql():
+        return summary
+
+    out = summary.copy()
+    official_ids = out["official_id"].astype(int).unique().tolist()
+    appointment_rows_by_official = load_official_international_appointment_rows(
+        official_ids
+    )
+    appointment_contexts = _batch_appointment_contexts(official_ids)
+    isu_listing_keys = _batch_isu_listing_keys(official_ids)
+    active_rules = rules_df if rules_df is not None else _load_rule_sets()
+
+    with Session(engine) as session:
+        international_level_id = _international_level_id(session)
+        isu_level_id = _isu_level_id(session)
+
+    values: list[int | None] = []
+    for _, row in out.iterrows():
+        oid = int(row["official_id"])
+        atid = int(row["appointment_type_id"])
+        disc = row.get("discipline_id")
+        appt_ctx = _appointment_context_from_batch(
+            appointment_contexts, oid, atid, disc
+        )
+        first = first_listing_season_eligible_for_promote_years(
+            official_id=oid,
+            appointment_type_id=atid,
+            directory_discipline_id=disc,
+            appointment_level=row.get("appointment_level") or "",
+            appointment_level_id=row.get("appointment_level_id"),
+            appointment_rows=appointment_rows_by_official.get(oid, []),
+            appt_ctx=appt_ctx,
+            listing_season_code=listing_season_code,
+            rules_df=active_rules,
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
+            isu_listing_keys=isu_listing_keys,
+        )
+        values.append(first)
+    out["promote_first_eligible_listing"] = values
+    return out
 
 
 def _panel_for_rule_evaluation(
@@ -1472,8 +1894,11 @@ def _evaluate_rule(
     appointment_type_id: int,
     directory_discipline_id: Any,
     season_codes: list[int],
-    appointed_date: date | None,
-    listing_year: int,
+    listing_season_code: int,
+    appt_ctx: dict[str, Any],
+    appointment_rows: list[dict[str, Any]],
+    international_level_id: int,
+    isu_level_id: int,
     panel_bulk: pd.DataFrame | None = None,
     panel_by_official: dict[int, pd.DataFrame] | None = None,
 ) -> RuleCheckResult:
@@ -1486,9 +1911,64 @@ def _evaluate_rule(
     include_qualifying_national = bool(rule_row.get("include_qualifying_national"))
 
     if metric == "seasons_since_appointed":
-        actual = _seasons_since_appointed(appointed_date, listing_year)
+        actual = _years_in_grade_for_current_appointment(
+            appt_ctx, listing_season_code=listing_season_code
+        )
         met = actual >= min_value
-        detail = f"{actual:.0f}/{min_value} seasons since appointment"
+        detail = years_detail_label(
+            actual=actual, required=min_value, listing_season_code=listing_season_code
+        )
+        return RuleCheckResult(metric, display, min_value, actual, met, detail)
+
+    if metric == "years_in_grade":
+        actual = _years_in_grade_for_current_appointment(
+            appt_ctx, listing_season_code=listing_season_code
+        )
+        met = actual >= min_value
+        detail = years_detail_label(
+            actual=actual, required=min_value, listing_season_code=listing_season_code
+        )
+        return RuleCheckResult(metric, display, min_value, actual, met, detail)
+
+    if metric == "years_isu_judge":
+        actual = max_years_for_appointment_criteria(
+            appointment_rows,
+            listing_season_code=listing_season_code,
+            appointment_type_id=APPOINTMENT_TYPE_ID_JUDGE,
+            level_id=int(isu_level_id),
+        )
+        met = actual >= min_value
+        detail = years_detail_label(
+            actual=actual, required=min_value, listing_season_code=listing_season_code
+        )
+        return RuleCheckResult(metric, display, min_value, actual, met, detail)
+
+    if metric == "years_intl_referee":
+        disc = _nullable_int_for_sql(directory_discipline_id)
+        actual = max_years_for_appointment_criteria(
+            appointment_rows,
+            listing_season_code=listing_season_code,
+            appointment_type_id=APPOINTMENT_TYPE_ID_REFEREE,
+            level_id=int(international_level_id),
+            discipline_ids=[disc] if disc is not None else None,
+        )
+        met = actual >= min_value
+        detail = years_detail_label(
+            actual=actual, required=min_value, listing_season_code=listing_season_code
+        )
+        return RuleCheckResult(metric, display, min_value, actual, met, detail)
+
+    if metric == "years_tc_prerequisite":
+        actual, detail_suffix = _evaluate_years_tc_prerequisite(
+            appointment_rows,
+            rule_row.get("metric_config"),
+            directory_discipline_id=directory_discipline_id,
+            listing_season_code=listing_season_code,
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
+        )
+        met = actual >= min_value
+        detail = f"{actual}/{min_value} {detail_suffix}"
         return RuleCheckResult(metric, display, min_value, actual, met, detail)
 
     role_ids = _role_ids_for_metric(metric, roles)
@@ -1664,11 +2144,11 @@ def evaluate_requirements_for_appointment(
     purpose: Purpose,
     *,
     listing_season_code: int | None = None,
-    listing_year: int | None = None,
     rules_df: pd.DataFrame | None = None,
     panel_bulk: pd.DataFrame | None = None,
     panel_by_official: dict[int, pd.DataFrame] | None = None,
     appointment_contexts: dict[tuple[int, int, int | None], dict[str, Any]] | None = None,
+    appointment_rows_by_official: dict[int, list[dict[str, Any]]] | None = None,
     isu_listing_keys: set[tuple[int, int, int | None]] | None = None,
     international_level_id: int | None = None,
     isu_level_id: int | None = None,
@@ -1682,7 +2162,6 @@ def evaluate_requirements_for_appointment(
         if listing_season_code is not None
         else REPORT_LISTING_SEASON_DEFAULT
     )
-    listing_year = listing_year or listing_calendar_year_from_season_code(listing_season_code)
     if rules_df is None:
         active_rules = _load_rule_sets(purpose=purpose)
     elif "purpose" in rules_df.columns:
@@ -1701,8 +2180,14 @@ def evaluate_requirements_for_appointment(
         )
     else:
         appt_ctx = _appointment_context(official_id, appointment_type_id, directory_discipline_id)
-    appointed_date = appt_ctx.get("appointed_date")
     appointment_level_id = appt_ctx.get("level_id")
+
+    if appointment_rows_by_official is not None:
+        appointment_rows = appointment_rows_by_official.get(int(official_id), [])
+    else:
+        appointment_rows = load_official_international_appointment_rows(
+            [int(official_id)]
+        ).get(int(official_id), [])
 
     if international_level_id is None or isu_level_id is None:
         with Session(engine) as session:
@@ -1755,8 +2240,11 @@ def evaluate_requirements_for_appointment(
                     appointment_type_id=appointment_type_id,
                     directory_discipline_id=directory_discipline_id,
                     season_codes=season_codes,
-                    appointed_date=appointed_date,
-                    listing_year=listing_year,
+                    listing_season_code=listing_season_code,
+                    appt_ctx=appt_ctx,
+                    appointment_rows=appointment_rows,
+                    international_level_id=int(international_level_id),
+                    isu_level_id=int(isu_level_id),
                     panel_bulk=panel_bulk,
                     panel_by_official=panel_by_official,
                 )
@@ -1807,7 +2295,6 @@ def evaluate_requirements_summary_df(
         if listing_season_code is not None
         else REPORT_LISTING_SEASON_DEFAULT
     )
-    listing_year = listing_calendar_year_from_season_code(listing_season_code)
     rules_df = _load_rule_sets()
     official_ids = summary["official_id"].astype(int).unique().tolist()
     panel = panel_bulk if panel_bulk is not None else load_international_panel_segments_bulk(official_ids)
@@ -1817,6 +2304,9 @@ def evaluate_requirements_summary_df(
             int(oid): group for oid, group in panel.groupby("official_id", sort=False)
         }
     appointment_contexts = _batch_appointment_contexts(official_ids)
+    appointment_rows_by_official = load_official_international_appointment_rows(
+        official_ids
+    )
     isu_listing_keys = _batch_isu_listing_keys(official_ids)
 
     with Session(engine) as session:
@@ -1825,11 +2315,11 @@ def evaluate_requirements_summary_df(
 
     batch_kwargs = {
         "listing_season_code": listing_season_code,
-        "listing_year": listing_year,
         "rules_df": rules_df,
         "panel_bulk": panel,
         "panel_by_official": panel_by_official,
         "appointment_contexts": appointment_contexts,
+        "appointment_rows_by_official": appointment_rows_by_official,
         "isu_listing_keys": isu_listing_keys,
         "international_level_id": international_level_id,
         "isu_level_id": isu_level_id,

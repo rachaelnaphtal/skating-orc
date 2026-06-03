@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 
 try:
     from activityAnalysis.international_listing_seasons import (
+        format_listing_reference_july1,
+        promote_first_eligible_column_label,
         competition_year_matches_seasons,
         format_usfs_season_code,
     )
@@ -42,13 +44,20 @@ try:
     )
     from activityAnalysis.international_officials_report import (
         AppointmentDetailContext,
+        _demographics_display_value,
         appointment_detail_pdf_filename,
         build_appointment_detail_context,
         build_appointment_detail_pdf,
     )
+    from activityAnalysis.international_segment_eligibility import (
+        enrich_panel_with_rule411_eligibility,
+    )
+    from ijs_results_urls import results_page_url
     from activityAnalysis.load_activity_data import get_engine
 except ModuleNotFoundError:
     from international_listing_seasons import (
+        format_listing_reference_july1,
+        promote_first_eligible_column_label,
         competition_year_matches_seasons,
         format_usfs_season_code,
     )
@@ -70,10 +79,13 @@ except ModuleNotFoundError:
     )
     from international_officials_report import (
         AppointmentDetailContext,
+        _demographics_display_value,
         appointment_detail_pdf_filename,
         build_appointment_detail_context,
         build_appointment_detail_pdf,
     )
+    from international_segment_eligibility import enrich_panel_with_rule411_eligibility
+    from ijs_results_urls import results_page_url
     from load_activity_data import get_engine
 
 
@@ -385,8 +397,13 @@ def _render_qualifying_activity_table(activity: pd.DataFrame | None, *, caption:
             "competition_scope": "Comp scope",
             "competition_type": "Comp type",
             "panel_roles": "Panel role(s)",
+            "results_url": "Results",
         }
     )
+    if "Results" in display.columns:
+        display["Results"] = display["Results"].map(
+            lambda u: results_page_url(u) if pd.notna(u) else None
+        )
     show_cols = [
         c
         for c in [
@@ -395,6 +412,7 @@ def _render_qualifying_activity_table(activity: pd.DataFrame | None, *, caption:
             "Comp scope",
             "Comp type",
             "Panel role(s)",
+            "Results",
         ]
         if c in display.columns
     ]
@@ -404,6 +422,11 @@ def _render_qualifying_activity_table(activity: pd.DataFrame | None, *, caption:
         hide_index=True,
         column_config={
             "Competition": st.column_config.TextColumn("Competition", width="large"),
+            "Results": st.column_config.LinkColumn(
+                "Results",
+                display_text="Open",
+                help="Competition results page used to verify panel service.",
+            ),
         },
     )
 
@@ -424,7 +447,12 @@ def _render_requirement_evaluation(title: str, ev: RequirementEvaluation) -> Non
         st.caption(ev.summary_note)
 
     seasons = ", ".join(format_usfs_season_code(c) for c in ev.season_codes)
-    st.caption(f"Season window: {seasons}")
+    st.caption(
+        f"Season window: {seasons}. "
+        "International segments (types 15–17) count only when they meet ISU service definitions "
+        "(Singles ≥6 entries; Pairs/Dance ≥4; Synchronized ≥2 ISU Members only; "
+        "≥2 ISU Members for Singles/Pairs/Dance when nations can be verified from names)."
+    )
 
     if not ev.rule_results:
         return
@@ -563,6 +591,7 @@ def render_appointment_detail_report(
         f" · Listing {format_usfs_season_code(listing_season_code)}"
     )
 
+    as_of = format_listing_reference_july1(listing_season_code)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Competitions", ctx.competition_count)
     c2.metric("Segments", ctx.segment_count)
@@ -571,10 +600,30 @@ def render_appointment_detail_report(
         "Promote",
         _requirement_metric_label(promote_primary) if show_promote else "—",
     )
+    d1, d2 = st.columns(2)
+    d1.metric(f"Age {as_of}", _demographics_display_value(ctx.age_as_of_listing))
+    d2.metric(
+        f"Years in grade {as_of}",
+        _demographics_display_value(ctx.years_in_grade),
+    )
+    if ctx.grade_date is not None:
+        st.caption(f"Grade date (achieved or appointed): {ctx.grade_date.isoformat()}")
+    if ctx.show_promote:
+        st.metric(
+            promote_first_eligible_column_label(),
+            ctx.promote_first_eligible_display,
+        )
 
     st.caption(
         "Activity seasons shown: "
         + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
+        + f". Age and years in grade are {as_of}."
+        + (
+            " First promote year (years) is the July 1 listing year when all promote year requirements are met; "
+            "competition requirements may still apply."
+            if show_promote
+            else ""
+        )
     )
 
     if maintain_primary is None:
@@ -596,7 +645,12 @@ def render_appointment_detail_report(
         _render_requirement_evaluation("Promote to ISU", promote_primary)
 
     st.markdown("### Panel activity (this appointment)")
-    detail = ctx.panel_detail.copy()
+    st.caption(
+        "Rule 411 column shows whether an international segment meets ISU entry minimums "
+        "for service credit (Singles ≥6, Pairs/Dance ≥4, Synchronized ≥2 ISU Members; "
+        "nations inferred from NOC suffixes on skater/team names when present)."
+    )
+    detail = enrich_panel_with_rule411_eligibility(ctx.panel_detail.copy())
     if detail.empty:
         st.info("No matching panel segments in the selected seasons.")
         return
@@ -640,6 +694,9 @@ def render_appointment_detail_report(
             "segment_level": "Level",
             "segment_discipline": "Segment discipline",
             "appointment_type": "Appointment",
+            "rule411_entry_count": "Entries",
+            "rule411_distinct_noc_count": "Nations",
+            "rule411_status": "Rule 411",
         }
     )
     show_cols = [
@@ -652,6 +709,9 @@ def render_appointment_detail_report(
             "Segment",
             "Level",
             "Segment discipline",
+            "Entries",
+            "Nations",
+            "Rule 411",
             "Appointment",
             "start_date",
             "end_date",
@@ -666,6 +726,11 @@ def render_appointment_detail_report(
         column_config={
             "Competition": st.column_config.TextColumn("Competition", width="large"),
             "Segment": st.column_config.TextColumn("Segment", width="medium"),
+            "Rule 411": st.column_config.TextColumn(
+                "Rule 411",
+                help="Whether this international segment meets ISU Rule 411 entry/member minimums.",
+                width="small",
+            ),
             "results_url": st.column_config.LinkColumn("Results", display_text="Open"),
         },
     )

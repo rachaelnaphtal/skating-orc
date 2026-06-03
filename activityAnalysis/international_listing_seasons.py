@@ -29,6 +29,62 @@ def listing_calendar_year_from_season_code(season_code: int) -> int:
     return 2000 + int(season_code) % 100
 
 
+def listing_reference_july1(season_code: int) -> date:
+    """
+    July 1 at the start of the listing anchor season.
+
+    ``2627`` → ``2026-07-01``; ``2728`` → ``2027-07-01``. Used for age and time in grade.
+    """
+    start_yy = int(season_code) // 100
+    return date(2000 + start_yy, 7, 1)
+
+
+def format_listing_reference_july1(season_code: int) -> str:
+    """Demographics reference label, e.g. ``as of July 1, 2026`` for listing ``2627``."""
+    return f"as of July 1, {listing_reference_july1(season_code).year}"
+
+
+def age_listing_column_label(season_code: int) -> str:
+    return f"Age {format_listing_reference_july1(season_code)}"
+
+
+def years_in_grade_listing_column_label(season_code: int) -> str:
+    return f"Years in grade {format_listing_reference_july1(season_code)}"
+
+
+def listing_season_codes_for_projection(*, years_ahead: int = 12) -> list[int]:
+    """Listing season codes from configured options through ``years_ahead`` future cycles."""
+    codes = list(REPORT_LISTING_SEASON_OPTIONS)
+    code = max(codes)
+    for _ in range(years_ahead):
+        code += 101
+        codes.append(code)
+    return sorted({int(c) for c in codes})
+
+
+def promote_first_eligible_column_label() -> str:
+    return "First promote year (years)"
+
+
+def format_promote_first_eligible_display(
+    first_listing_season: int | None,
+    *,
+    current_listing_season_code: int,
+) -> str:
+    """
+    Calendar year (July 1 anchor) of the first listing when promote year rules are met.
+
+    ``2627`` → ``2026``. If already satisfied at the current listing, uses the current season.
+    """
+    if first_listing_season is None:
+        return "—"
+    if int(first_listing_season) <= int(current_listing_season_code):
+        season = int(current_listing_season_code)
+    else:
+        season = int(first_listing_season)
+    return str(listing_reference_july1(season).year)
+
+
 def listing_season_code_from_calendar_year(listing_calendar_year: int) -> int:
     """Map July 1 listing calendar year ``2027`` → anchor season ``2627``."""
     end = int(listing_calendar_year) % 100

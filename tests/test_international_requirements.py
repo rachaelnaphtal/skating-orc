@@ -19,7 +19,21 @@ _mock_iod.COUNTABLE_SEGMENT_LEVELS = frozenset({"Junior", "Senior"})
 _mock_iod.DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL = "All"
 _mock_iod.INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID = 16
 _mock_iod._discipline_match_sql.return_value = ("", {})
-_mock_iod._nullable_int_for_sql.side_effect = lambda x: None if x is None else int(x)
+def _nullable_int_for_sql_test(x):
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
+_mock_iod._nullable_int_for_sql.side_effect = _nullable_int_for_sql_test
 _mock_iod.national_segment_appointment_type_id.return_value = 4
 sys.modules["activityAnalysis.international_officials_data"] = _mock_iod
 sys.modules["international_officials_data"] = _mock_iod
@@ -87,7 +101,41 @@ def test_directory_level_listing_tier():
     )
 
 
-def test_competition_scope_and_qualifying_national():
+def test_rule_set_applies_tc_promote_pairs_discipline():
+    """TC promote (414.3.c) is keyed to Pairs directory id 8, not Singles/Pairs id 9."""
+    rule_set = pd.Series(
+        {
+            "appointment_type_id": 15,
+            "sport": "figure",
+            "discipline_id": 8,
+            "directory_level_id": pd.NA,
+            "listing_tier": "international",
+        }
+    )
+    applies, _ = ir._rule_set_applies(
+        rule_set,
+        appointment_type_id=15,
+        directory_discipline_id=8,
+        appointment_level_id=17,
+        international_level_id=17,
+        isu_level_id=16,
+        purpose="promote",
+        official_id=1,
+    )
+    assert applies
+
+    applies_sp, reason = ir._rule_set_applies(
+        rule_set,
+        appointment_type_id=15,
+        directory_discipline_id=9,
+        appointment_level_id=17,
+        international_level_id=17,
+        isu_level_id=16,
+        purpose="promote",
+        official_id=1,
+    )
+    assert not applies_sp
+    assert reason == "discipline mismatch"
     assert ir._competition_matches_scope(15, False, (15, 16, 17), include_qualifying_national=False)
     assert not ir._competition_matches_scope(4, False, (15, 16, 17), include_qualifying_national=False)
     assert ir._competition_matches_scope(4, True, (15, 16, 17), include_qualifying_national=True)
@@ -506,6 +554,144 @@ def test_tc_ts_promote_isu():
         include_qualifying_national=True,
     )
     assert not met
+
+
+def test_years_in_grade_promote_metrics():
+    listing = 2627
+    rows = [
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 17,
+            "achieved_date": date(2021, 6, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 16,
+            "achieved_date": date(2020, 7, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 13,
+            "discipline_id": 9,
+            "level_id": 17,
+            "achieved_date": date(2022, 3, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 15,
+            "discipline_id": 8,
+            "level_id": 17,
+            "achieved_date": date(2021, 8, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 14,
+            "discipline_id": 8,
+            "level_id": 16,
+            "achieved_date": date(2022, 1, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+    ]
+    from activityAnalysis.international_listing_seasons import (
+        format_promote_first_eligible_display,
+    )
+    from activityAnalysis.international_official_demographics import (
+        first_listing_season_meeting_min_years_on_grade_date,
+        max_years_for_appointment_criteria,
+        related_discipline_ids_for_tc_prerequisite,
+        years_in_grade_at_listing,
+    )
+
+    assert related_discipline_ids_for_tc_prerequisite(8) == [1, 8, 9]
+    assert related_discipline_ids_for_tc_prerequisite(2) == [2]
+    assert (
+        max_years_for_appointment_criteria(
+            rows,
+            listing_season_code=listing,
+            appointment_type_id=12,
+            level_id=16,
+        )
+        >= 4
+    )
+    assert (
+        max_years_for_appointment_criteria(
+            rows,
+            listing_season_code=listing,
+            appointment_type_id=13,
+            level_id=17,
+            discipline_ids=[9],
+        )
+        >= 4
+    )
+    tc_ctx = {"achieved_date": date(2021, 8, 1), "appointed_date": None}
+    assert ir._years_in_grade_for_current_appointment(tc_ctx, listing_season_code=listing) >= 4
+    assert (
+        first_listing_season_meeting_min_years_on_grade_date(date(2021, 6, 1), 4) == 2627
+    )
+    assert format_promote_first_eligible_display(2627, current_listing_season_code=2627) == "2026"
+    assert format_promote_first_eligible_display(2728, current_listing_season_code=2627) == "2027"
+    actual, _ = ir._evaluate_years_tc_prerequisite(
+        rows,
+        None,
+        directory_discipline_id=8,
+        listing_season_code=listing,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert actual >= 4
+
+
+def test_tc_ts_promote_isu_isu_event_counts_as_international_competition():
+    """ISU Championship (15) satisfies min_international_competition per Rule 411."""
+    config = {"min_competitions": 3, "min_international_competition": 1}
+    panel = pd.DataFrame(
+        [
+            {
+                "competition_id": 1,
+                "competition_year": 2526,
+                "competition_type_id": 4,
+                "competition_qualifying": True,
+                "segment_level": "Senior",
+            },
+            {
+                "competition_id": 2,
+                "competition_year": 2526,
+                "competition_type_id": 4,
+                "competition_qualifying": True,
+                "segment_level": "Senior",
+            },
+            {
+                "competition_id": 3,
+                "competition_year": 2526,
+                "competition_type_id": 15,
+                "competition_qualifying": False,
+                "segment_level": "Senior",
+            },
+        ]
+    )
+    met, detail = ir._evaluate_tc_ts_promote_isu(
+        panel,
+        config,
+        season_codes=[2526],
+        segment_levels=frozenset({"Junior", "Senior"}),
+        competition_type_ids=(15, 16, 17),
+        include_qualifying_national=True,
+    )
+    assert met, detail
+    assert "1/1 International Competition(s)" in detail
 
 
 def test_qualifying_competitions_combined_roles():

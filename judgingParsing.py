@@ -32,6 +32,30 @@ from rule_errors_policy import should_flag_rule_errors
 USING_ISU_COMPONENT_METHOD = False
 
 
+def infer_panel_judge_names_from_parsed_scores(
+    elements_per_skater: dict,
+    pcs_per_skater: dict,
+    judges: list[str] | None,
+) -> list[str]:
+    """
+    When the panel-of-judges page lists no judges, infer placeholder names from
+    the number of GOE / PCS columns parsed from the protocol PDF.
+    """
+    if judges:
+        return list(judges)
+    n = 0
+    for els in (elements_per_skater or {}).values():
+        for el in els or []:
+            n = max(n, len(el.get("Scores") or []))
+    if not n:
+        for pcs_rows in (pcs_per_skater or {}).values():
+            for row in pcs_rows or []:
+                n = max(n, len(row.get("Scores") or []))
+    if n <= 0:
+        return []
+    return [f"Judge {i}" for i in range(1, n + 1)]
+
+
 def _parsing_log(msg: str, *, issue: bool = True) -> None:
     """Log parse issues at WARNING (collected for batch summary) or DEBUG."""
     if issue:
@@ -1029,6 +1053,21 @@ def extract_judge_scores(
     if not re.match(event_regex, event_name):
         return (event_name, None, None, None, [], [], [])
 
+    panel_judge_count = len(judges)
+    judges = infer_panel_judge_names_from_parsed_scores(
+        elements_per_skater, pcs_per_skater, judges
+    )
+    if panel_judge_count == 0 and judges:
+        try:
+            from ijs_scrape_log import note_warning
+
+            note_warning(
+                f"{event_name}: panel of judges missing or empty on index; "
+                f"using {len(judges)} judge column(s) from protocol PDF"
+            )
+        except ImportError:
+            pass
+
     element_errors = []
     element_deviations = []
     pcs_errors = []
@@ -1286,6 +1325,8 @@ def findElementDeviations(
                             judge_number=judgeNumber,
                         )
                     continue
+                if judgeNumber > len(judges):
+                    continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
@@ -1332,6 +1373,8 @@ def findPCSDeviations(
                             skater=skater,
                             judge_number=judgeNumber,
                         )
+                    continue
+                if judgeNumber > len(judges):
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue

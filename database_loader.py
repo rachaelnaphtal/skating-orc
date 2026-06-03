@@ -227,6 +227,29 @@ class DatabaseLoader:
             return pd.DataFrame.from_dict(all_pcs_dict)
         return pd.DataFrame(all_pcs_dict)
 
+    @staticmethod
+    def _merge_judge_names_from_scores(
+        panel_judge_names: list[str],
+        score_rows: pd.DataFrame,
+        *,
+        judge_name_col: str = "Judge Name",
+    ) -> list[str]:
+        """Panel list plus any judge names present in parsed score rows (e.g. inferred placeholders)."""
+        merged: list[str] = []
+        seen: set[str] = set()
+        for raw in list(panel_judge_names or []):
+            norm = normalize_scraped_judge_name(str(raw))
+            if norm and norm not in seen:
+                seen.add(norm)
+                merged.append(str(raw))
+        if not score_rows.empty and judge_name_col in score_rows.columns:
+            for raw in score_rows[judge_name_col].astype(str).unique().tolist():
+                norm = normalize_scraped_judge_name(raw)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    merged.append(raw)
+        return merged
+
     def _ensure_judges_by_name(self, names: list[str]) -> dict[str, int]:
         displays = [normalize_scraped_judge_name(str(n)) for n in names]
         unique_displays = list(dict.fromkeys(d for d in displays if d))
@@ -919,7 +942,9 @@ class DatabaseLoader:
         if df.empty:
             return
 
-        judge_dict = self._ensure_judges_by_name(list(judgesNames))
+        judge_dict = self._ensure_judges_by_name(
+            self._merge_judge_names_from_scores(judgesNames, df)
+        )
         skater_names = df["Skater"].astype(str).unique().tolist()
         skater_dict = self._ensure_skaters_by_name(skater_names)
         skater_ids = [skater_dict[n] for n in skater_names]
@@ -1104,8 +1129,10 @@ class DatabaseLoader:
         self._flush()
 
     def insert_pcs_scores(self, judgesNames, all_pcs_dict, segment_id):
-        judge_dict = self._ensure_judges_by_name(list(judgesNames))
         all_pcs_df = self._dataframe_pcs(all_pcs_dict)
+        judge_dict = self._ensure_judges_by_name(
+            self._merge_judge_names_from_scores(judgesNames, all_pcs_df)
+        )
         if all_pcs_df.empty:
             self._persist()
             return

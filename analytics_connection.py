@@ -101,6 +101,9 @@ def get_analytics_safe():
     try:
         analytics = st.session_state.analytics
         analytics.session.execute(text("SELECT 1"))
+        # SQLAlchemy opens an implicit read transaction per request; without
+        # commit/rollback the backend stays "idle in transaction" and can block DDL.
+        analytics.session.rollback()
         return analytics
     except _SESSION_PROBE_ERRORS:
         st.warning("Database session reset, reconnecting...")
