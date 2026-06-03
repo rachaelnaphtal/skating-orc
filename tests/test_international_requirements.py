@@ -320,6 +320,51 @@ def test_isu_championship_scope():
     assert ir._row_matches_competition_scope(16, False, "international_all")
 
 
+def test_role_ids_for_metric_competition_alternatives():
+    assert ir._role_ids_for_metric("competition_alternatives", ()) is None
+    assert ir._role_ids_for_metric("competition_alternatives", (1, 11)) == (1, 11)
+
+
+def test_competition_alternatives_tc_branch_without_role_ids():
+    """Unscoped TC branch must not count Judge panel work when Judge branch is role-scoped."""
+    config = {
+        "alternatives": [
+            {
+                "label": "Judge",
+                "role_ids": [1],
+                "requirements": [
+                    {"scope": "international_all", "min": 3},
+                    {"scope": "isu_championship", "min": 1},
+                ],
+            },
+            {
+                "label": "TC (Technical Committee members)",
+                "requirements": [
+                    {"scope": "international_all", "min": 3},
+                    {"scope": "isu_championship", "min": 1},
+                ],
+            },
+        ]
+    }
+    panel = pd.DataFrame(
+        [
+            {
+                "competition_id": i,
+                "competition_year": 2526,
+                "competition_type_id": 15 if i == 1 else 17,
+                "competition_qualifying": False,
+                "segment_level": "Senior",
+                "national_appointment_type_id": 1,
+            }
+            for i in (1, 2, 3, 4)
+        ]
+    )
+    met, via, _ = ir._evaluate_competition_alternatives(
+        panel, config, season_codes=[2526], segment_levels=frozenset({"Junior", "Senior"})
+    )
+    assert met and via == "Judge"
+
+
 def test_competition_alternatives_role_ids():
     config = {
         "alternatives": [
@@ -380,6 +425,66 @@ def test_competition_alternatives_role_ids():
         panel, config, season_codes=[2526], segment_levels=frozenset({"Junior", "Senior"})
     )
     assert met and via == "Judge"
+
+
+def test_international_including_championship_counts_same_events():
+    """≥3 International incl. ≥1 ISU Championship — not four separate competitions."""
+    config = {
+        "alternatives": [
+            {
+                "label": "Judge",
+                "role_ids": [1],
+                "requirements": [
+                    {"scope": "international_all", "min": 3},
+                    {"scope": "isu_championship", "min": 1},
+                ],
+            }
+        ]
+    }
+    panel = pd.DataFrame(
+        [
+            {
+                "competition_id": 1,
+                "competition_year": 2526,
+                "competition_type_id": 15,
+                "competition_qualifying": False,
+                "segment_level": "Senior",
+                "national_appointment_type_id": 1,
+            },
+            {
+                "competition_id": 2,
+                "competition_year": 2526,
+                "competition_type_id": 17,
+                "competition_qualifying": False,
+                "segment_level": "Senior",
+                "national_appointment_type_id": 1,
+            },
+            {
+                "competition_id": 3,
+                "competition_year": 2526,
+                "competition_type_id": 17,
+                "competition_qualifying": False,
+                "segment_level": "Senior",
+                "national_appointment_type_id": 1,
+            },
+        ]
+    )
+    met, via, detail = ir._evaluate_competition_alternatives(
+        panel, config, season_codes=[2526], segment_levels=frozenset({"Junior", "Senior"})
+    )
+    assert met and via == "Judge"
+    assert "among those" in detail
+    assert "need distinct competitions" not in detail
+
+    two_intl_one_champ = panel.iloc[:2]
+    met2, _, detail2 = ir._evaluate_competition_alternatives(
+        two_intl_one_champ,
+        config,
+        season_codes=[2526],
+        segment_levels=frozenset({"Junior", "Senior"}),
+    )
+    assert not met2
+    assert "2/3 International" in detail2
 
 
 def test_competition_alternatives_requires_distinct_competitions():

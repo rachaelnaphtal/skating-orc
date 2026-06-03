@@ -28,8 +28,9 @@ try:
     )
     from activityAnalysis.international_officials_data import (
         _nullable_int_for_sql,
-        get_international_official_activity_detail,
+        get_international_official_activity_other_appointments,
         load_international_panel_segments_bulk,
+        split_panel_detail_by_scope,
     )
     from activityAnalysis.international_requirements import (
         RequirementEvaluation,
@@ -63,8 +64,9 @@ except ModuleNotFoundError:
     )
     from international_officials_data import (
         _nullable_int_for_sql,
-        get_international_official_activity_detail,
+        get_international_official_activity_other_appointments,
         load_international_panel_segments_bulk,
+        split_panel_detail_by_scope,
     )
     from international_requirements import (
         RequirementEvaluation,
@@ -132,6 +134,75 @@ def filter_detail_by_season(
         lambda y: competition_year_matches_seasons(y, [season_code])
     )
     return detail.loc[mask].reset_index(drop=True)
+
+
+def _render_panel_segments_table(detail: pd.DataFrame, *, show_appointment_columns: bool = False) -> None:
+    """Display panel segment rows (Rule 411 columns when present)."""
+    if detail.empty:
+        st.info("No matching panel segments in the selected seasons.")
+        return
+
+    detail_display = detail.rename(
+        columns={
+            "competition_year": "Season",
+            "competition_name": "Competition",
+            "competition_scope": "Comp scope",
+            "competition_type": "Comp type",
+            "segment_name": "Segment",
+            "segment_level": "Level",
+            "segment_discipline": "Segment discipline",
+            "appointment_type": "Appointment",
+            "discipline": "Discipline",
+            "rule411_entry_count": "Entries",
+            "rule411_distinct_noc_count": "Nations",
+            "rule411_status": "Rule 411",
+        }
+    )
+    show_cols = [
+        c
+        for c in [
+            "Season",
+            "Competition",
+            "Comp scope",
+            "Comp type",
+            "Segment",
+            "Level",
+            "Segment discipline",
+            "Appointment",
+            "Discipline",
+            "Entries",
+            "Nations",
+            "Rule 411",
+            "start_date",
+            "end_date",
+            "results_url",
+        ]
+        if c in detail_display.columns
+    ]
+    if show_appointment_columns:
+        show_cols = [
+            c
+            for c in show_cols
+            if c not in ("Comp scope",) or c in detail_display.columns
+        ]
+    else:
+        show_cols = [c for c in show_cols if c not in ("Appointment", "Discipline")]
+
+    st.dataframe(
+        _streamlit_safe_dataframe(detail_display[show_cols]),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Competition": st.column_config.TextColumn("Competition", width="large"),
+            "Segment": st.column_config.TextColumn("Segment", width="medium"),
+            "Rule 411": st.column_config.TextColumn(
+                "Rule 411",
+                help="Whether this international segment meets ISU Rule 411 entry/member minimums.",
+                width="small",
+            ),
+            "results_url": st.column_config.LinkColumn("Results", display_text="Open"),
+        },
+    )
 
 
 def discipline_id_to_param(discipline_id: Any) -> str:
@@ -464,10 +535,19 @@ def _render_requirement_evaluation(title: str, ev: RequirementEvaluation) -> Non
             st.write(f"Met: **{met}**")
             if rule.metric == "competition_alternatives":
                 st.markdown("**Options:**")
+                st.caption(
+                    "Each option counts panel assignments in that protocol role (Judge, "
+                    "Technical Controller, etc.)."
+                )
                 for line in format_competition_alternatives_detail(
                     rule.detail, met=rule.met
                 ):
                     st.markdown(f"- {line}")
+                if rule.met and rule.detail.startswith("Meets via TC"):
+                    st.caption(
+                        "TC means Technical Controller on the event panel (protocol role), "
+                        "not membership on an ISU Technical Committee."
+                    )
             else:
                 st.write(f"Progress: {rule.detail}")
             if (
@@ -653,84 +733,57 @@ def render_appointment_detail_report(
     detail = enrich_panel_with_rule411_eligibility(ctx.panel_detail.copy())
     if detail.empty:
         st.info("No matching panel segments in the selected seasons.")
-        return
+    else:
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            scope_options = competition_scope_filter_options(detail)
+            scope_filter = st.selectbox(
+                "Competition scope",
+                options=scope_options,
+                index=0,
+                help="Filter panel activity to international or national qualifying competitions.",
+            )
+        with filter_col2:
+            season_options: list[int | None] = [_SEASON_FILTER_ALL] + season_codes_in_detail(
+                detail, report_season_codes
+            )
+            season_filter = st.selectbox(
+                "Season",
+                options=season_options,
+                index=0,
+                format_func=lambda c: "(All seasons)"
+                if c is None
+                else f"{format_usfs_season_code(c)} ({c})",
+                help="Filter panel activity to one report season.",
+            )
 
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        scope_options = competition_scope_filter_options(detail)
-        scope_filter = st.selectbox(
-            "Competition scope",
-            options=scope_options,
-            index=0,
-            help="Filter panel activity to international or national qualifying competitions.",
-        )
-    with filter_col2:
-        season_options: list[int | None] = [_SEASON_FILTER_ALL] + season_codes_in_detail(
-            detail, report_season_codes
-        )
-        season_filter = st.selectbox(
-            "Season",
-            options=season_options,
-            index=0,
-            format_func=lambda c: "(All seasons)"
-            if c is None
-            else f"{format_usfs_season_code(c)} ({c})",
-            help="Filter panel activity to one report season.",
-        )
+        detail = filter_detail_by_competition_scope(detail, scope_filter)
+        detail = filter_detail_by_season(detail, season_filter)
+        if detail.empty:
+            st.info("No panel segments match the selected filters.")
+        else:
+            _render_panel_segments_table(detail)
 
-    detail = filter_detail_by_competition_scope(detail, scope_filter)
-    detail = filter_detail_by_season(detail, season_filter)
-    if detail.empty:
-        st.info("No panel segments match the selected filters.")
-        return
+    intl_other = ctx.panel_international_other
+    if intl_other is None:
+        intl_other = get_international_official_activity_other_appointments(
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            discipline_id=discipline_id,
+            active_appointments_only=active_only,
+            panel_bulk=panel_bulk,
+            season_codes=report_season_codes,
+        )
+    if intl_other is not None and not intl_other.empty:
+        intl_other, _ = split_panel_detail_by_scope(intl_other)
 
-    detail_display = detail.rename(
-        columns={
-            "competition_year": "Season",
-            "competition_name": "Competition",
-            "competition_scope": "Comp scope",
-            "competition_type": "Comp type",
-            "segment_name": "Segment",
-            "segment_level": "Level",
-            "segment_discipline": "Segment discipline",
-            "appointment_type": "Appointment",
-            "rule411_entry_count": "Entries",
-            "rule411_distinct_noc_count": "Nations",
-            "rule411_status": "Rule 411",
-        }
+    st.markdown("### International panel activity for other appointments")
+    st.caption(
+        "International competitions (types 15–17) where this official served on panel for "
+        "other directory appointments in the report window."
     )
-    show_cols = [
-        c
-        for c in [
-            "Season",
-            "Competition",
-            "Comp scope",
-            "Comp type",
-            "Segment",
-            "Level",
-            "Segment discipline",
-            "Entries",
-            "Nations",
-            "Rule 411",
-            "Appointment",
-            "start_date",
-            "end_date",
-            "results_url",
-        ]
-        if c in detail_display.columns
-    ]
-    st.dataframe(
-        _streamlit_safe_dataframe(detail_display[show_cols]),
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Competition": st.column_config.TextColumn("Competition", width="large"),
-            "Segment": st.column_config.TextColumn("Segment", width="medium"),
-            "Rule 411": st.column_config.TextColumn(
-                "Rule 411",
-                help="Whether this international segment meets ISU Rule 411 entry/member minimums.",
-                width="small",
-            ),
-            "results_url": st.column_config.LinkColumn("Results", display_text="Open"),
-        },
-    )
+    if intl_other is None or intl_other.empty:
+        st.info("No international panel activity for other appointments in the selected seasons.")
+    else:
+        other_detail = enrich_panel_with_rule411_eligibility(intl_other.copy())
+        _render_panel_segments_table(other_detail, show_appointment_columns=True)

@@ -10,6 +10,7 @@ import pytest
 
 from activityAnalysis.international_officials_report import (
     AppointmentDetailContext,
+    _pdf_text,
     appointment_detail_pdf_filename,
     build_appointment_detail_pdf,
     build_bulk_appointment_reports_zip,
@@ -54,6 +55,16 @@ def _minimal_context(**overrides) -> AppointmentDetailContext:
     return AppointmentDetailContext(**base)
 
 
+def test_pdf_text_replaces_unicode_for_latin1():
+    assert _pdf_text("≥4 years in grade in this appointment (listing July 1)") == (
+        ">=4 years in grade in this appointment (listing July 1)"
+    )
+    assert "?" not in _pdf_text("≥4 years — Met: No  • option")
+    assert _pdf_text("Referee in ≥2 international competitions") == (
+        "Referee in >=2 international competitions"
+    )
+
+
 def test_sanitize_pdf_filename():
     assert sanitize_pdf_filename("Smith, John (Jr.)") == "Smith_John_Jr"
     assert sanitize_pdf_filename("") == "report"
@@ -76,6 +87,56 @@ def test_build_appointment_detail_pdf_magic_bytes():
     assert not isinstance(pdf, bytearray)
     assert pdf[:4] == b"%PDF"
     assert len(pdf) > 200
+
+
+def test_build_appointment_detail_pdf_long_competition_name_and_panel_sections():
+    long_name = (
+        "2025 ISU Challenger Series Nebelhorn Trophy and International "
+        "Figure Skating Competition Presented By Example Sponsor"
+    )
+    ctx = _minimal_context(
+        panel_international_this=pd.DataFrame(
+            [
+                {
+                    "competition_year": 2425,
+                    "competition_name": long_name,
+                    "competition_type": "ISU",
+                    "segment_name": "Free Skate",
+                    "segment_level": "Senior",
+                    "segment_discipline": "Singles",
+                }
+            ]
+        ),
+        panel_national_this=pd.DataFrame(
+            [
+                {
+                    "competition_year": 2425,
+                    "competition_name": "U.S. Figure Skating Championships",
+                    "competition_type": "National",
+                    "segment_name": "Short Program",
+                    "segment_level": "Senior",
+                    "segment_discipline": "Singles",
+                }
+            ]
+        ),
+        panel_international_other=pd.DataFrame(
+            [
+                {
+                    "competition_year": 2324,
+                    "competition_name": "ISU World Synchronized Skating Championships",
+                    "appointment_type": "International Judge",
+                    "discipline": "Synchronized",
+                    "competition_type": "ISU",
+                    "segment_name": "Free Skate",
+                    "segment_level": "Senior",
+                    "segment_discipline": "Synchronized",
+                }
+            ]
+        ),
+    )
+    pdf = build_appointment_detail_pdf(ctx)
+    assert pdf[:4] == b"%PDF"
+    assert len(pdf) > 400
 
 
 def test_build_bulk_appointment_reports_zip(monkeypatch):

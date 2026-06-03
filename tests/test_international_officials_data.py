@@ -77,6 +77,63 @@ def test_detail_empty_without_postgresql():
     assert iod.get_international_official_activity_detail().empty
 
 
+def test_split_panel_detail_by_scope():
+    detail = pd.DataFrame(
+        [
+            {"competition_scope": "International", "competition_name": "ISU Event"},
+            {"competition_scope": "National", "competition_name": "Nationals"},
+            {"competition_scope": "Other", "competition_name": "Local"},
+        ]
+    )
+    international, national = iod.split_panel_detail_by_scope(detail)
+    assert len(international) == 1
+    assert len(national) == 1
+    assert international.iloc[0]["competition_name"] == "ISU Event"
+
+
+def test_sort_panel_activity_detail_most_recent_first():
+    detail = pd.DataFrame(
+        [
+            {
+                "competition_year": 2425,
+                "competition_name": "Older Event",
+                "start_date": "2024-10-01",
+                "segment_name": "SP",
+            },
+            {
+                "competition_year": 2526,
+                "competition_name": "Newer Event",
+                "start_date": "2025-11-15",
+                "segment_name": "FS",
+            },
+            {
+                "competition_year": 2526,
+                "competition_name": "Newer Event",
+                "start_date": "2025-11-15",
+                "segment_name": "SP",
+            },
+        ]
+    )
+    sorted_detail = iod.sort_panel_activity_detail(detail)
+    assert sorted_detail.iloc[0]["competition_name"] == "Newer Event"
+    assert sorted_detail.iloc[-1]["competition_name"] == "Older Event"
+    assert list(sorted_detail["competition_year"]) == [2526, 2526, 2425]
+
+
+def test_filter_appointments_excluding_one():
+    appointments = pd.DataFrame(
+        [
+            {"official_id": 1, "appointment_type_id": 12, "discipline_id": 1},
+            {"official_id": 1, "appointment_type_id": 13, "discipline_id": 1},
+            {"official_id": 1, "appointment_type_id": 12, "discipline_id": 2},
+        ]
+    )
+    other = iod.filter_appointments_excluding_one(
+        appointments, official_id=1, appointment_type_id=12, discipline_id=1
+    )
+    assert len(other) == 2
+
+
 def test_collapse_data_operator_appointments():
     df = pd.DataFrame(
         [

@@ -31,10 +31,13 @@ try:
     from activityAnalysis.international_officials_data import (
         _nullable_int_for_sql,
         get_international_official_activity_detail,
+        get_international_official_activity_other_appointments,
         load_international_panel_segments_bulk,
+        split_panel_detail_by_scope,
     )
     from activityAnalysis.international_requirements import (
         RequirementEvaluation,
+        RuleCheckResult,
         _appointment_context,
         _appointment_context_from_batch,
         _batch_appointment_contexts,
@@ -64,10 +67,13 @@ except ModuleNotFoundError:
     from international_officials_data import (
         _nullable_int_for_sql,
         get_international_official_activity_detail,
+        get_international_official_activity_other_appointments,
         load_international_panel_segments_bulk,
+        split_panel_detail_by_scope,
     )
     from international_requirements import (
         RequirementEvaluation,
+        RuleCheckResult,
         _appointment_context,
         _appointment_context_from_batch,
         _batch_appointment_contexts,
@@ -120,6 +126,9 @@ class AppointmentDetailContext:
     show_promote: bool
     promote_note: str | None
     panel_detail: pd.DataFrame
+    panel_international_this: pd.DataFrame | None = None
+    panel_national_this: pd.DataFrame | None = None
+    panel_international_other: pd.DataFrame | None = None
     age_as_of_listing: int | None = None
     years_in_grade: int | None = None
     grade_date: date | None = None
@@ -154,18 +163,28 @@ def bulk_reports_zip_filename(*, listing_season_code: int, report_season_window:
     )
 
 
+_PDF_UNICODE_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("\u2265", ">="),  # ≥
+    ("\u2264", "<="),  # ≤
+    ("\u00d7", "x"),  # ×
+    ("\u2014", "-"),  # —
+    ("\u2013", "-"),  # –
+    ("\u2018", "'"),
+    ("\u2019", "'"),
+    ("\u201c", '"'),
+    ("\u201d", '"'),
+    ("\u2022", "*"),  # •
+    ("\u2026", "..."),  # …
+    ("\u00a0", " "),  # non-breaking space
+)
+
+
 def _pdf_text(value: Any) -> str:
+    """Normalize text for Helvetica / Latin-1 PDF output (no ``?`` placeholders)."""
     text = "" if value is None else str(value)
-    return (
-        text.replace("\u2014", "-")
-        .replace("\u2013", "-")
-        .replace("\u2018", "'")
-        .replace("\u2019", "'")
-        .replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .encode("latin-1", "replace")
-        .decode("latin-1")
-    )
+    for old, new in _PDF_UNICODE_REPLACEMENTS:
+        text = text.replace(old, new)
+    return text.encode("latin-1", "replace").decode("latin-1")
 
 
 def build_appointment_detail_context(
@@ -257,6 +276,17 @@ def build_appointment_detail_context(
         panel_bulk=panel,
         season_codes=report_season_codes,
     )
+    panel_international_this, panel_national_this = split_panel_detail_by_scope(panel_detail)
+    panel_international_other = get_international_official_activity_other_appointments(
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        active_appointments_only=active_only,
+        panel_bulk=panel,
+        season_codes=report_season_codes,
+    )
+    if not panel_international_other.empty:
+        panel_international_other, _ = split_panel_detail_by_scope(panel_international_other)
 
     grade_key = (official_id, appointment_type_id, discipline_id)
     if birthdates is None:
@@ -326,6 +356,9 @@ def build_appointment_detail_context(
         show_promote=show_promote,
         promote_note=promote_note,
         panel_detail=panel_detail,
+        panel_international_this=panel_international_this,
+        panel_national_this=panel_national_this,
+        panel_international_other=panel_international_other,
         age_as_of_listing=demo["age_as_of_listing"],
         years_in_grade=demo["years_in_grade"],
         grade_date=grade_date,
@@ -354,34 +387,295 @@ def _pdf_write_body(pdf: _ReportPDF, text: str, *, bold: bool = False) -> None:
     pdf.ln(1)
 
 
-def _pdf_write_qualifying_table(pdf: _ReportPDF, activity: pd.DataFrame | None) -> None:
+_PDF_TABLE_LINE_H = 3.5
+_PDF_TABLE_FONT_SIZE = 7
+_PDF_TABLE_HEADER_FONT_SIZE = 8
+
+
+def _pdf_short_discipline(value: Any) -> str:
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    if not text or text == "-":
+        return ""
+    lower = text.lower()
+    if "synch" in lower:
+        return "Synch"
+    if "single" in lower:
+        return "Singles"
+    if "pair" in lower:
+        return "Pairs"
+    if "dance" in lower:
+        return "Dance"
+    return text if len(text) <= 14 else text[:12] + "..."
+
+
+def _pdf_short_appointment_type(value: Any) -> str:
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    if not text:
+        return ""
+    return (
+        text.replace("International ", "Intl ")
+        .replace("Technical Controller", "TC")
+        .replace("Technical Specialist", "TS")
+        .replace("Data / Video Operator", "IDVO")
+    )
+
+
+def _pdf_table_cell_text(row: pd.Series, src: str) -> str:
+    val = row.get(src)
+    if src == "competition_year" and pd.notna(val):
+        return format_usfs_season_code(int(val))
+    if src in ("segment_discipline", "discipline"):
+        return _pdf_short_discipline(val)
+    if src == "appointment_type":
+        return _pdf_short_appointment_type(val)
+    return "" if pd.isna(val) else str(val)
+
+
+def _pdf_table_widths(pdf: _ReportPDF, weights: list[float]) -> list[float]:
+    total_w = float(sum(weights))
+    scale = pdf.epw / total_w
+    return [w * scale for w in weights]
+
+
+def _pdf_table_row_height(
+    pdf: _ReportPDF,
+    texts: list[str],
+    widths: list[float],
+    *,
+    line_h: float = _PDF_TABLE_LINE_H,
+    font_size: int = _PDF_TABLE_FONT_SIZE,
+) -> float:
+    pdf.set_font("Helvetica", "", font_size)
+    max_h = line_h
+    for text, width in zip(texts, widths):
+        lines = pdf.multi_cell(
+            width,
+            line_h,
+            _pdf_text(text),
+            dry_run=True,
+            output="LINES",
+        )
+        max_h = max(max_h, len(lines) * line_h)
+    return max_h
+
+
+def _pdf_table_ensure_space(pdf: _ReportPDF, needed_h: float) -> bool:
+    """Add a page when ``needed_h`` does not fit; return True if a break was added."""
+    if pdf.will_page_break(needed_h):
+        pdf.add_page()
+        return True
+    return False
+
+
+def _pdf_draw_table_row(
+    pdf: _ReportPDF,
+    texts: list[str],
+    widths: list[float],
+    *,
+    row_h: float,
+    line_h: float = _PDF_TABLE_LINE_H,
+    font_size: int = _PDF_TABLE_FONT_SIZE,
+    bold: bool = False,
+) -> None:
+    x0 = pdf.l_margin
+    y0 = pdf.get_y()
+    style = "B" if bold else ""
+    pdf.set_font("Helvetica", style, font_size)
+    pad = 0.5
+    auto_break = pdf.auto_page_break
+    bottom_margin = pdf.b_margin
+    pdf.set_auto_page_break(False, bottom_margin)
+    try:
+        for text, width in zip(texts, widths):
+            pdf.rect(x0, y0, width, row_h)
+            inner_w = max(width - 2 * pad, 4)
+            pdf.set_xy(x0 + pad, y0 + pad)
+            pdf.multi_cell(inner_w, line_h, _pdf_text(text), border=0)
+            x0 += width
+            pdf.set_xy(x0, y0)
+    finally:
+        pdf.set_auto_page_break(auto_break, bottom_margin)
+    pdf.set_xy(pdf.l_margin, y0 + row_h)
+
+
+def _pdf_write_data_table(
+    pdf: _ReportPDF,
+    activity: pd.DataFrame | None,
+    column_specs: list[tuple[str, str, float]],
+    *,
+    empty_message: str | None = None,
+) -> None:
     if activity is None or activity.empty:
+        if empty_message:
+            _pdf_write_body(pdf, empty_message)
         return
-    cols = [
-        ("competition_year", "Season"),
-        ("competition_name", "Competition"),
-        ("competition_scope", "Scope"),
-        ("competition_type", "Type"),
-        ("panel_roles", "Role(s)"),
-    ]
-    present = [(src, label) for src, label in cols if src in activity.columns]
+    present = [(src, label, weight) for src, label, weight in column_specs if src in activity.columns]
     if not present:
+        if empty_message:
+            _pdf_write_body(pdf, empty_message)
         return
-    pdf.set_font("Helvetica", "B", 8)
-    col_w = pdf.epw / len(present)
-    for _, label in present:
-        pdf.cell(col_w, 5, _pdf_text(label), border=1)
-    pdf.ln()
-    pdf.set_font("Helvetica", "", 8)
+
+    widths = _pdf_table_widths(pdf, [weight for _, _, weight in present])
+    labels = [label for _, label, _ in present]
+
+    header_h = _PDF_TABLE_LINE_H + 1
+
+    def draw_header() -> None:
+        _pdf_draw_table_row(
+            pdf,
+            labels,
+            widths,
+            row_h=header_h,
+            line_h=_PDF_TABLE_LINE_H,
+            font_size=_PDF_TABLE_HEADER_FONT_SIZE,
+            bold=True,
+        )
+
+    _pdf_table_ensure_space(pdf, header_h + 2)
+    draw_header()
+
+    pdf.set_font("Helvetica", "", _PDF_TABLE_FONT_SIZE)
     for _, row in activity.iterrows():
-        for src, _ in present:
-            val = row[src]
-            if src == "competition_year" and pd.notna(val):
-                text = format_usfs_season_code(int(val))
-            else:
-                text = "" if pd.isna(val) else str(val)
-            pdf.cell(col_w, 5, _pdf_text(text)[:40], border=1)
-        pdf.ln()
+        texts = [_pdf_table_cell_text(row, src) for src, _, _ in present]
+        row_h = _pdf_table_row_height(pdf, texts, widths) + 1
+        if _pdf_table_ensure_space(pdf, row_h + 1):
+            draw_header()
+        _pdf_draw_table_row(pdf, texts, widths, row_h=row_h)
+
+
+def _pdf_write_qualifying_table(pdf: _ReportPDF, activity: pd.DataFrame | None) -> None:
+    _pdf_write_data_table(
+        pdf,
+        activity,
+        [
+            ("competition_year", "Season", 0.1),
+            ("competition_name", "Competition", 0.42),
+            ("competition_scope", "Scope", 0.12),
+            ("competition_type", "Type", 0.14),
+            ("panel_roles", "Role(s)", 0.22),
+        ],
+    )
+
+
+_PDF_PANEL_THIS_INTL_COLUMNS = [
+    ("competition_year", "Season", 0.09),
+    ("competition_name", "Competition", 0.44),
+    ("competition_type", "Type", 0.11),
+    ("segment_name", "Segment", 0.22),
+    ("segment_level", "Level", 0.08),
+]
+
+_PDF_PANEL_THIS_NATIONAL_COLUMNS = list(_PDF_PANEL_THIS_INTL_COLUMNS)
+
+_PDF_PANEL_OTHER_INTL_COLUMNS = [
+    ("competition_year", "Season", 0.08),
+    ("competition_name", "Competition", 0.34),
+    ("appointment_type", "Appointment", 0.16),
+    ("discipline", "Discipline", 0.1),
+    ("competition_type", "Type", 0.1),
+    ("segment_name", "Segment", 0.22),
+]
+
+
+def _pdf_status_fill(met: bool | None) -> tuple[int, int, int]:
+    if met is None:
+        return (235, 235, 235)
+    if met:
+        return (210, 240, 210)
+    return (255, 220, 220)
+
+
+def _pdf_status_label(met: bool | None) -> str:
+    if met is None:
+        return "N/A"
+    return "MET" if met else "NOT MET"
+
+
+def _pdf_requirement_summary_note(ev: RequirementEvaluation) -> str:
+    if ev.not_applicable:
+        return ev.not_applicable_reason or "Not applicable"
+    if ev.meets:
+        return "All rules satisfied"
+    if ev.summary_note:
+        return ev.summary_note
+    unmet = [r.display_label for r in ev.rule_results if not r.met]
+    if unmet:
+        return "Needs: " + "; ".join(unmet[:4]) + ("..." if len(unmet) > 4 else "")
+    return "Does not meet requirements"
+
+
+def _pdf_write_status_badge(
+    pdf: _ReportPDF,
+    label: str,
+    met: bool | None,
+    *,
+    width: float = 22,
+) -> None:
+    r, g, b = _pdf_status_fill(met)
+    pdf.set_fill_color(r, g, b)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(width, 6, _pdf_text(_pdf_status_label(met)), border=1, fill=True, align="C")
+    pdf.set_fill_color(255, 255, 255)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(4, 6, "", border=0)
+    pdf.cell(0, 6, _pdf_text(label), border=0)
+    pdf.ln(6)
+
+
+def _pdf_write_at_a_glance(pdf: _ReportPDF, ctx: AppointmentDetailContext) -> None:
+    _pdf_write_heading(pdf, "At a glance", level=2)
+    rows: list[tuple[str, bool | None, str]] = []
+    rows.append(
+        (
+            f"Maintain ({listing_tier_display_label(ctx.listing_tier)})",
+            None
+            if ctx.maintain_primary is None
+            else (None if ctx.maintain_primary.not_applicable else ctx.maintain_primary.meets),
+            _pdf_requirement_summary_note(ctx.maintain_primary)
+            if ctx.maintain_primary is not None
+            else "No rules configured",
+        )
+    )
+    if ctx.promote_note:
+        rows.append(("Promote to ISU", None, ctx.promote_note))
+    elif ctx.show_promote:
+        prom = ctx.promote_primary
+        rows.append(
+            (
+                "Promote to ISU",
+                None if prom is None else (None if prom.not_applicable else prom.meets),
+                _pdf_requirement_summary_note(prom)
+                if prom is not None
+                else "No promotion profile",
+            )
+        )
+    for label, met, note in rows:
+        _pdf_write_status_badge(pdf, label, met)
+        if note:
+            pdf.set_font("Helvetica", "", 9)
+            pdf.multi_cell(0, 4, _pdf_text(note))
+            pdf.ln(1)
+    pdf.ln(2)
+
+
+def _pdf_write_rule_block(pdf: _ReportPDF, rule: RuleCheckResult) -> None:
+    _pdf_table_ensure_space(pdf, 18)
+    met = rule.met
+    r, g, b = _pdf_status_fill(met)
+    pdf.set_fill_color(r, g, b)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(14, 5, _pdf_text("MET" if met else "NO"), border=1, fill=True, align="C")
+    pdf.set_fill_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(0, 5, _pdf_text(rule.display_label), border=0)
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "", 8)
+    if rule.metric == "competition_alternatives":
+        for line in format_competition_alternatives_detail(rule.detail, met=rule.met):
+            pdf.multi_cell(0, 4, _pdf_text(f"  - {line}"))
+    else:
+        pdf.multi_cell(0, 4, _pdf_text(f"  Progress: {rule.detail}"))
+    pdf.ln(1)
 
 
 def _pdf_write_requirement_section(
@@ -391,78 +685,57 @@ def _pdf_write_requirement_section(
     *,
     empty_message: str,
 ) -> None:
-    _pdf_write_heading(pdf, title, level=2)
+    _pdf_write_heading(pdf, title, level=3)
     if ev is None:
         _pdf_write_body(pdf, empty_message)
         return
     if ev.not_applicable:
-        _pdf_write_body(pdf, f"{ev.label} ({ev.isu_rule_ref})")
+        _pdf_write_status_badge(pdf, ev.label, None)
         _pdf_write_body(pdf, ev.not_applicable_reason or "Not applicable.")
         return
-    status = "Meets requirements" if ev.meets else "Does not meet requirements"
-    _pdf_write_body(pdf, f"{ev.label} ({ev.isu_rule_ref})", bold=True)
-    _pdf_write_body(pdf, f"Overall: {status}")
+
+    _pdf_write_status_badge(pdf, f"{ev.label} ({ev.isu_rule_ref})", ev.meets)
     if ev.summary_note and not ev.meets:
-        _pdf_write_body(pdf, ev.summary_note)
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.multi_cell(0, 4, _pdf_text(ev.summary_note))
+        pdf.ln(1)
     seasons = ", ".join(format_usfs_season_code(c) for c in ev.season_codes)
-    _pdf_write_body(pdf, f"Season window: {seasons}")
-    for rule in ev.rule_results:
-        met = "Yes" if rule.met else "No"
-        _pdf_write_body(pdf, f"{rule.display_label} — Met: {met}", bold=True)
-        if rule.metric == "competition_alternatives":
-            for line in format_competition_alternatives_detail(rule.detail, met=rule.met):
-                _pdf_write_body(pdf, f"  • {line}")
-        else:
-            _pdf_write_body(pdf, f"  Progress: {rule.detail}")
-        if (
-            rule.qualifying_competitions is not None
-            and not rule.qualifying_competitions.empty
-            and len(ev.rule_results) > 1
-        ):
-            _pdf_write_body(pdf, "Competitions for this rule:")
-            _pdf_write_qualifying_table(pdf, rule.qualifying_competitions)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.multi_cell(0, 4, _pdf_text(f"Season window: {seasons}"))
+    pdf.ln(2)
+
+    if ev.rule_results:
+        _pdf_write_body(pdf, "Rules:", bold=True)
+        for rule in ev.rule_results:
+            _pdf_write_rule_block(pdf, rule)
+            if (
+                rule.qualifying_competitions is not None
+                and not rule.qualifying_competitions.empty
+                and len(ev.rule_results) > 1
+            ):
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.multi_cell(0, 4, _pdf_text("  Competitions for this rule:"))
+                _pdf_write_qualifying_table(pdf, rule.qualifying_competitions)
     if ev.qualifying_activity is not None and not ev.qualifying_activity.empty:
-        _pdf_write_body(pdf, "Qualifying competitions:")
+        _pdf_write_body(pdf, "Qualifying competitions (combined):", bold=True)
         _pdf_write_qualifying_table(pdf, ev.qualifying_activity)
     pdf.ln(2)
 
 
-def _pdf_write_panel_table(pdf: _ReportPDF, detail: pd.DataFrame) -> None:
-    if detail.empty:
-        _pdf_write_body(pdf, "No matching panel segments in the selected seasons.")
-        return
-    cols = [
-        ("competition_year", "Season"),
-        ("competition_name", "Competition"),
-        ("competition_scope", "Scope"),
-        ("competition_type", "Type"),
-        ("segment_name", "Segment"),
-        ("segment_level", "Level"),
-        ("segment_discipline", "Discipline"),
-    ]
-    present = [(src, label) for src, label in cols if src in detail.columns]
-    pdf.set_font("Helvetica", "B", 7)
-    col_w = pdf.epw / len(present)
-    for _, label in present:
-        pdf.cell(col_w, 4, _pdf_text(label), border=1)
-    pdf.ln()
-    pdf.set_font("Helvetica", "", 7)
-    for _, row in detail.iterrows():
-        if pdf.get_y() > pdf.eph - 12:
-            pdf.add_page()
-            pdf.set_font("Helvetica", "B", 7)
-            for _, label in present:
-                pdf.cell(col_w, 4, _pdf_text(label), border=1)
-            pdf.ln()
-            pdf.set_font("Helvetica", "", 7)
-        for src, _ in present:
-            val = row[src]
-            if src == "competition_year" and pd.notna(val):
-                text = format_usfs_season_code(int(val))
-            else:
-                text = "" if pd.isna(val) else str(val)
-            pdf.cell(col_w, 4, _pdf_text(text)[:35], border=1)
-        pdf.ln()
+def _pdf_write_panel_section(
+    pdf: _ReportPDF,
+    title: str,
+    detail: pd.DataFrame | None,
+    column_specs: list[tuple[str, str, float]],
+) -> None:
+    _pdf_write_heading(pdf, title, level=2)
+    _pdf_write_data_table(
+        pdf,
+        detail,
+        column_specs,
+        empty_message="No matching panel segments in the selected seasons.",
+    )
+    pdf.ln(1)
 
 
 def _binary_output_bytes(out: bytes | bytearray | str) -> bytes:
@@ -505,15 +778,17 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
         demo_lines.append(
             f"First promote year (years): {ctx.promote_first_eligible_display}"
         )
-    _pdf_write_body(pdf, "   ".join(demo_lines))
+    for line in demo_lines:
+        _pdf_write_body(pdf, line)
     _pdf_write_body(
         pdf,
-        f"Competitions: {ctx.competition_count}   Segments: {ctx.segment_count}   "
-        f"Maintain: {_requirement_metric_label(ctx.maintain_primary)}   "
-        f"Promote: {_requirement_metric_label(ctx.promote_primary) if ctx.show_promote else '-'}",
-        bold=True,
+        f"Panel activity: {ctx.competition_count} competition(s), "
+        f"{ctx.segment_count} segment(s) in report window.",
     )
-    pdf.ln(2)
+    pdf.ln(1)
+
+    _pdf_write_at_a_glance(pdf, ctx)
+    _pdf_write_heading(pdf, "Requirement details", level=2)
 
     maintain_title = f"Maintain ({listing_tier_display_label(ctx.listing_tier)} listing)"
     _pdf_write_requirement_section(
@@ -524,7 +799,7 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
     )
 
     if ctx.promote_note:
-        _pdf_write_heading(pdf, "Promote", level=2)
+        _pdf_write_heading(pdf, "Promote to ISU", level=3)
         _pdf_write_body(pdf, ctx.promote_note)
     else:
         _pdf_write_requirement_section(
@@ -534,8 +809,38 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
             empty_message="No promotion requirement profile applies.",
         )
 
-    _pdf_write_heading(pdf, "Panel activity (this appointment)", level=2)
-    _pdf_write_panel_table(pdf, ctx.panel_detail)
+    intl_this = (
+        ctx.panel_international_this
+        if ctx.panel_international_this is not None
+        else split_panel_detail_by_scope(ctx.panel_detail)[0]
+    )
+    national_this = (
+        ctx.panel_national_this
+        if ctx.panel_national_this is not None
+        else split_panel_detail_by_scope(ctx.panel_detail)[1]
+    )
+    intl_other = ctx.panel_international_other
+    if intl_other is None:
+        intl_other = pd.DataFrame()
+
+    _pdf_write_panel_section(
+        pdf,
+        "International panel activity (this appointment)",
+        intl_this,
+        _PDF_PANEL_THIS_INTL_COLUMNS,
+    )
+    _pdf_write_panel_section(
+        pdf,
+        "National panel activity (this appointment)",
+        national_this,
+        _PDF_PANEL_THIS_NATIONAL_COLUMNS,
+    )
+    _pdf_write_panel_section(
+        pdf,
+        "International panel activity for other appointments",
+        intl_other,
+        _PDF_PANEL_OTHER_INTL_COLUMNS,
+    )
 
     out = pdf.output()
     return _binary_output_bytes(out)

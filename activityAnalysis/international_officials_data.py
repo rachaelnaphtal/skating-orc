@@ -580,6 +580,42 @@ def load_international_panel_segments_bulk(
     return df
 
 
+def sort_panel_activity_detail(detail: pd.DataFrame) -> pd.DataFrame:
+    """Order panel rows most recent competition first (start date, then season code)."""
+    if detail.empty:
+        return detail
+
+    work = detail.copy()
+    sort_cols: list[str] = []
+    ascending: list[bool] = []
+
+    if "start_date" in work.columns:
+        work["_sort_start"] = pd.to_datetime(work["start_date"], errors="coerce")
+        sort_cols.append("_sort_start")
+        ascending.append(False)
+    elif "end_date" in work.columns:
+        work["_sort_end"] = pd.to_datetime(work["end_date"], errors="coerce")
+        sort_cols.append("_sort_end")
+        ascending.append(False)
+
+    if "competition_year" in work.columns:
+        work["_sort_season"] = pd.to_numeric(work["competition_year"], errors="coerce")
+        sort_cols.append("_sort_season")
+        ascending.append(False)
+
+    for col in ("competition_name", "segment_name"):
+        if col in work.columns:
+            sort_cols.append(col)
+            ascending.append(True)
+
+    if not sort_cols:
+        return detail.reset_index(drop=True)
+
+    out = work.sort_values(by=sort_cols, ascending=ascending, na_position="last")
+    drop_cols = [c for c in ("_sort_start", "_sort_end", "_sort_season") if c in out.columns]
+    return out.drop(columns=drop_cols).reset_index(drop=True)
+
+
 def _finalize_activity_detail(detail: pd.DataFrame) -> pd.DataFrame:
     if detail.empty:
         return _empty_detail()
@@ -600,7 +636,100 @@ def _finalize_activity_detail(detail: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     detail["role"] = detail["appointment_type"]
-    return detail[_DETAIL_COLUMNS]
+    return sort_panel_activity_detail(detail[_DETAIL_COLUMNS])
+
+
+def split_panel_detail_by_scope(detail: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split activity detail into international vs national qualifying competitions."""
+    if detail.empty or "competition_scope" not in detail.columns:
+        return detail.iloc[0:0].copy(), detail.iloc[0:0].copy()
+    international = detail.loc[detail["competition_scope"] == "International"].reset_index(
+        drop=True
+    )
+    national = detail.loc[detail["competition_scope"] == "National"].reset_index(drop=True)
+    return international, national
+
+
+def is_same_directory_appointment_row(
+    row: Any,
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: int | None,
+) -> bool:
+    """Whether a directory appointment row is the same official × type × discipline."""
+    try:
+        if int(row.official_id) != int(official_id):
+            return False
+    except (TypeError, ValueError, AttributeError):
+        return False
+    try:
+        if int(row.appointment_type_id) != int(appointment_type_id):
+            return False
+    except (TypeError, ValueError, AttributeError):
+        return False
+    row_disc = _nullable_int_for_sql(getattr(row, "discipline_id", None))
+    current_disc = _nullable_int_for_sql(discipline_id)
+    return row_disc == current_disc
+
+
+def filter_appointments_excluding_one(
+    appointments: pd.DataFrame,
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: int | None,
+) -> pd.DataFrame:
+    """Drop one directory appointment from an appointments frame."""
+    if appointments.empty:
+        return appointments
+    keep = ~appointments.apply(
+        lambda r: is_same_directory_appointment_row(
+            r,
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            discipline_id=discipline_id,
+        ),
+        axis=1,
+    )
+    return appointments.loc[keep].reset_index(drop=True)
+
+
+def get_international_official_activity_other_appointments(
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: int | None,
+    active_appointments_only: bool = True,
+    appointments: pd.DataFrame | None = None,
+    panel_bulk: pd.DataFrame | None = None,
+    season_codes: list[int] | None = None,
+) -> pd.DataFrame:
+    """Panel activity for the same official's other international directory appointments."""
+    if not activity_database_is_postgresql():
+        return _empty_detail()
+
+    if appointments is None:
+        appointments = get_international_officials_for_filters(
+            official_id=official_id,
+            active_appointments_only=active_appointments_only,
+        )
+    other = filter_appointments_excluding_one(
+        appointments,
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+    )
+    if other.empty:
+        return _empty_detail()
+
+    return get_international_official_activity_detail(
+        official_id=official_id,
+        active_appointments_only=active_appointments_only,
+        appointments=other,
+        panel_bulk=panel_bulk,
+        season_codes=season_codes,
+    )
 
 
 def get_international_official_activity_detail(

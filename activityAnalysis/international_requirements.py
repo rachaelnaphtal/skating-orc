@@ -444,7 +444,7 @@ def _role_ids_for_metric(metric: str, roles: tuple[int, ...]) -> tuple[int, ...]
     if metric == "tc_ts_promote_isu":
         return roles or (NATIONAL_ROLE_TECH_CONTROLLER, NATIONAL_ROLE_TECH_SPECIALIST)
     if metric == "competition_alternatives":
-        return roles or (NATIONAL_ROLE_TECH_CONTROLLER, NATIONAL_ROLE_TECH_SPECIALIST)
+        return roles if roles else None
     if metric == "combined_roles_competitions":
         return roles or (
             NATIONAL_ROLE_REFEREE,
@@ -799,10 +799,46 @@ def _panel_for_alternative_roles(
     panel: pd.DataFrame,
     role_ids: list[int] | tuple[int, ...] | None,
 ) -> pd.DataFrame:
-    if not role_ids or panel.empty:
+    if panel.empty:
         return panel
+    if not role_ids:
+        return panel.iloc[0:0]
     ids = {int(x) for x in role_ids}
     return panel.loc[panel["national_appointment_type_id"].isin(ids)]
+
+
+def _alternatives_with_role_ids(alternatives: list[dict[str, Any]]) -> bool:
+    return any(alt.get("role_ids") for alt in alternatives)
+
+
+def _sort_competition_alternatives(
+    alternatives: list[dict[str, Any]],
+    *,
+    intl_appointment_type_id: int | None,
+) -> list[dict[str, Any]]:
+    """Try the branch matching this directory appointment's panel role first."""
+    if intl_appointment_type_id is None:
+        return alternatives
+    try:
+        from activityAnalysis.international_officials_data import (
+            national_segment_appointment_type_id,
+        )
+    except ModuleNotFoundError:
+        from international_officials_data import national_segment_appointment_type_id
+
+    nat_role = national_segment_appointment_type_id(int(intl_appointment_type_id))
+    if nat_role is None:
+        return alternatives
+
+    def sort_key(alt: dict[str, Any]) -> tuple[int, int]:
+        role_ids = alt.get("role_ids") or []
+        try:
+            roles = {int(x) for x in role_ids}
+        except (TypeError, ValueError):
+            roles = set()
+        return (0 if int(nat_role) in roles else 1, 0)
+
+    return sorted(alternatives, key=sort_key)
 
 
 def _competition_ids_for_scope(
@@ -852,6 +888,54 @@ def _requirements_coverable_distinct(reqs: list[tuple[int, set[int]]]) -> bool:
     return dfs(0, set())
 
 
+def _branch_meets_international_including_championship(
+    branch_panel: pd.DataFrame,
+    requirements: list[dict[str, Any]],
+    *,
+    season_codes: list[int],
+    segment_levels: frozenset[str],
+) -> tuple[bool, list[str]] | None:
+    """
+    ``international_all`` + ``isu_championship``: N international including M championships.
+
+    The championship minimum applies to competitions already counted toward international,
+    not as additional separate events.
+    """
+    if len(requirements) != 2:
+        return None
+    scopes = {str(r.get("scope") or "") for r in requirements}
+    if scopes != {"international_all", "isu_championship"}:
+        return None
+
+    intl_req = next(r for r in requirements if r.get("scope") == "international_all")
+    champ_req = next(r for r in requirements if r.get("scope") == "isu_championship")
+    try:
+        intl_min = int(intl_req.get("min", 0))
+        champ_min = int(champ_req.get("min", 0))
+    except (TypeError, ValueError):
+        return None
+
+    intl_ids = _competition_ids_for_scope(
+        branch_panel,
+        "international_all",
+        season_codes=season_codes,
+        segment_levels=segment_levels,
+    )
+    champ_ids = _competition_ids_for_scope(
+        branch_panel,
+        "isu_championship",
+        season_codes=season_codes,
+        segment_levels=segment_levels,
+    )
+    among = intl_ids & champ_ids
+    parts = [
+        f"{len(intl_ids)}/{intl_min} International",
+        f"{len(among)}/{champ_min} ISU Championship among those",
+    ]
+    ok = len(intl_ids) >= intl_min and len(among) >= champ_min
+    return ok, parts
+
+
 def _branch_meets_requirements(
     branch_panel: pd.DataFrame,
     requirements: list[dict[str, Any]],
@@ -859,6 +943,16 @@ def _branch_meets_requirements(
     season_codes: list[int],
     segment_levels: frozenset[str],
 ) -> tuple[bool, list[str]]:
+    if len(requirements) > 1:
+        included = _branch_meets_international_including_championship(
+            branch_panel,
+            requirements,
+            season_codes=season_codes,
+            segment_levels=segment_levels,
+        )
+        if included is not None:
+            return included
+
     parts: list[str] = []
     req_sets: list[tuple[int, set[int]]] = []
     per_scope_ok = True
@@ -895,6 +989,7 @@ def _evaluate_competition_alternatives(
     *,
     season_codes: list[int],
     segment_levels: frozenset[str],
+    intl_appointment_type_id: int | None = None,
 ) -> tuple[bool, str, str]:
     """
     Evaluate OR branches; each branch is AND of scoped competition minimums.
@@ -906,10 +1001,22 @@ def _evaluate_competition_alternatives(
     if not alternatives:
         return False, "", "No alternatives configured"
 
+    role_scoped = _alternatives_with_role_ids(alternatives)
+    alternatives = _sort_competition_alternatives(
+        alternatives, intl_appointment_type_id=intl_appointment_type_id
+    )
+
     branch_summaries: list[str] = []
+    winning: tuple[str, list[str]] | None = None
     for alt in alternatives:
         label = str(alt.get("label") or "Option")
-        branch_panel = _panel_for_alternative_roles(panel, alt.get("role_ids"))
+        role_ids = alt.get("role_ids")
+        if role_ids:
+            branch_panel = _panel_for_alternative_roles(panel, role_ids)
+        elif role_scoped:
+            branch_panel = panel.iloc[0:0]
+        else:
+            branch_panel = panel
         requirements = alt.get("requirements") or []
         branch_ok, parts = _branch_meets_requirements(
             branch_panel,
@@ -919,8 +1026,16 @@ def _evaluate_competition_alternatives(
         )
         summary = f"{label}: {', '.join(parts)}"
         branch_summaries.append(summary)
-        if branch_ok:
-            return True, label, f"Meets via {label} ({', '.join(parts)})"
+        if branch_ok and winning is None:
+            winning = (label, list(parts))
+
+    if winning is not None:
+        label, parts = winning
+        others = [s for s in branch_summaries if not s.startswith(f"{label}:")]
+        detail = f"Meets via {label} ({', '.join(parts)})"
+        if others:
+            detail += " — also checked: " + "; ".join(others)
+        return True, label, detail
 
     return False, "", "Need one of: " + "; ".join(branch_summaries)
 
@@ -2029,6 +2144,7 @@ def _evaluate_rule(
             rule_row.get("metric_config"),
             season_codes=season_codes,
             segment_levels=seg_levels,
+            intl_appointment_type_id=appointment_type_id,
         )
         qualifying = _qualifying_competitions_for_alternatives(
             panel,
