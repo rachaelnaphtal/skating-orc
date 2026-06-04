@@ -10,12 +10,17 @@ os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/international_listing_seas
 
 from activityAnalysis.international_listing_seasons import (
     REPORT_LISTING_SEASON_DEFAULT,
+    calendar_year_for_listing_milestone,
     competition_year_matches_seasons,
+    current_age_bin_label,
     default_listing_season_code,
     filter_panel_to_season_codes,
+    format_age_out_display,
     format_listing_reference_july1,
     format_promote_first_eligible_display,
     format_usfs_season_code,
+    histogram_counts_by_current_age_bins,
+    histogram_counts_by_year_bins,
     listing_calendar_year,
     listing_calendar_year_from_season_code,
     listing_reference_july1,
@@ -49,6 +54,44 @@ def test_format_promote_first_eligible_display():
     assert format_promote_first_eligible_display(None, current_listing_season_code=2627) == "—"
     assert format_promote_first_eligible_display(2627, current_listing_season_code=2627) == "2026"
     assert format_promote_first_eligible_display(2728, current_listing_season_code=2627) == "2027"
+
+
+def test_calendar_year_for_listing_milestone():
+    assert calendar_year_for_listing_milestone(None, current_listing_season_code=2627) is None
+    assert calendar_year_for_listing_milestone(2728, current_listing_season_code=2627) == 2027
+    assert calendar_year_for_listing_milestone(2627, current_listing_season_code=2627) == 2026
+
+
+def test_format_age_out_display():
+    assert format_age_out_display(2728, current_listing_season_code=2627) == "2027"
+
+
+def test_current_age_bin_label_aligned_to_age_out():
+    assert current_age_bin_label(72, age_out_at=70) == "70+"
+    assert current_age_bin_label(70, age_out_at=70) == "70+"
+    assert current_age_bin_label(67, age_out_at=70) == "65–69"
+    assert current_age_bin_label(65, age_out_at=70) == "65–69"
+    assert current_age_bin_label(62, age_out_at=70) == "60–64"
+    assert current_age_bin_label(60, age_out_at=70) == "60–64"
+
+
+def test_histogram_counts_by_current_age_bins():
+    ages = pd.Series([67, 68, 62, 71, None])
+    hist = histogram_counts_by_current_age_bins(ages, bin_width=5, age_out_at=70)
+    assert list(hist["bin_label"]) == ["70+", "65–69", "60–64"]
+    assert list(hist["count"]) == [1, 2, 1]
+
+
+def test_histogram_counts_by_year_bins():
+    years = pd.Series([2024, 2026, 2027, 2028, None])
+    hist = histogram_counts_by_year_bins(years, bin_width=5)
+    assert list(hist["bin_label"]) == ["2020–2024", "2025–2029"]
+    assert list(hist["count"]) == [1, 3]
+    assert histogram_counts_by_year_bins(pd.Series([None, None])).empty
+
+    single = histogram_counts_by_year_bins(pd.Series([2026, 2026, 2027]), bin_width=1)
+    assert list(single["bin_label"]) == ["2026", "2027"]
+    assert list(single["count"]) == [2, 1]
 
 
 def test_listing_season_code_mapping():

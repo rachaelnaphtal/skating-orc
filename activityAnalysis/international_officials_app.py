@@ -12,6 +12,7 @@ import os
 import sys
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,13 +51,19 @@ from activityAnalysis.international_listing_seasons import (
     REPORT_SEASON_WINDOW_DEFAULT,
     REPORT_SEASON_WINDOW_OPTIONS,
     age_listing_column_label,
+    age_out_column_label,
+    calendar_year_for_listing_milestone,
+    format_age_out_display,
     format_listing_reference_july1,
     format_promote_first_eligible_display,
     format_usfs_season_code,
+    histogram_counts_by_current_age_bins,
+    histogram_counts_by_year_bins,
     promote_first_eligible_column_label,
     years_in_grade_listing_column_label,
     season_codes_preceding_listing,
 )
+from activityAnalysis.international_official_demographics import OFFICIAL_AGE_OUT_ON_JULY1
 from activityAnalysis.international_official_demographics import (
     enrich_summary_with_listing_demographics,
 )
@@ -793,6 +800,7 @@ def _format_demographic_column(val) -> str:
 _age_col_label = age_listing_column_label(listing_season_code)
 _yrs_in_grade_col_label = years_in_grade_listing_column_label(listing_season_code)
 _promote_first_col_label = promote_first_eligible_column_label()
+_age_out_col_label = age_out_column_label()
 
 summary_display = summary.rename(
     columns={
@@ -810,6 +818,7 @@ summary_display = summary.rename(
         "age_as_of_listing": _age_col_label,
         "years_in_grade": _yrs_in_grade_col_label,
         "promote_first_eligible_listing": _promote_first_col_label,
+        "age_out_listing": _age_out_col_label,
         "maintain": "Maintain",
         "maintain_note": "Maintain detail",
         "promote": "Promote",
@@ -826,6 +835,17 @@ if _promote_first_col_label in summary_display.columns:
             None
             if pd.isna(r.get("promote_first_eligible_listing"))
             else int(r["promote_first_eligible_listing"]),
+            current_listing_season_code=int(listing_season_code),
+        ),
+        axis=1,
+    )
+
+if _age_out_col_label in summary_display.columns:
+    summary_display[_age_out_col_label] = summary.apply(
+        lambda r: format_age_out_display(
+            None
+            if pd.isna(r.get("age_out_listing"))
+            else int(r["age_out_listing"]),
             current_listing_season_code=int(listing_season_code),
         ),
         axis=1,
@@ -869,6 +889,7 @@ show_cols = [
         _age_col_label,
         _yrs_in_grade_col_label,
         _promote_first_col_label,
+        _age_out_col_label,
         *(
             [
                 "Maintain",
@@ -951,6 +972,14 @@ st.dataframe(
             ),
             width="small",
         ),
+        _age_out_col_label: st.column_config.TextColumn(
+            _age_out_col_label,
+            help=(
+                "First listing July 1 when the official's age on that date is at least 70. "
+                "Uses date of birth from the directory."
+            ),
+            width="small",
+        ),
         "Maintain": st.column_config.TextColumn(
             "Maintain",
             help="Re-list service requirements for this appointment's level (International or ISU).",
@@ -976,6 +1005,76 @@ st.dataframe(
         ),
     },
 )
+
+st.subheader("Timeline distribution")
+_hist_mode = st.radio(
+    "Chart",
+    options=["Promotion", "Aging out (age 70)"],
+    horizontal=True,
+    key="intl_summary_timeline_chart",
+    help=(
+        "Promotion: one row per appointment in the filtered summary. "
+        "Aging out: one row per distinct official (date of birth)."
+    ),
+)
+if _hist_mode == "Promotion":
+    _hist_years = summary["promote_first_eligible_listing"].map(
+        lambda s: calendar_year_for_listing_milestone(
+            None if pd.isna(s) else int(s),
+            current_listing_season_code=int(listing_season_code),
+        )
+    )
+    _hist_df = histogram_counts_by_year_bins(_hist_years, bin_width=1)
+    if _hist_df.empty:
+        st.caption("No rows with a known year for this chart under the current filters.")
+    else:
+        _hist_fig = px.bar(
+            _hist_df,
+            x="bin_label",
+            y="count",
+            title="First promote year (filtered appointment rows)",
+            labels={"bin_label": "Calendar year", "count": "Appointment rows"},
+        )
+        _hist_fig.update_layout(bargap=0.15, xaxis_title="Calendar year")
+        st.plotly_chart(_hist_fig, width="stretch")
+        st.caption(
+            f"{int(_hist_years.notna().sum())} of {len(summary)} appointment row"
+            f"{'s' if len(summary) != 1 else ''} have a promote year."
+        )
+else:
+    _hist_people = summary.drop_duplicates(subset=["official_id"], keep="first")
+    _hist_ages = _hist_people["age_as_of_listing"]
+    _hist_df = histogram_counts_by_current_age_bins(
+        _hist_ages,
+        bin_width=5,
+        age_out_at=OFFICIAL_AGE_OUT_ON_JULY1,
+    )
+    if _hist_df.empty:
+        st.caption("No officials with a known age for this chart under the current filters.")
+    else:
+        _hist_x_label = "Age (years on July 1)"
+        _hist_fig = px.bar(
+            _hist_df,
+            x="bin_label",
+            y="count",
+            title=(
+                f"Current age at listing — "
+                f"{format_listing_reference_july1(listing_season_code)} (distinct officials)"
+            ),
+            labels={"bin_label": _hist_x_label, "count": "Officials"},
+        )
+        _hist_fig.update_layout(bargap=0.15, xaxis_title=_hist_x_label)
+        _hist_fig.update_xaxes(
+            categoryorder="array",
+            categoryarray=list(_hist_df["bin_label"]),
+        )
+        st.plotly_chart(_hist_fig, width="stretch")
+        _people_total = summary["official_id"].nunique()
+        st.caption(
+            f"{int(_hist_ages.notna().sum())} of {_people_total} official"
+            f"{'s' if _people_total != 1 else ''} have a known age. "
+            f"Bands align to age-out at {OFFICIAL_AGE_OUT_ON_JULY1} (e.g. 65–69, 60–64, 70+)."
+        )
 
 show_segment_detail = st.checkbox(
     "Show all segment detail",

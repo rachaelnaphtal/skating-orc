@@ -7,7 +7,9 @@ from activityAnalysis.international_listing_seasons import (
     listing_reference_july1,
 )
 from activityAnalysis.international_official_demographics import (
+    OFFICIAL_AGE_OUT_ON_JULY1,
     age_as_of_listing,
+    first_listing_season_at_least_age,
     first_year_credit_july1,
     grade_date_for_tc_prerequisite_tenure,
     grade_date_from_appointment_contexts,
@@ -27,6 +29,17 @@ def test_age_as_of_listing():
     assert age_as_of_listing(dob, listing_season_code=2627) == 65
     assert age_as_of_listing(dob, listing_season_code=2728) == 66
     assert age_as_of_listing(None, listing_season_code=2627) is None
+
+
+def test_first_listing_season_at_least_age_70():
+    assert OFFICIAL_AGE_OUT_ON_JULY1 == 70
+    # Born June 1956 → age 70 on July 1, 2026 (listing 2627).
+    assert first_listing_season_at_least_age(date(1956, 6, 1), 70) == 2627
+    # Born August 1956 → age 70 on July 1, 2027 (listing 2728).
+    assert first_listing_season_at_least_age(date(1956, 8, 1), 70) == 2728
+    assert first_listing_season_at_least_age(None, 70) is None
+    # Young official: age-out is far in the future, not limited by projection window.
+    assert first_listing_season_at_least_age(date(1990, 3, 15), 70) == 6061
 
 
 def test_years_in_grade_user_examples():

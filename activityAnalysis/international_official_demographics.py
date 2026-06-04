@@ -49,6 +49,9 @@ DISCIPLINE_ID_SINGLES_PAIRS = 9
 DISCIPLINE_ID_ICE_DANCE = 4
 DISCIPLINE_ID_SYNCHRONIZED = 2
 
+# ISU / USFS directory: officials age out when age on listing July 1 reaches this limit.
+OFFICIAL_AGE_OUT_ON_JULY1 = 70
+
 
 def grade_date_for_time_in_grade(
     achieved_date: date | None,
@@ -127,6 +130,38 @@ def age_as_of_listing(
     if (reference.month, reference.day) < (date_of_birth.month, date_of_birth.day):
         years -= 1
     return years
+
+
+def july1_calendar_year_when_age_reaches(
+    date_of_birth: date,
+    min_age: int,
+) -> int:
+    """
+    First calendar year of a July 1 listing reference when age is at least ``min_age``.
+
+    Birthdays after July 1 credit from the following July 1 (same rule as
+    :func:`age_as_of_listing`).
+    """
+    adjust = 1 if (date_of_birth.month, date_of_birth.day) > (7, 1) else 0
+    return int(date_of_birth.year) + int(min_age) + adjust
+
+
+def first_listing_season_at_least_age(
+    date_of_birth: date | None,
+    min_age: int,
+) -> int | None:
+    """First listing season when age on that season's July 1 is at least ``min_age``."""
+    if date_of_birth is None:
+        return None
+    try:
+        from activityAnalysis.international_listing_seasons import (
+            listing_season_code_for_july1_calendar_year,
+        )
+    except ModuleNotFoundError:
+        from international_listing_seasons import listing_season_code_for_july1_calendar_year
+
+    year = july1_calendar_year_when_age_reaches(date_of_birth, min_age)
+    return listing_season_code_for_july1_calendar_year(year)
 
 
 def related_discipline_ids_for_tc_prerequisite(directory_discipline_id: Any) -> list[int]:
@@ -421,7 +456,7 @@ def enrich_summary_with_listing_demographics(
     *,
     listing_season_code: int,
 ) -> pd.DataFrame:
-    """Add ``age_as_of_listing`` and ``years_in_grade`` columns to a summary frame."""
+    """Add age, years in grade, and age-out listing columns to a summary frame."""
     if summary.empty:
         return summary
     out = summary.copy()
@@ -438,9 +473,11 @@ def enrich_summary_with_listing_demographics(
     grade_dates = load_grade_dates_for_appointments(keys)
     ages: list[int | None] = []
     years: list[int | None] = []
+    age_out: list[int | None] = []
     for _, row in out.iterrows():
+        oid = int(row["official_id"])
         demo = appointment_demographics_row(
-            official_id=int(row["official_id"]),
+            official_id=oid,
             appointment_type_id=int(row["appointment_type_id"]),
             discipline_id=row.get("discipline_id"),
             listing_season_code=listing_season_code,
@@ -449,6 +486,13 @@ def enrich_summary_with_listing_demographics(
         )
         ages.append(demo["age_as_of_listing"])
         years.append(demo["years_in_grade"])
+        age_out.append(
+            first_listing_season_at_least_age(
+                birthdates.get(oid),
+                OFFICIAL_AGE_OUT_ON_JULY1,
+            )
+        )
     out["age_as_of_listing"] = ages
     out["years_in_grade"] = years
+    out["age_out_listing"] = age_out
     return out

@@ -66,6 +66,38 @@ def promote_first_eligible_column_label() -> str:
     return "First promote year (years)"
 
 
+def calendar_year_for_listing_milestone(
+    first_listing_season: int | None,
+    *,
+    current_listing_season_code: int,
+) -> int | None:
+    """
+    Calendar year of the listing reference July 1 for a milestone season.
+
+    If the milestone is on or before the current listing anchor, uses the current listing year.
+    """
+    if first_listing_season is None or (
+        isinstance(first_listing_season, float) and pd.isna(first_listing_season)
+    ):
+        return None
+    season = int(first_listing_season)
+    if season <= int(current_listing_season_code):
+        season = int(current_listing_season_code)
+    return int(listing_reference_july1(season).year)
+
+
+def format_listing_milestone_year_display(
+    first_listing_season: int | None,
+    *,
+    current_listing_season_code: int,
+) -> str:
+    year = calendar_year_for_listing_milestone(
+        first_listing_season,
+        current_listing_season_code=current_listing_season_code,
+    )
+    return "—" if year is None else str(year)
+
+
 def format_promote_first_eligible_display(
     first_listing_season: int | None,
     *,
@@ -76,13 +108,111 @@ def format_promote_first_eligible_display(
 
     ``2627`` → ``2026``. If already satisfied at the current listing, uses the current season.
     """
-    if first_listing_season is None:
-        return "—"
-    if int(first_listing_season) <= int(current_listing_season_code):
-        season = int(current_listing_season_code)
+    return format_listing_milestone_year_display(
+        first_listing_season,
+        current_listing_season_code=current_listing_season_code,
+    )
+
+
+def age_out_column_label() -> str:
+    return "Age out year (70 on July 1)"
+
+
+def format_age_out_display(
+    age_out_listing: int | None,
+    *,
+    current_listing_season_code: int,
+) -> str:
+    """First listing July 1 when age as of that date is at least 70."""
+    return format_listing_milestone_year_display(
+        age_out_listing,
+        current_listing_season_code=current_listing_season_code,
+    )
+
+
+def current_age_bin_label(
+    age: int,
+    *,
+    bin_width: int = 5,
+    age_out_at: int = 70,
+) -> str:
+    """
+    Five-year age band aligned to the age-out threshold (e.g. 65–69, 60–64, 70+).
+    """
+    age = int(age)
+    if age >= int(age_out_at):
+        return f"{int(age_out_at)}+"
+    high = int(age_out_at) - 1
+    while high >= 0:
+        low = max(0, high - int(bin_width) + 1)
+        if low <= age <= high:
+            return f"{low}–{high}"
+        high = low - 1
+    low = 0
+    high = min(int(bin_width) - 1, int(age_out_at) - 1)
+    return f"{low}–{high}"
+
+
+def _current_age_bin_sort_key(label: str, *, age_out_at: int = 70) -> int:
+    if label.endswith("+"):
+        return int(age_out_at)
+    low = int(label.split("–", 1)[0])
+    return low
+
+
+def histogram_counts_by_current_age_bins(
+    ages: pd.Series,
+    *,
+    bin_width: int = 5,
+    age_out_at: int = 70,
+) -> pd.DataFrame:
+    """Count officials in age bands aligned to age-out (65–69, 60–64, …, 70+)."""
+    if bin_width <= 0:
+        raise ValueError("bin_width must be positive")
+    valid = ages.dropna().astype(int)
+    if valid.empty:
+        return pd.DataFrame(columns=["bin_label", "count"])
+    labels = valid.map(
+        lambda a: current_age_bin_label(a, bin_width=bin_width, age_out_at=age_out_at)
+    )
+    counts = (
+        pd.DataFrame({"bin_label": labels})
+        .groupby("bin_label", as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+    )
+    counts["_sort"] = counts["bin_label"].map(
+        lambda lb: _current_age_bin_sort_key(lb, age_out_at=age_out_at)
+    )
+    return counts.sort_values("_sort", ascending=False).drop(columns="_sort")[
+        ["bin_label", "count"]
+    ]
+
+
+def histogram_counts_by_year_bins(
+    calendar_years: pd.Series,
+    *,
+    bin_width: int = 5,
+) -> pd.DataFrame:
+    """Count values in calendar-year bins (single year or ranges like 2020–2024)."""
+    if bin_width <= 0:
+        raise ValueError("bin_width must be positive")
+    years = calendar_years.dropna().astype(int)
+    if years.empty:
+        return pd.DataFrame(columns=["bin_label", "count"])
+    if bin_width == 1:
+        bin_start = years
+        labels = years.map(str)
     else:
-        season = int(first_listing_season)
-    return str(listing_reference_july1(season).year)
+        bin_start = (years // bin_width) * bin_width
+        labels = bin_start.map(lambda b: f"{int(b)}–{int(b + bin_width - 1)}")
+    return (
+        pd.DataFrame({"bin_start": bin_start, "bin_label": labels})
+        .groupby(["bin_start", "bin_label"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+        .sort_values("bin_start")[["bin_label", "count"]]
+    )
 
 
 def listing_season_code_from_calendar_year(listing_calendar_year: int) -> int:
@@ -90,6 +220,12 @@ def listing_season_code_from_calendar_year(listing_calendar_year: int) -> int:
     end = int(listing_calendar_year) % 100
     start = end - 1
     return int(f"{start:02d}{end:02d}")
+
+
+def listing_season_code_for_july1_calendar_year(calendar_year: int) -> int:
+    """Map calendar year of listing July 1 (e.g. ``2026``) → season code ``2627``."""
+    y = int(calendar_year)
+    return int(f"{y % 100:02d}{(y + 1) % 100:02d}")
 
 
 def listing_calendar_year(as_of: date | None = None) -> int:
