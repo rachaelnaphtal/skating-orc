@@ -301,6 +301,7 @@ try:
         grade_date_for_time_in_grade,
         load_official_international_appointment_rows,
         max_years_for_appointment_criteria,
+        max_years_for_tc_prerequisite_role,
         related_discipline_ids_for_tc_prerequisite,
         years_detail_label,
         years_in_grade_at_listing,
@@ -315,6 +316,7 @@ except ModuleNotFoundError:
         grade_date_for_time_in_grade,
         load_official_international_appointment_rows,
         max_years_for_appointment_criteria,
+        max_years_for_tc_prerequisite_role,
         related_discipline_ids_for_tc_prerequisite,
         years_detail_label,
         years_in_grade_at_listing,
@@ -1600,7 +1602,25 @@ def _appointment_context_from_batch(
         int(appointment_type_id),
         _nullable_int_for_sql(discipline_id),
     )
-    return contexts.get(key, {})
+    if key in contexts:
+        return contexts[key]
+    # Collapsed IDVO summary rows use discipline_id NULL; directory stores per-discipline rows.
+    if (
+        _nullable_int_for_sql(discipline_id) is None
+        and int(appointment_type_id) == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+    ):
+        candidates = [
+            ctx
+            for (oid, atid, _disc), ctx in contexts.items()
+            if oid == int(official_id) and atid == int(appointment_type_id)
+        ]
+        if not candidates:
+            return {}
+        for ctx in candidates:
+            if _nullable_int_for_sql(ctx.get("level_id")) == DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP:
+                return ctx
+        return candidates[0]
+    return {}
 
 
 def _batch_isu_listing_keys(official_ids: list[int]) -> set[tuple[int, int, int | None]]:
@@ -1682,37 +1702,55 @@ def _tc_prerequisite_years_count(
     international_level_id: int,
     isu_level_id: int,
 ) -> tuple[int, int, int, int]:
-    """Intl Judge, Intl Referee, ISU TS years and best-of for TC promote prerequisite."""
+    """Intl/ISU Judge, Intl Referee, ISU TS years and best-of for TC promote prerequisite."""
     config = _parse_metric_config(metric_config)
     related = config.get("related_discipline_ids")
     if related:
-        discipline_ids = [int(x) for x in related]
+        judge_referee_discipline_ids = [int(x) for x in related]
     else:
-        discipline_ids = related_discipline_ids_for_tc_prerequisite(directory_discipline_id)
+        judge_referee_discipline_ids = related_discipline_ids_for_tc_prerequisite(
+            directory_discipline_id
+        )
+    ts_related = config.get("ts_discipline_ids")
+    if ts_related:
+        ts_discipline_ids = [int(x) for x in ts_related]
+    else:
+        ts_disc = _nullable_int_for_sql(directory_discipline_id)
+        ts_discipline_ids = [ts_disc] if ts_disc is not None else []
 
-    judge_years = max_years_for_appointment_criteria(
-        appointment_rows,
-        listing_season_code=listing_season_code,
-        appointment_type_id=APPOINTMENT_TYPE_ID_JUDGE,
-        level_id=int(international_level_id),
-        discipline_ids=discipline_ids or None,
+    judge_referee_ids = judge_referee_discipline_ids or []
+    judge_years = (
+        max_years_for_tc_prerequisite_role(
+            appointment_rows,
+            listing_season_code=listing_season_code,
+            appointment_type_id=APPOINTMENT_TYPE_ID_JUDGE,
+            discipline_ids=judge_referee_ids,
+            international_level_id=int(international_level_id),
+            isu_level_id=int(isu_level_id),
+        )
+        if judge_referee_ids
+        else 0
     )
-    referee_years = max_years_for_appointment_criteria(
-        appointment_rows,
-        listing_season_code=listing_season_code,
-        appointment_type_id=APPOINTMENT_TYPE_ID_REFEREE,
-        level_id=int(international_level_id),
-        discipline_ids=discipline_ids or None,
+    referee_years = (
+        max_years_for_tc_prerequisite_role(
+            appointment_rows,
+            listing_season_code=listing_season_code,
+            appointment_type_id=APPOINTMENT_TYPE_ID_REFEREE,
+            discipline_ids=judge_referee_ids,
+            international_level_id=int(international_level_id),
+            isu_level_id=int(isu_level_id),
+        )
+        if judge_referee_ids
+        else 0
     )
-    ts_disc = _nullable_int_for_sql(directory_discipline_id)
     ts_years = 0
-    if ts_disc is not None:
+    if ts_discipline_ids:
         ts_years = max_years_for_appointment_criteria(
             appointment_rows,
             listing_season_code=listing_season_code,
             appointment_type_id=APPOINTMENT_TYPE_ID_TECHNICAL_SPECIALIST,
             level_id=int(isu_level_id),
-            discipline_ids=[ts_disc],
+            discipline_ids=ts_discipline_ids,
         )
     return judge_years, referee_years, ts_years, max(judge_years, referee_years, ts_years)
 
@@ -1726,7 +1764,7 @@ def _evaluate_years_tc_prerequisite(
     international_level_id: int,
     isu_level_id: int,
 ) -> tuple[int, str]:
-    """TC promote: years as intl Judge, intl Referee (related disciplines), or ISU TS."""
+    """TC promote: Judge/Referee (Intl+ISU) or ISU TS years in related disciplines."""
     judge_years, referee_years, ts_years, actual = _tc_prerequisite_years_count(
         appointment_rows,
         metric_config,
@@ -1742,7 +1780,7 @@ def _evaluate_years_tc_prerequisite(
 
     detail = (
         f"years ({format_listing_reference_july1(listing_season_code)}; "
-        f"Intl Judge {judge_years}, Intl Referee {referee_years}, ISU TS {ts_years})"
+        f"Judge {judge_years}, Intl Referee {referee_years}, ISU TS {ts_years})"
     )
     return actual, detail
 
@@ -1878,6 +1916,9 @@ def first_listing_season_eligible_for_promote_years(
     """
     First listing season when all promote year requirements are met.
 
+    International IDVO promote rules are competition-based only (no year metrics);
+    in that case the first promote year is the current listing season.
+
     Returns ``None`` when promotion does not apply or required dates are missing.
     """
     if not should_evaluate_promote_requirements(
@@ -1903,6 +1944,8 @@ def first_listing_season_eligible_for_promote_years(
         isu_listing_keys=isu_listing_keys,
     )
     if not year_rules:
+        if int(appointment_type_id) == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+            return int(listing_season_code)
         return None
 
     first_seasons: list[int] = []
@@ -2211,10 +2254,16 @@ def _rule_set_applies(
 
     if purpose == "promote":
         req_level = rule_set.get("directory_level_id")
+        resolved_level = _nullable_int_for_sql(appointment_level_id)
+        intl_id = (
+            int(international_level_id)
+            if international_level_id is not None
+            else DIRECTORY_LEVEL_ID_INTERNATIONAL
+        )
         if pd.notna(req_level) and international_level_id is not None:
-            if appointment_level_id != international_level_id:
+            if resolved_level != intl_id:
                 return False, "promote applies at International level only"
-        elif international_level_id is not None and appointment_level_id != international_level_id:
+        elif international_level_id is not None and resolved_level != intl_id:
             return False, "promote applies at International level only"
 
     listing_tier = str(rule_set.get("listing_tier") or "international")
@@ -2393,6 +2442,16 @@ def evaluate_requirements_for_appointment(
     return out
 
 
+def _primary_requirement_evaluation(
+    evals: list[RequirementEvaluation],
+) -> RequirementEvaluation | None:
+    """Prefer the first applicable rule set; fall back to first N/A entry."""
+    if not evals:
+        return None
+    applicable = [e for e in evals if not e.not_applicable]
+    return applicable[0] if applicable else evals[0]
+
+
 def evaluate_requirements_summary_df(
     summary: pd.DataFrame,
     *,
@@ -2449,9 +2508,9 @@ def evaluate_requirements_summary_df(
     for row in summary.itertuples(index=False):
         oid = int(row.official_id)
         atid = int(row.appointment_type_id)
-        disc = row.discipline_id
+        disc = _nullable_int_for_sql(row.discipline_id)
         appt_level = getattr(row, "appointment_level", "") or ""
-        appt_level_id = getattr(row, "appointment_level_id", None)
+        appt_level_id = _nullable_int_for_sql(getattr(row, "appointment_level_id", None))
 
         maintain_evals = evaluate_requirements_for_appointment(
             oid, atid, disc, "maintain", **batch_kwargs
@@ -2492,14 +2551,17 @@ def evaluate_requirements_summary_df(
             promote_evals = evaluate_requirements_for_appointment(
                 oid, atid, disc, "promote", **batch_kwargs
             )
-            promote_applicable = [e for e in promote_evals if not e.not_applicable]
-            if promote_applicable:
-                best = promote_applicable[0]
-                promote_meets.append("Yes" if best.meets else "No")
-                promote_notes.append(best.summary_note)
+            promote_primary = _primary_requirement_evaluation(promote_evals)
+            if promote_primary is not None and not promote_primary.not_applicable:
+                promote_meets.append("Yes" if promote_primary.meets else "No")
+                promote_notes.append(promote_primary.summary_note)
             else:
                 promote_meets.append("N/A")
-                promote_notes.append("")
+                promote_notes.append(
+                    promote_primary.not_applicable_reason or promote_primary.summary_note
+                    if promote_primary is not None
+                    else ""
+                )
 
     out = summary.copy()
     out["maintain"] = maintain_meets

@@ -27,6 +27,7 @@ from app_query_params import (
     apply_int_select_param,
     mark_query_params_applied,
     qp_get,
+    qp_get_int,
     query_params_changed,
     sync_query_params,
 )
@@ -37,6 +38,7 @@ from activityAnalysis.international_officials_data import (
     _nullable_int_for_sql,
     get_international_appointment_type_options,
     get_international_discipline_options,
+    get_international_level_options,
     get_international_official_activity_detail,
     get_international_official_activity_summary,
     get_international_officials_for_filters,
@@ -59,10 +61,16 @@ from activityAnalysis.international_official_demographics import (
     enrich_summary_with_listing_demographics,
 )
 from activityAnalysis.international_officials_detail import (
+    INTL_VIEW_DETAIL,
+    INTL_VIEW_OPTIONS,
+    INTL_VIEW_SUMMARY,
     appointment_detail_url,
-    clear_appointment_detail_params,
+    open_last_appointment_detail,
     parse_appointment_detail_params,
+    remember_last_appointment_detail,
     render_appointment_detail_report,
+    render_detail_appointment_nav,
+    switch_to_summary_view,
 )
 from activityAnalysis.international_officials_report import (
     build_bulk_appointment_reports_zip,
@@ -99,10 +107,25 @@ def _load_appointment_type_options():
 @st.cache_data(ttl=_CACHE_TTL_SEC)
 def _load_discipline_options(
     appointment_type_id: int | None,
+    level_id: int | None,
     active_only: bool,
 ):
     return get_international_discipline_options(
         appointment_type_id=appointment_type_id,
+        level_id=level_id,
+        active_appointments_only=active_only,
+    )
+
+
+@st.cache_data(ttl=_CACHE_TTL_SEC)
+def _load_level_options(
+    appointment_type_id: int | None,
+    discipline_id: int | None,
+    active_only: bool,
+):
+    return get_international_level_options(
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
         active_appointments_only=active_only,
     )
 
@@ -111,11 +134,13 @@ def _load_discipline_options(
 def _load_official_options(
     appointment_type_id: int | None,
     discipline_id: int | None,
+    level_id: int | None,
     active_only: bool,
 ):
     df = get_international_officials_for_filters(
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
+        level_id=level_id,
         active_appointments_only=active_only,
     )
     if df.empty:
@@ -132,6 +157,7 @@ def _load_official_options(
 def _load_summary(
     appointment_type_id: int | None,
     discipline_id: int | None,
+    level_id: int | None,
     official_id: int | None,
     active_only: bool,
     include_requirements: bool,
@@ -146,6 +172,7 @@ def _load_summary(
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
         official_id=official_id,
+        level_id=level_id,
         active_appointments_only=active_only,
     )
     if appointments.empty:
@@ -221,6 +248,7 @@ def _build_bulk_appointment_reports_zip(
 def _load_segment_detail(
     appointment_type_id: int | None,
     discipline_id: int | None,
+    level_id: int | None,
     official_id: int | None,
     active_only: bool,
     listing_season_code: int,
@@ -234,6 +262,7 @@ def _load_segment_detail(
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
         official_id=official_id,
+        level_id=level_id,
         active_appointments_only=active_only,
     )
     if appointments.empty:
@@ -326,6 +355,7 @@ def _render_appointment_detail_from_query_params() -> bool:
     summary, report_season_codes = _load_summary(
         params["appointment_type_id"],
         params["discipline_id"],
+        None,
         params["official_id"],
         active_only,
         False,
@@ -341,15 +371,19 @@ def _render_appointment_detail_from_query_params() -> bool:
     if row is None:
         st.error("Could not find this appointment in the current data.")
         if st.button("← Back to summary", type="secondary"):
-            clear_appointment_detail_params()
+            switch_to_summary_view()
             st.rerun()
         return True
 
+    remember_last_appointment_detail(
+        official_id=int(params["official_id"]),
+        appointment_type_id=int(params["appointment_type_id"]),
+        discipline_id=params["discipline_id"],
+    )
     official_ids = [int(params["official_id"])]
     panel = load_international_panel_segments_bulk(
         official_ids, season_codes=report_season_codes
     )
-    nav_appointments = _load_detail_nav_appointments(params["active_only"])
     render_appointment_detail_report(
         summary_row=row,
         listing_season_code=listing_season_code,
@@ -357,7 +391,7 @@ def _render_appointment_detail_from_query_params() -> bool:
         report_season_codes=report_season_codes,
         active_only=active_only,
         panel_bulk=panel,
-        nav_appointments=nav_appointments,
+        nav_appointments=_load_detail_nav_appointments(active_only),
     )
     appt_date = _load_appointment_data_date()
     if appt_date is not None:
@@ -391,6 +425,17 @@ if query_params_changed(_INTL_QP_FLAG):
     apply_bool_param("active", "intl_active_only")
     if qp_get("req") is not None:
         apply_bool_param("req", "intl_include_requirements")
+    if qp_get("activity_detail") is not None:
+        apply_bool_param("activity_detail", "intl_show_activity_detail")
+    elif qp_get("scope_counts") is not None:
+        apply_bool_param("scope_counts", "intl_show_activity_detail")
+    level_qp = qp_get_int("level")
+    if level_qp is not None:
+        st.session_state["intl_level_pick"] = level_qp
+    if qp_get("view") == "appointment":
+        st.session_state["intl_view_mode"] = INTL_VIEW_DETAIL
+    elif qp_get("view") is None:
+        st.session_state["intl_view_mode"] = INTL_VIEW_SUMMARY
     mark_query_params_applied(_INTL_QP_FLAG)
 
 if "intl_listing_season" not in st.session_state:
@@ -408,6 +453,37 @@ if "intl_include_requirements" not in st.session_state:
         st.session_state["intl_include_requirements"] = qp_get("req") == "1"
     else:
         st.session_state["intl_include_requirements"] = False
+if "intl_show_activity_detail" not in st.session_state:
+    if qp_get("activity_detail") is not None:
+        st.session_state["intl_show_activity_detail"] = qp_get("activity_detail") == "1"
+    elif qp_get("scope_counts") is not None:
+        st.session_state["intl_show_activity_detail"] = qp_get("scope_counts") == "1"
+    else:
+        st.session_state["intl_show_activity_detail"] = False
+
+view_mode = st.sidebar.radio(
+    "View",
+    options=list(INTL_VIEW_OPTIONS),
+    key="intl_view_mode",
+    horizontal=True,
+)
+
+_detail_nav_params = parse_appointment_detail_params()
+_detail_listing_season = int(st.session_state["intl_listing_season"])
+_detail_report_seasons = int(st.session_state["intl_report_season_window"])
+_detail_active_only = bool(st.session_state["intl_active_only"])
+
+if view_mode == INTL_VIEW_SUMMARY and _on_detail_page:
+    switch_to_summary_view()
+    st.rerun()
+
+if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
+    if open_last_appointment_detail(
+        listing_season_code=_detail_listing_season,
+        report_season_window=_detail_report_seasons,
+        active_only=_detail_active_only,
+    ):
+        st.rerun()
 
 active_only = st.sidebar.checkbox(
     "Active appointments only",
@@ -424,6 +500,18 @@ include_requirements = st.sidebar.checkbox(
         "Appointment detail pages always show full requirement breakdowns."
         if not _on_detail_page
         else "Maintain and promote checks are always shown on appointment detail pages."
+    ),
+)
+
+show_activity_detail = st.sidebar.checkbox(
+    "Show activity detail",
+    key="intl_show_activity_detail",
+    disabled=_on_detail_page,
+    help=(
+        "Adds international vs national competition and segment counts to the summary "
+        "table and top metrics. Appointment detail pages always show activity breakdown."
+        if not _on_detail_page
+        else "Activity counts are always shown on appointment detail pages."
     ),
 )
 
@@ -460,7 +548,20 @@ sync_query_params(
     seasons=str(int(report_season_window)),
     req="1" if include_requirements else "0",
     active="1" if active_only else "0",
+    activity_detail="1" if show_activity_detail else "0",
 )
+
+if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
+    st.title("International Officials Activity")
+    st.caption("Choose an appointment to open its detail report.")
+    render_detail_appointment_nav(
+        nav_appointments=_load_detail_nav_appointments(_detail_active_only),
+        listing_season_code=_detail_listing_season,
+        report_season_window=_detail_report_seasons,
+        active_only=_detail_active_only,
+        picker_only=True,
+    )
+    st.stop()
 
 if _render_appointment_detail_from_query_params():
     st.stop()
@@ -484,7 +585,7 @@ appt_labels = {_ALL_LABEL: _ALL_LABEL}
 for row in appt_df.itertuples(index=False):
     appt_labels[int(row.appointment_type_id)] = row.appointment_type
 
-col_f1, col_f2, col_f3 = st.columns(3)
+col_f1, col_f2, col_f3, col_f4 = st.columns(4)
 with col_f1:
     pick_appt = st.selectbox(
         "Appointment type",
@@ -496,7 +597,30 @@ with col_f1:
 appt_id = _sentinel(pick_appt)
 idvo_only = appt_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
 
-disc_df = _load_discipline_options(appt_id, active_only)
+level_df = _load_level_options(appt_id, None, active_only)
+level_options = [_ALL_LABEL]
+level_labels = {_ALL_LABEL: _ALL_LABEL}
+if not level_df.empty:
+    level_options.extend(level_df["appointment_level_id"].astype(int).tolist())
+    for row in level_df.itertuples(index=False):
+        level_labels[int(row.appointment_level_id)] = row.appointment_level
+
+saved_level = st.session_state.get("intl_level_pick", _ALL_LABEL)
+if saved_level not in level_options:
+    st.session_state["intl_level_pick"] = _ALL_LABEL
+
+with col_f2:
+    pick_level = st.selectbox(
+        "Level",
+        options=level_options,
+        format_func=lambda x: level_labels.get(x, str(x)),
+        key="intl_level_pick",
+        help="Directory appointment level (International or ISU Championship).",
+    )
+
+level_id = _sentinel(pick_level)
+
+disc_df = _load_discipline_options(appt_id, level_id, active_only)
 disc_options = [_ALL_LABEL]
 disc_labels = {_ALL_LABEL: _ALL_LABEL}
 if not idvo_only and not disc_df.empty:
@@ -506,7 +630,11 @@ if not idvo_only and not disc_df.empty:
             row.discipline or f"Discipline {row.discipline_id}"
         )
 
-with col_f2:
+saved_disc = st.session_state.get("intl_disc_pick", _ALL_LABEL)
+if saved_disc not in disc_options:
+    st.session_state["intl_disc_pick"] = _ALL_LABEL
+
+with col_f3:
     if idvo_only:
         st.selectbox(
             "Discipline",
@@ -524,14 +652,14 @@ with col_f2:
             "Discipline",
             options=disc_options,
             format_func=lambda x: disc_labels.get(x, str(x)),
-            index=0,
+            key="intl_disc_pick",
             help="Only disciplines with at least one international appointment.",
         )
 
 disc_id = _sentinel(pick_disc)
 
-officials_df = _load_official_options(appt_id, disc_id, active_only)
-with col_f3:
+officials_df = _load_official_options(appt_id, disc_id, level_id, active_only)
+with col_f4:
     if officials_df.empty:
         pick_official = _ALL_LABEL
         st.selectbox("Official", options=[_ALL_LABEL], index=0, disabled=True)
@@ -551,10 +679,13 @@ with col_f3:
 
 official_id = _sentinel(pick_official)
 
+sync_query_params(level=str(level_id) if level_id is not None else None)
+
 with st.spinner("Loading activity..."):
     summary, report_season_codes = _load_summary(
         appt_id,
         disc_id,
+        level_id,
         official_id,
         active_only,
         include_requirements,
@@ -570,12 +701,25 @@ total_officials = summary["official_id"].nunique()
 total_appointments = len(summary)
 total_competitions = int(summary["competition_count"].sum())
 total_segments = int(summary["segment_count"].sum())
+total_intl_competitions = int(summary["competition_count_international"].sum())
+total_nat_competitions = int(summary["competition_count_national"].sum())
+total_intl_segments = int(summary["segment_count_international"].sum())
+total_nat_segments = int(summary["segment_count_national"].sum())
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Officials", total_officials)
-m2.metric("Appointment rows", total_appointments)
-m3.metric("Competitions (panel)", total_competitions)
-m4.metric("Segments (panel)", total_segments)
+if show_activity_detail:
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Officials", total_officials)
+    m2.metric("Appointment rows", total_appointments)
+    m3.metric("Intl competitions", total_intl_competitions)
+    m4.metric("National competitions", total_nat_competitions)
+    m5.metric("Intl segments", total_intl_segments)
+    m6.metric("National segments", total_nat_segments)
+else:
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Officials", total_officials)
+    m2.metric("Appointment rows", total_appointments)
+    m3.metric("Competitions (panel)", total_competitions)
+    m4.metric("Segments (panel)", total_segments)
 
 st.subheader("Summary by appointment")
 dl_col, _ = st.columns([2, 5])
@@ -583,6 +727,7 @@ with dl_col:
     bulk_zip_key = (
         appt_id,
         disc_id,
+        level_id,
         official_id,
         active_only,
         int(listing_season_code),
@@ -658,6 +803,10 @@ summary_display = summary.rename(
         "discipline": "Discipline",
         "competition_count": "Competitions",
         "segment_count": "Segments",
+        "competition_count_international": "Intl competitions",
+        "competition_count_national": "National competitions",
+        "segment_count_international": "Intl segments",
+        "segment_count_national": "National segments",
         "age_as_of_listing": _age_col_label,
         "years_in_grade": _yrs_in_grade_col_label,
         "promote_first_eligible_listing": _promote_first_col_label,
@@ -697,6 +846,17 @@ summary_display = summary_display.drop(
     columns=["official_id", "appointment_type_id", "discipline_id"], errors="ignore"
 )
 
+_activity_count_cols = (
+    [
+        "Intl competitions",
+        "National competitions",
+        "Intl segments",
+        "National segments",
+    ]
+    if show_activity_detail
+    else []
+)
+
 show_cols = [
     c
     for c in [
@@ -705,8 +865,7 @@ show_cols = [
         "Appointment",
         "Level",
         "Discipline",
-        "Competitions",
-        "Segments",
+        *_activity_count_cols,
         _age_col_label,
         _yrs_in_grade_col_label,
         _promote_first_col_label,
@@ -754,6 +913,36 @@ st.dataframe(
                 f"for seasons {', '.join(format_usfs_season_code(c) for c in report_season_codes)}."
             ),
         ),
+        "Intl competitions": st.column_config.NumberColumn(
+            "Intl competitions",
+            help=(
+                "Distinct ISU / international competitions (types 15–17) with at least one "
+                f"matching Junior/Senior segment in seasons "
+                f"{', '.join(format_usfs_season_code(c) for c in report_season_codes)}."
+            ),
+        ),
+        "National competitions": st.column_config.NumberColumn(
+            "National competitions",
+            help=(
+                "Distinct US national qualifying competitions with at least one matching "
+                f"Junior/Senior segment in seasons "
+                f"{', '.join(format_usfs_season_code(c) for c in report_season_codes)}."
+            ),
+        ),
+        "Intl segments": st.column_config.NumberColumn(
+            "Intl segments",
+            help=(
+                "Junior/Senior segments at international competitions in the selected role "
+                f"and discipline ({', '.join(format_usfs_season_code(c) for c in report_season_codes)})."
+            ),
+        ),
+        "National segments": st.column_config.NumberColumn(
+            "National segments",
+            help=(
+                "Junior/Senior segments at national qualifying competitions in the selected role "
+                f"and discipline ({', '.join(format_usfs_season_code(c) for c in report_season_codes)})."
+            ),
+        ),
         _promote_first_col_label: st.column_config.TextColumn(
             _promote_first_col_label,
             help=(
@@ -799,6 +988,7 @@ if show_segment_detail:
         detail = _load_segment_detail(
             appt_id,
             disc_id,
+            level_id,
             official_id,
             active_only,
             int(listing_season_code),

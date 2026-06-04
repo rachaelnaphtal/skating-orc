@@ -282,6 +282,76 @@ def parse_appointment_detail_params() -> dict[str, Any] | None:
     }
 
 
+INTL_VIEW_SUMMARY = "Summary report"
+INTL_VIEW_DETAIL = "Appointment details"
+INTL_VIEW_OPTIONS = (INTL_VIEW_SUMMARY, INTL_VIEW_DETAIL)
+
+
+def remember_last_appointment_detail(
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: Any,
+) -> None:
+    st.session_state["intl_last_detail"] = {
+        "official_id": int(official_id),
+        "appointment_type_id": int(appointment_type_id),
+        "discipline_id": discipline_id,
+    }
+
+
+def open_appointment_detail(
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    discipline_id: Any,
+    listing_season_code: int,
+    report_season_window: int,
+    active_only: bool,
+) -> None:
+    remember_last_appointment_detail(
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+    )
+    sync_query_params(
+        **appointment_detail_query_params(
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            discipline_id=discipline_id,
+            listing_season_code=listing_season_code,
+            report_season_window=report_season_window,
+            active_only=active_only,
+        ),
+        req="1",
+    )
+
+
+def open_last_appointment_detail(
+    *,
+    listing_season_code: int,
+    report_season_window: int,
+    active_only: bool,
+) -> bool:
+    saved = st.session_state.get("intl_last_detail")
+    if not saved:
+        return False
+    open_appointment_detail(
+        official_id=int(saved["official_id"]),
+        appointment_type_id=int(saved["appointment_type_id"]),
+        discipline_id=saved["discipline_id"],
+        listing_season_code=listing_season_code,
+        report_season_window=report_season_window,
+        active_only=active_only,
+    )
+    return True
+
+
+def switch_to_summary_view() -> None:
+    """Leave appointment detail URL; view radio state is updated on the next rerun."""
+    clear_appointment_detail_params()
+
+
 def clear_appointment_detail_params() -> None:
     for key in ("view", "oid", "atid", "did", "listing", "seasons", "active", "req"):
         if key in st.query_params:
@@ -318,15 +388,13 @@ def _navigate_to_appointment_detail(
     report_season_window: int,
     active_only: bool,
 ) -> None:
-    sync_query_params(
-        **appointment_detail_query_params(
-            official_id=official_id,
-            appointment_type_id=appointment_type_id,
-            discipline_id=discipline_id,
-            listing_season_code=listing_season_code,
-            report_season_window=report_season_window,
-            active_only=active_only,
-        )
+    open_appointment_detail(
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        listing_season_code=listing_season_code,
+        report_season_window=report_season_window,
+        active_only=active_only,
     )
     st.rerun()
 
@@ -334,16 +402,19 @@ def _navigate_to_appointment_detail(
 def render_detail_appointment_nav(
     *,
     nav_appointments: pd.DataFrame,
-    current_official_id: int,
-    current_appointment_type_id: int,
-    current_discipline_id: Any,
     listing_season_code: int,
     report_season_window: int,
     active_only: bool,
+    current_official_id: int | None = None,
+    current_appointment_type_id: int | None = None,
+    current_discipline_id: Any | None = None,
+    picker_only: bool = False,
 ) -> None:
-    """Selectbox + prev/next to jump between appointment detail reports."""
+    """Selectbox + prev/next to jump between appointment detail reports (main page)."""
     if nav_appointments.empty:
         return
+
+    st.markdown("**Browse appointments**")
 
     sorted_nav = nav_appointments.sort_values(
         by=["official_name", "appointment_type", "discipline"],
@@ -362,19 +433,35 @@ def render_detail_appointment_nav(
         options.append(key)
         labels[key] = _appointment_nav_label(row)
 
-    if len(options) <= 1:
+    if not options:
         return
 
-    current_key = _appointment_nav_key(
-        current_official_id,
-        current_appointment_type_id,
-        current_discipline_id,
-    )
-    if current_key not in options:
-        options.insert(0, current_key)
-        labels[current_key] = "Current appointment"
+    if picker_only or current_official_id is None:
+        current_key = options[0]
+        current_index = 0
+    else:
+        current_key = _appointment_nav_key(
+            current_official_id,
+            current_appointment_type_id,
+            current_discipline_id,
+        )
+        if current_key not in options:
+            options.insert(0, current_key)
+            labels[current_key] = "Current appointment"
+        current_index = options.index(current_key)
 
-    current_index = options.index(current_key)
+    if picker_only and len(options) == 1:
+        only = options[0]
+        if qp_get("view") != "appointment":
+            _navigate_to_appointment_detail(
+                official_id=only[0],
+                appointment_type_id=only[1],
+                discipline_id=only[2],
+                listing_season_code=listing_season_code,
+                report_season_window=report_season_window,
+                active_only=active_only,
+            )
+        return
     prev_col, select_col, next_col = st.columns([1, 6, 1])
     with prev_col:
         if st.button("◀", help="Previous appointment", disabled=current_index <= 0):
@@ -404,13 +491,23 @@ def render_detail_appointment_nav(
             )
     with select_col:
         selected = st.selectbox(
-            "Jump to appointment",
+            "Choose appointment" if picker_only else "Jump to appointment",
             options=options,
             index=current_index,
             format_func=lambda k: labels[k],
             key="intl_officials_detail_nav",
         )
-    if selected != current_key:
+    if picker_only and qp_get("view") != "appointment":
+        if selected != current_key:
+            _navigate_to_appointment_detail(
+                official_id=selected[0],
+                appointment_type_id=selected[1],
+                discipline_id=selected[2],
+                listing_season_code=listing_season_code,
+                report_season_window=report_season_window,
+                active_only=active_only,
+            )
+    elif selected != current_key:
         _navigate_to_appointment_detail(
             official_id=selected[0],
             appointment_type_id=selected[1],
@@ -608,10 +705,21 @@ def render_appointment_detail_report(
     show_promote = ctx.show_promote
     listing_tier = ctx.listing_tier
 
-    nav_col, back_col, pdf_col = st.columns([5, 1, 2])
+    if nav_appointments is not None:
+        render_detail_appointment_nav(
+            nav_appointments=nav_appointments,
+            current_official_id=official_id,
+            current_appointment_type_id=appointment_type_id,
+            current_discipline_id=discipline_id,
+            listing_season_code=listing_season_code,
+            report_season_window=report_season_window,
+            active_only=active_only,
+        )
+
+    back_col, pdf_col = st.columns([1, 2])
     with back_col:
-        if st.button("← Back", type="secondary", help="Back to summary"):
-            clear_appointment_detail_params()
+        if st.button("← Back", type="secondary", help="Back to summary table"):
+            switch_to_summary_view()
             st.rerun()
     with pdf_col:
         pdf_cache_key = (
@@ -654,17 +762,6 @@ def render_appointment_detail_report(
         except RuntimeError as exc:
             st.caption(str(exc))
 
-    if nav_appointments is not None:
-        render_detail_appointment_nav(
-            nav_appointments=nav_appointments,
-            current_official_id=official_id,
-            current_appointment_type_id=appointment_type_id,
-            current_discipline_id=discipline_id,
-            listing_season_code=listing_season_code,
-            report_season_window=report_season_window,
-            active_only=active_only,
-        )
-
     st.title(official_name)
     st.caption(
         f"{appointment_type} · {discipline} · {appointment_level or 'Level unknown'}"
@@ -672,11 +769,13 @@ def render_appointment_detail_report(
     )
 
     as_of = format_listing_reference_july1(listing_season_code)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Competitions", ctx.competition_count)
-    c2.metric("Segments", ctx.segment_count)
-    c3.metric("Maintain", _requirement_metric_label(maintain_primary))
-    c4.metric(
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Intl competitions", ctx.competition_count_international)
+    c2.metric("National competitions", ctx.competition_count_national)
+    c3.metric("Intl segments", ctx.segment_count_international)
+    c4.metric("National segments", ctx.segment_count_national)
+    c5.metric("Maintain", _requirement_metric_label(maintain_primary))
+    c6.metric(
         "Promote",
         _requirement_metric_label(promote_primary) if show_promote else "—",
     )

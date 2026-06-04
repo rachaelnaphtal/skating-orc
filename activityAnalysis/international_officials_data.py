@@ -115,7 +115,13 @@ _SUMMARY_COLUMNS = [
     "discipline",
     "competition_count",
     "segment_count",
+    "competition_count_international",
+    "competition_count_national",
+    "segment_count_international",
+    "segment_count_national",
 ]
+
+_COUNTABLE_COMPETITION_SCOPES = frozenset({"International", "National"})
 
 
 def national_segment_appointment_type_id(international_appointment_type_id: int) -> int | None:
@@ -219,9 +225,73 @@ def _collapse_data_operator_appointments(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _international_appointment_filter_clauses(
+    *,
+    appointment_type_id: int | None = None,
+    discipline_id: int | None = None,
+    official_id: int | None = None,
+    level_id: int | None = None,
+    active_appointments_only: bool = True,
+) -> list[Any]:
+    where_parts: list[Any] = [
+        Appointments.appointment_type_id.in_(list(INTERNATIONAL_APPOINTMENT_TYPE_IDS))
+    ]
+    if active_appointments_only:
+        where_parts.append(Appointments.active.is_(True))
+    if appointment_type_id is not None:
+        where_parts.append(Appointments.appointment_type_id == int(appointment_type_id))
+    if discipline_id is not None:
+        if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+            pass
+        else:
+            where_parts.append(Appointments.discipline_id == int(discipline_id))
+            where_parts.append(
+                Appointments.appointment_type_id
+                != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+            )
+    if official_id is not None:
+        where_parts.append(Appointments.official_id == int(official_id))
+    if level_id is not None:
+        where_parts.append(Appointments.level_id == int(level_id))
+    return where_parts
+
+
+def get_international_level_options(
+    *,
+    appointment_type_id: int | None = None,
+    discipline_id: int | None = None,
+    active_appointments_only: bool = True,
+) -> pd.DataFrame:
+    """Directory levels (International / ISU Championship) present on filtered appointments."""
+    where_parts = _international_appointment_filter_clauses(
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        active_appointments_only=active_appointments_only,
+    )
+    where_parts.append(Appointments.level_id.isnot(None))
+
+    with Session(engine) as session:
+        stmt = (
+            select(Appointments.level_id, Levels.name)
+            .join(Levels, Appointments.level_id == Levels.id)
+            .where(*where_parts)
+            .distinct()
+            .order_by(Levels.name.asc())
+        )
+        rows = session.execute(stmt).all()
+
+    if not rows:
+        return pd.DataFrame(columns=["appointment_level_id", "appointment_level"])
+
+    df = pd.DataFrame(rows, columns=["appointment_level_id", "appointment_level"])
+    df["appointment_level"] = df["appointment_level"].map(_normalize_appointment_level)
+    return df.drop_duplicates(subset=["appointment_level_id"]).reset_index(drop=True)
+
+
 def get_international_discipline_options(
     *,
     appointment_type_id: int | None = None,
+    level_id: int | None = None,
     active_appointments_only: bool = True,
 ) -> pd.DataFrame:
     """
@@ -231,15 +301,17 @@ def get_international_discipline_options(
     if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
         return pd.DataFrame(columns=["discipline_id", "discipline"])
 
-    where_parts = [
-        Appointments.appointment_type_id.in_(list(INTERNATIONAL_APPOINTMENT_TYPE_IDS)),
-        Appointments.appointment_type_id != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
-        Appointments.discipline_id.isnot(None),
-    ]
-    if active_appointments_only:
-        where_parts.append(Appointments.active.is_(True))
-    if appointment_type_id is not None:
-        where_parts.append(Appointments.appointment_type_id == int(appointment_type_id))
+    where_parts = _international_appointment_filter_clauses(
+        appointment_type_id=appointment_type_id,
+        level_id=level_id,
+        active_appointments_only=active_appointments_only,
+    )
+    where_parts.extend(
+        [
+            Appointments.appointment_type_id != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
+            Appointments.discipline_id.isnot(None),
+        ]
+    )
 
     with Session(engine) as session:
         stmt = (
@@ -258,28 +330,20 @@ def get_international_officials_for_filters(
     appointment_type_id: int | None = None,
     discipline_id: int | None = None,
     official_id: int | None = None,
+    level_id: int | None = None,
     active_appointments_only: bool = True,
 ) -> pd.DataFrame:
     """
     Officials with at least one international directory appointment matching filters.
     One row per (official, appointment type, discipline) appointment.
     """
-    where_parts = [Appointments.appointment_type_id.in_(list(INTERNATIONAL_APPOINTMENT_TYPE_IDS))]
-    if active_appointments_only:
-        where_parts.append(Appointments.active.is_(True))
-    if appointment_type_id is not None:
-        where_parts.append(Appointments.appointment_type_id == int(appointment_type_id))
-    if discipline_id is not None:
-        if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
-            pass  # IDVO is combined; discipline filter does not apply
-        else:
-            where_parts.append(Appointments.discipline_id == int(discipline_id))
-            where_parts.append(
-                Appointments.appointment_type_id
-                != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
-            )
-    if official_id is not None:
-        where_parts.append(Appointments.official_id == int(official_id))
+    where_parts = _international_appointment_filter_clauses(
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        official_id=official_id,
+        level_id=level_id,
+        active_appointments_only=active_appointments_only,
+    )
 
     with Session(engine) as session:
         stmt = (
@@ -806,32 +870,62 @@ def get_international_official_activity_detail(
     return _finalize_activity_detail(pd.concat(frames, ignore_index=True))
 
 
+def _scope_activity_counts(grp: pd.DataFrame) -> dict[str, int]:
+    """Distinct competitions and segments for International vs national qualifying panel work."""
+    if grp.empty or "competition_scope" not in grp.columns:
+        return {
+            "competition_count": 0,
+            "segment_count": 0,
+            "competition_count_international": 0,
+            "competition_count_national": 0,
+            "segment_count_international": 0,
+            "segment_count_national": 0,
+        }
+    countable = grp.loc[grp["competition_scope"].isin(_COUNTABLE_COMPETITION_SCOPES)]
+    intl = grp.loc[grp["competition_scope"] == "International"]
+    national = grp.loc[grp["competition_scope"] == "National"]
+    return {
+        "competition_count": int(countable["competition_id"].nunique()),
+        "segment_count": int(countable["segment_id"].nunique()),
+        "competition_count_international": int(intl["competition_id"].nunique()),
+        "competition_count_national": int(national["competition_id"].nunique()),
+        "segment_count_international": int(intl["segment_id"].nunique()),
+        "segment_count_national": int(national["segment_id"].nunique()),
+    }
+
+
 def summarize_international_activity(detail: pd.DataFrame) -> pd.DataFrame:
     """Aggregate detail rows to competition/segment counts per official × appointment × discipline."""
     if detail.empty:
         return _empty_summary()
 
-    summary = (
-        detail.groupby(
-            [
-                "official_id",
-                "official_name",
-                "mbr_number",
-                "appointment_type_id",
-                "appointment_type",
-                "discipline_id",
-                "discipline",
-            ],
-            dropna=False,
-        )
-        .agg(
-            competition_count=("competition_id", "nunique"),
-            segment_count=("segment_id", "nunique"),
-        )
-        .reset_index()
-    )
-    summary["competition_count"] = summary["competition_count"].astype(int)
-    summary["segment_count"] = summary["segment_count"].astype(int)
+    group_keys = [
+        "official_id",
+        "official_name",
+        "mbr_number",
+        "appointment_type_id",
+        "appointment_type",
+        "discipline_id",
+        "discipline",
+    ]
+    rows: list[dict[str, Any]] = []
+    for key_vals, grp in detail.groupby(group_keys, dropna=False):
+        if not isinstance(key_vals, tuple):
+            key_vals = (key_vals,)
+        row = dict(zip(group_keys, key_vals))
+        row.update(_scope_activity_counts(grp))
+        rows.append(row)
+
+    summary = pd.DataFrame(rows)
+    for col in (
+        "competition_count",
+        "segment_count",
+        "competition_count_international",
+        "competition_count_national",
+        "segment_count_international",
+        "segment_count_national",
+    ):
+        summary[col] = summary[col].astype(int)
     return summary.sort_values(
         by=["official_name", "appointment_type", "discipline"],
         na_position="last",
@@ -871,23 +965,25 @@ def get_international_official_activity_summary(
     summary = summarize_international_activity(detail)
 
     appt_keys = appointments
+    count_cols = [
+        "competition_count",
+        "segment_count",
+        "competition_count_international",
+        "competition_count_national",
+        "segment_count_international",
+        "segment_count_national",
+    ]
     if summary.empty:
         out = appt_keys.copy()
-        out["competition_count"] = 0
-        out["segment_count"] = 0
+        for col in count_cols:
+            out[col] = 0
         return out[_SUMMARY_COLUMNS]
 
     merge_keys = ["official_id", "appointment_type_id", "discipline_id"]
-    counts = _normalize_merge_key_dtypes(
-        summary[merge_keys + ["competition_count", "segment_count"]]
-    )
+    counts = _normalize_merge_key_dtypes(summary[merge_keys + count_cols])
     out = _normalize_merge_key_dtypes(appt_keys).merge(counts, on=merge_keys, how="left")
-    out["competition_count"] = (
-        pd.to_numeric(out["competition_count"], errors="coerce").fillna(0).astype(int)
-    )
-    out["segment_count"] = (
-        pd.to_numeric(out["segment_count"], errors="coerce").fillna(0).astype(int)
-    )
+    for col in count_cols:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
     return out.sort_values(
         by=["official_name", "appointment_type", "discipline"],
         na_position="last",

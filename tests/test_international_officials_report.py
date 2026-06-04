@@ -17,6 +17,10 @@ from activityAnalysis.international_officials_report import (
     bulk_reports_zip_filename,
     sanitize_pdf_filename,
 )
+from activityAnalysis.international_requirements import (
+    RequirementEvaluation,
+    RuleCheckResult,
+)
 
 
 def _minimal_context(**overrides) -> AppointmentDetailContext:
@@ -32,6 +36,10 @@ def _minimal_context(**overrides) -> AppointmentDetailContext:
         report_season_codes=[2425, 2324],
         competition_count=2,
         segment_count=4,
+        competition_count_international=1,
+        competition_count_national=1,
+        segment_count_international=3,
+        segment_count_national=1,
         maintain_primary=None,
         promote_primary=None,
         listing_tier="international",
@@ -132,6 +140,66 @@ def test_build_appointment_detail_pdf_long_competition_name_and_panel_sections()
                     "segment_discipline": "Synchronized",
                 }
             ]
+        ),
+    )
+    pdf = build_appointment_detail_pdf(ctx)
+    assert pdf[:4] == b"%PDF"
+    assert len(pdf) > 400
+
+
+def test_build_appointment_detail_pdf_competition_alternatives_branches():
+    """Multiple competition-alternative lines must not exhaust horizontal space (fpdf2 x cursor)."""
+    branch_a = (
+        "Judge (>=3 International incl. >=1 ISU Championship among those; "
+        "2/3 competitions, 1/1 ISU Championship among those)"
+    )
+    branch_b = (
+        "Referee (>=3 International incl. >=1 ISU Championship among those; "
+        "1/3 competitions, 0/1 ISU Championship among those)"
+    )
+    detail = f"Need one of: {branch_a}; {branch_b}"
+    promote = RequirementEvaluation(
+        rule_set_id=1,
+        isu_rule_ref="413.3.c",
+        purpose="promote",
+        label="ISU Judge — promote (Singles/Pairs)",
+        listing_tier="international",
+        season_window=4,
+        season_codes=[2223, 2324, 2425, 2526],
+        meets=False,
+        summary_note="Need one of: " + branch_a[:40] + "...",
+        rule_results=[
+            RuleCheckResult(
+                metric="competition_alternatives",
+                display_label=">=3 International incl. >=1 ISU Championship",
+                required=1,
+                actual=0,
+                met=False,
+                detail=detail,
+            ),
+            RuleCheckResult(
+                metric="years_in_grade",
+                display_label=">=4 years in grade in this appointment (listing July 1)",
+                required=4,
+                actual=2,
+                met=False,
+                detail="2/4 years (listing Jul 1, 2026)",
+            ),
+        ],
+    )
+    ctx = _minimal_context(
+        promote_primary=promote,
+        maintain_primary=RequirementEvaluation(
+            rule_set_id=2,
+            isu_rule_ref="411.1",
+            purpose="maintain",
+            label="Maintain",
+            listing_tier="international",
+            season_window=2,
+            season_codes=[2425, 2526],
+            meets=True,
+            summary_note="Meets requirements",
+            rule_results=[],
         ),
     )
     pdf = build_appointment_detail_pdf(ctx)

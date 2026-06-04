@@ -42,6 +42,7 @@ def test_summarize_international_activity_counts():
                 "discipline": "Singles",
                 "competition_id": 10,
                 "segment_id": 100,
+                "competition_scope": "International",
             },
             {
                 "official_id": 1,
@@ -53,6 +54,7 @@ def test_summarize_international_activity_counts():
                 "discipline": "Singles",
                 "competition_id": 10,
                 "segment_id": 101,
+                "competition_scope": "International",
             },
             {
                 "official_id": 1,
@@ -64,13 +66,19 @@ def test_summarize_international_activity_counts():
                 "discipline": "Singles",
                 "competition_id": 11,
                 "segment_id": 102,
+                "competition_scope": "National",
             },
         ]
     )
     summary = iod.summarize_international_activity(detail)
     assert len(summary) == 1
-    assert summary.iloc[0]["competition_count"] == 2
-    assert summary.iloc[0]["segment_count"] == 3
+    row = summary.iloc[0]
+    assert row["competition_count"] == 2
+    assert row["segment_count"] == 3
+    assert row["competition_count_international"] == 1
+    assert row["competition_count_national"] == 1
+    assert row["segment_count_international"] == 2
+    assert row["segment_count_national"] == 1
 
 
 def test_detail_empty_without_postgresql():

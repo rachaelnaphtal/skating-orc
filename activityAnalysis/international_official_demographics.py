@@ -58,6 +58,26 @@ def grade_date_for_time_in_grade(
     return achieved_date or appointed_date
 
 
+def grade_date_for_tc_prerequisite_tenure(
+    achieved_date: date | None,
+    appointed_date: date | None,
+    *,
+    level_id: int | None,
+    international_level_id: int,
+    isu_level_id: int,
+) -> date | None:
+    """
+    Start date for TC promote Judge/Referee prerequisite years.
+
+    International appointments: achieved (in-grade) date, else appointed.
+    ISU appointments: appointed date marks first international service; achieved
+    marks ISU promotion only — count full international+ISU tenure from appointed.
+    """
+    if level_id is not None and int(level_id) == int(isu_level_id):
+        return appointed_date or achieved_date
+    return grade_date_for_time_in_grade(achieved_date, appointed_date)
+
+
 def first_year_credit_july1(grade_date: date) -> date:
     """
     First July 1 on which a full year in grade is credited.
@@ -117,7 +137,7 @@ def related_discipline_ids_for_tc_prerequisite(directory_discipline_id: Any) -> 
     disc = _nullable_int_for_sql(directory_discipline_id)
     if disc is None:
         return []
-    if disc == DISCIPLINE_ID_PAIRS:
+    if disc in (DISCIPLINE_ID_SINGLES, DISCIPLINE_ID_PAIRS):
         return [DISCIPLINE_ID_SINGLES, DISCIPLINE_ID_PAIRS, DISCIPLINE_ID_SINGLES_PAIRS]
     if disc == DISCIPLINE_ID_SINGLES_PAIRS:
         return [DISCIPLINE_ID_SINGLES, DISCIPLINE_ID_SINGLES_PAIRS]
@@ -231,6 +251,48 @@ def max_years_for_appointment_criteria(
         gd = grade_date_for_time_in_grade(
             row.get("achieved_date"),
             row.get("appointed_date"),
+        )
+        if gd is not None:
+            grade_dates.append(gd)
+    if not grade_dates:
+        return 0
+    earliest = min(grade_dates)
+    return years_in_grade_at_listing(earliest, listing_season_code=listing_season_code) or 0
+
+
+def max_years_for_tc_prerequisite_role(
+    rows: list[dict[str, Any]],
+    *,
+    listing_season_code: int,
+    appointment_type_id: int,
+    discipline_ids: list[int],
+    international_level_id: int,
+    isu_level_id: int,
+) -> int:
+    """
+    Judge or Referee years for TC promote prerequisite across International and ISU levels.
+
+    Uses the earliest qualifying start date among matching rows (including international
+    service before an ISU promotion on the same appointment).
+    """
+    allowed_disc = {_nullable_int_for_sql(d) for d in discipline_ids}
+    allowed_levels = {int(international_level_id), int(isu_level_id)}
+    grade_dates: list[date] = []
+    for row in rows:
+        if int(row["appointment_type_id"]) != int(appointment_type_id):
+            continue
+        row_level = _nullable_int_for_sql(row.get("level_id"))
+        if row_level is None or row_level not in allowed_levels:
+            continue
+        row_disc = _nullable_int_for_sql(row.get("discipline_id"))
+        if row_disc not in allowed_disc:
+            continue
+        gd = grade_date_for_tc_prerequisite_tenure(
+            row.get("achieved_date"),
+            row.get("appointed_date"),
+            level_id=row_level,
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
         )
         if gd is not None:
             grade_dates.append(gd)

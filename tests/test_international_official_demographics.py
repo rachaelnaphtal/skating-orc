@@ -9,7 +9,9 @@ from activityAnalysis.international_listing_seasons import (
 from activityAnalysis.international_official_demographics import (
     age_as_of_listing,
     first_year_credit_july1,
+    grade_date_for_tc_prerequisite_tenure,
     grade_date_from_appointment_contexts,
+    max_years_for_tc_prerequisite_role,
     years_in_grade_at_listing,
 )
 
@@ -43,6 +45,49 @@ def test_years_in_grade_user_examples():
 def test_first_year_credit_july1():
     assert first_year_credit_july1(date(2025, 7, 1)) == date(2026, 7, 1)
     assert first_year_credit_july1(date(2026, 6, 30)) == date(2026, 7, 1)
+
+
+def test_grade_date_for_tc_prerequisite_isu_judge_uses_appointed():
+    gd = grade_date_for_tc_prerequisite_tenure(
+        date(2022, 7, 1),
+        date(2018, 6, 1),
+        level_id=16,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert gd == date(2018, 6, 1)
+
+
+def test_max_years_for_tc_prerequisite_role_combines_intl_and_isu_judge():
+    rows = [
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 17,
+            "achieved_date": date(2018, 6, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 16,
+            "achieved_date": date(2022, 7, 1),
+            "appointed_date": date(2018, 6, 1),
+            "active": True,
+        },
+    ]
+    years = max_years_for_tc_prerequisite_role(
+        rows,
+        listing_season_code=2627,
+        appointment_type_id=12,
+        discipline_ids=[1, 8, 9],
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert years >= 4
 
 
 def test_grade_date_for_collapsed_data_operator():

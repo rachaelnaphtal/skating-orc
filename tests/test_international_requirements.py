@@ -43,6 +43,18 @@ import pandas as pd
 from activityAnalysis import international_requirements as ir
 
 
+def test_appointment_context_from_batch_collapsed_idvo():
+    contexts = {
+        (1, 16, 9): {"level_id": ir.DIRECTORY_LEVEL_ID_INTERNATIONAL, "level_name": "International"},
+        (1, 16, 2): {"level_id": ir.DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP, "level_name": "ISU"},
+    }
+    ctx = ir._appointment_context_from_batch(contexts, 1, 16, None)
+    assert ctx["level_id"] == ir.DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP
+
+    ctx_sp = ir._appointment_context_from_batch(contexts, 1, 16, 9)
+    assert ctx_sp["level_id"] == ir.DIRECTORY_LEVEL_ID_INTERNATIONAL
+
+
 def test_isu_season_codes_preceding_july1():
     assert ir.isu_season_codes_preceding_july1(2026, 3) == [2324, 2425, 2526]
     assert ir.isu_season_codes_preceding_july1(2026, 4) == [2223, 2324, 2425, 2526]
@@ -720,6 +732,7 @@ def test_years_in_grade_promote_metrics():
         years_in_grade_at_listing,
     )
 
+    assert related_discipline_ids_for_tc_prerequisite(1) == [1, 8, 9]
     assert related_discipline_ids_for_tc_prerequisite(8) == [1, 8, 9]
     assert related_discipline_ids_for_tc_prerequisite(2) == [2]
     assert (
@@ -757,6 +770,151 @@ def test_years_in_grade_promote_metrics():
         isu_level_id=16,
     )
     assert actual >= 4
+
+
+def test_tc_prerequisite_counts_isu_judge_from_appointed_date():
+    """ISU Judge: appointed = first international; achieved = ISU only — count from appointed."""
+    listing = 2627
+    isu_only = [
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 16,
+            "achieved_date": date(2022, 7, 1),
+            "appointed_date": date(2018, 6, 1),
+            "active": True,
+        },
+    ]
+    actual, detail = ir._evaluate_years_tc_prerequisite(
+        isu_only,
+        '{"related_discipline_ids": [1, 8, 9]}',
+        directory_discipline_id=8,
+        listing_season_code=listing,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert actual >= 4
+    assert "Judge" in detail
+    achieved_only, _ = ir._evaluate_years_tc_prerequisite(
+        [
+            {
+                "official_id": 1,
+                "appointment_type_id": 12,
+                "discipline_id": 9,
+                "level_id": 16,
+                "achieved_date": date(2022, 7, 1),
+                "appointed_date": None,
+                "active": True,
+            },
+        ],
+        '{"related_discipline_ids": [1, 8, 9]}',
+        directory_discipline_id=8,
+        listing_season_code=listing,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert achieved_only < actual
+
+
+def test_singles_tc_prerequisite_judge_singles_pairs_ts_singles_only():
+    """Singles TC: Judge/Referee credit Singles/Pairs; ISU TS credits Singles discipline only."""
+    listing = 2627
+    rows = [
+        {
+            "official_id": 1,
+            "appointment_type_id": 12,
+            "discipline_id": 9,
+            "level_id": 17,
+            "achieved_date": date(2020, 7, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+        {
+            "official_id": 1,
+            "appointment_type_id": 14,
+            "discipline_id": 8,
+            "level_id": 16,
+            "achieved_date": date(2020, 7, 1),
+            "appointed_date": None,
+            "active": True,
+        },
+    ]
+    actual, _ = ir._evaluate_years_tc_prerequisite(
+        rows,
+        None,
+        directory_discipline_id=1,
+        listing_season_code=listing,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert actual >= 4
+
+    ts_only_pairs, _ = ir._evaluate_years_tc_prerequisite(
+        [
+            {
+                "official_id": 1,
+                "appointment_type_id": 14,
+                "discipline_id": 8,
+                "level_id": 16,
+                "achieved_date": date(2020, 7, 1),
+                "appointed_date": None,
+                "active": True,
+            },
+        ],
+        None,
+        directory_discipline_id=1,
+        listing_season_code=listing,
+        international_level_id=17,
+        isu_level_id=16,
+    )
+    assert ts_only_pairs == 0
+
+
+def test_rule_set_applies_singles_tc_promote():
+    rule_set = pd.Series(
+        {
+            "appointment_type_id": 15,
+            "sport": "figure",
+            "discipline_id": 1,
+            "directory_level_id": pd.NA,
+            "listing_tier": "international",
+        }
+    )
+    applies, _ = ir._rule_set_applies(
+        rule_set,
+        appointment_type_id=15,
+        directory_discipline_id=1,
+        appointment_level_id=17,
+        international_level_id=17,
+        isu_level_id=16,
+        purpose="promote",
+        official_id=1,
+    )
+    assert applies
+
+
+def test_rule_set_applies_singles_ts_promote():
+    rule_set = pd.Series(
+        {
+            "appointment_type_id": 14,
+            "sport": "figure",
+            "discipline_id": 1,
+            "directory_level_id": pd.NA,
+            "listing_tier": "international",
+        }
+    )
+    applies, _ = ir._rule_set_applies(
+        rule_set,
+        appointment_type_id=14,
+        directory_discipline_id=1,
+        appointment_level_id=17,
+        international_level_id=17,
+        isu_level_id=16,
+        purpose="promote",
+        official_id=1,
+    )
+    assert applies
 
 
 def test_tc_ts_promote_isu_isu_event_counts_as_international_competition():
@@ -856,6 +1014,56 @@ def test_qualifying_competitions_combined_roles():
     )
     assert merged is not None
     assert len(merged) == 3
+
+
+def test_idvo_first_promote_year_uses_current_listing_without_year_rules(monkeypatch):
+    """International IDVO has competition-only promote rules — no year gate."""
+    from activityAnalysis.international_listing_seasons import (
+        format_promote_first_eligible_display,
+    )
+
+    listing = 2627
+    monkeypatch.setattr(
+        ir,
+        "_promote_year_rule_rows_for_appointment",
+        lambda *args, **kwargs: [],
+    )
+    first = ir.first_listing_season_eligible_for_promote_years(
+        official_id=1,
+        appointment_type_id=16,
+        directory_discipline_id=None,
+        appointment_level="International",
+        appointment_level_id=17,
+        appointment_rows=[],
+        appt_ctx={},
+        listing_season_code=listing,
+        rules_df=pd.DataFrame(),
+        international_level_id=17,
+        isu_level_id=16,
+        isu_listing_keys=set(),
+    )
+    assert first == listing
+    assert format_promote_first_eligible_display(
+        first, current_listing_season_code=listing
+    ) == "2026"
+
+    assert (
+        ir.first_listing_season_eligible_for_promote_years(
+            official_id=1,
+            appointment_type_id=12,
+            directory_discipline_id=9,
+            appointment_level="International",
+            appointment_level_id=17,
+            appointment_rows=[],
+            appt_ctx={},
+            listing_season_code=listing,
+            rules_df=pd.DataFrame(),
+            international_level_id=17,
+            isu_level_id=16,
+            isu_listing_keys=set(),
+        )
+        is None
+    )
 
 
 if __name__ == "__main__":

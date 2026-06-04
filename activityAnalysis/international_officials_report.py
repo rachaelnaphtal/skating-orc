@@ -120,6 +120,10 @@ class AppointmentDetailContext:
     report_season_codes: list[int]
     competition_count: int
     segment_count: int
+    competition_count_international: int
+    competition_count_national: int
+    segment_count_international: int
+    segment_count_national: int
     maintain_primary: RequirementEvaluation | None
     promote_primary: RequirementEvaluation | None
     listing_tier: str
@@ -350,6 +354,12 @@ def build_appointment_detail_context(
         report_season_codes=report_season_codes,
         competition_count=int(summary_row.get("competition_count") or 0),
         segment_count=int(summary_row.get("segment_count") or 0),
+        competition_count_international=int(
+            summary_row.get("competition_count_international") or 0
+        ),
+        competition_count_national=int(summary_row.get("competition_count_national") or 0),
+        segment_count_international=int(summary_row.get("segment_count_international") or 0),
+        segment_count_national=int(summary_row.get("segment_count_national") or 0),
         maintain_primary=maintain_primary,
         promote_primary=promote_primary,
         listing_tier=listing_tier,
@@ -374,16 +384,32 @@ class _ReportPDF(FPDF):
         self.cell(0, 8, _pdf_text(f"Page {self.page_no()}"), align="C")
 
 
+def _pdf_write_wrapped(
+    pdf: _ReportPDF,
+    text: str,
+    *,
+    line_h: float = 5,
+) -> None:
+    """
+    Full-width wrapped text.
+
+    fpdf2 leaves the cursor at the end of the last line after ``multi_cell``; callers
+    must reset ``x`` before each block (notably after ``cell()`` rows and in loops).
+    """
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(pdf.epw, line_h, _pdf_text(text))
+
+
 def _pdf_write_heading(pdf: _ReportPDF, text: str, *, level: int = 1) -> None:
     sizes = {1: 14, 2: 12, 3: 11}
     pdf.set_font("Helvetica", "B", sizes.get(level, 11))
-    pdf.multi_cell(0, 7, _pdf_text(text))
+    _pdf_write_wrapped(pdf, text, line_h=7)
     pdf.ln(1)
 
 
 def _pdf_write_body(pdf: _ReportPDF, text: str, *, bold: bool = False) -> None:
     pdf.set_font("Helvetica", "B" if bold else "", 10)
-    pdf.multi_cell(0, 5, _pdf_text(text))
+    _pdf_write_wrapped(pdf, text, line_h=5)
     pdf.ln(1)
 
 
@@ -620,6 +646,7 @@ def _pdf_write_status_badge(
     pdf.cell(4, 6, "", border=0)
     pdf.cell(0, 6, _pdf_text(label), border=0)
     pdf.ln(6)
+    pdf.set_x(pdf.l_margin)
 
 
 def _pdf_write_at_a_glance(pdf: _ReportPDF, ctx: AppointmentDetailContext) -> None:
@@ -653,7 +680,7 @@ def _pdf_write_at_a_glance(pdf: _ReportPDF, ctx: AppointmentDetailContext) -> No
         _pdf_write_status_badge(pdf, label, met)
         if note:
             pdf.set_font("Helvetica", "", 9)
-            pdf.multi_cell(0, 4, _pdf_text(note))
+            _pdf_write_wrapped(pdf, note, line_h=4)
             pdf.ln(1)
     pdf.ln(2)
 
@@ -669,12 +696,13 @@ def _pdf_write_rule_block(pdf: _ReportPDF, rule: RuleCheckResult) -> None:
     pdf.set_font("Helvetica", "B", 8)
     pdf.cell(0, 5, _pdf_text(rule.display_label), border=0)
     pdf.ln(5)
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "", 8)
     if rule.metric == "competition_alternatives":
         for line in format_competition_alternatives_detail(rule.detail, met=rule.met):
-            pdf.multi_cell(0, 4, _pdf_text(f"  - {line}"))
+            _pdf_write_wrapped(pdf, f"  - {line}", line_h=4)
     else:
-        pdf.multi_cell(0, 4, _pdf_text(f"  Progress: {rule.detail}"))
+        _pdf_write_wrapped(pdf, f"  Progress: {rule.detail}", line_h=4)
     pdf.ln(1)
 
 
@@ -697,11 +725,11 @@ def _pdf_write_requirement_section(
     _pdf_write_status_badge(pdf, f"{ev.label} ({ev.isu_rule_ref})", ev.meets)
     if ev.summary_note and not ev.meets:
         pdf.set_font("Helvetica", "I", 9)
-        pdf.multi_cell(0, 4, _pdf_text(ev.summary_note))
+        _pdf_write_wrapped(pdf, ev.summary_note, line_h=4)
         pdf.ln(1)
     seasons = ", ".join(format_usfs_season_code(c) for c in ev.season_codes)
     pdf.set_font("Helvetica", "", 8)
-    pdf.multi_cell(0, 4, _pdf_text(f"Season window: {seasons}"))
+    _pdf_write_wrapped(pdf, f"Season window: {seasons}", line_h=4)
     pdf.ln(2)
 
     if ev.rule_results:
@@ -714,7 +742,7 @@ def _pdf_write_requirement_section(
                 and len(ev.rule_results) > 1
             ):
                 pdf.set_font("Helvetica", "I", 8)
-                pdf.multi_cell(0, 4, _pdf_text("  Competitions for this rule:"))
+                _pdf_write_wrapped(pdf, "  Competitions for this rule:", line_h=4)
                 _pdf_write_qualifying_table(pdf, rule.qualifying_competitions)
     if ev.qualifying_activity is not None and not ev.qualifying_activity.empty:
         _pdf_write_body(pdf, "Qualifying competitions (combined):", bold=True)
@@ -782,8 +810,12 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
         _pdf_write_body(pdf, line)
     _pdf_write_body(
         pdf,
-        f"Panel activity: {ctx.competition_count} competition(s), "
-        f"{ctx.segment_count} segment(s) in report window.",
+        "Panel activity (report window): "
+        f"international {ctx.competition_count_international} competition(s), "
+        f"{ctx.segment_count_international} segment(s); "
+        f"national {ctx.competition_count_national} competition(s), "
+        f"{ctx.segment_count_national} segment(s) "
+        f"({ctx.competition_count} competition(s), {ctx.segment_count} segment(s) total).",
     )
     pdf.ln(1)
 
