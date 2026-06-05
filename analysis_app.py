@@ -3711,12 +3711,14 @@ elif page == "Rule Errors Analysis":
         display_df = rule_errors_df[[
             'judge_name', 'competition_name', 'competition_url', 'competition_year',
             'segment_name', 'discipline_name', 'skater_name', 'element_name', 'element_type',
+            'element_notes', 'max_goe_allowed',
             'judge_score', 'panel_average', 'deviation'
         ]].copy()
 
         display_df.columns = [
             'Judge', 'Competition', 'Competition URL', 'Year',
             'Segment', 'Discipline', 'Skater', 'Element Name', 'Element Type',
+            'Element Notes', 'Max GOE Allowed',
             'Judge Score', 'Panel Average', 'Deviation'
         ]
 
@@ -3928,8 +3930,8 @@ elif page == "Competition Analysis":
                 st.subheader("Detailed Rule Errors")
                 display_rule_errors = rule_errors_df[[
                     'judge_name', 'segment_name', 'discipline_name', 'skater_name',
-                    'element_name', 'element_type', 'judge_score', 
-                    'panel_average', 'deviation'
+                    'element_name', 'element_type', 'element_notes', 'max_goe_allowed',
+                    'judge_score', 'panel_average', 'deviation'
                 ]].copy()
 
                 # Add a score type column based on whether element_name is empty
@@ -3944,13 +3946,15 @@ elif page == "Competition Analysis":
                 # Reorder columns to include score_type
                 display_rule_errors = display_rule_errors[[
                     'judge_name', 'segment_name', 'discipline_name', 'skater_name',
-                    'score_type', 'element_name', 'element_type', 'judge_score', 
-                    'panel_average', 'deviation'
+                    'score_type', 'element_name', 'element_type',
+                    'element_notes', 'max_goe_allowed',
+                    'judge_score', 'panel_average', 'deviation'
                 ]]
 
                 display_rule_errors.columns = [
                     'Judge', 'Segment', 'Discipline', 'Skater', 'Score Type',
-                    'Element Name', 'Element Type', 'Judge Score', 'Panel Average', 'Deviation'
+                    'Element Name', 'Element Type', 'Element Notes', 'Max GOE Allowed',
+                    'Judge Score', 'Panel Average', 'Deviation'
                 ]
 
                 st.dataframe(display_rule_errors, width="stretch")

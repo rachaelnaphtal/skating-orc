@@ -1247,6 +1247,8 @@ class JudgeAnalytics:
             Skater.name.label('skater_name'),
             Element.name.label('element_name'),
             ElementType.name.label('element_type'),
+            Element.notes.label('element_notes'),
+            Element.max_goe_allowed.label('max_goe_allowed'),
             ElementScorePerJudge.judge_score,
             ElementScorePerJudge.panel_average,
             ElementScorePerJudge.deviation
@@ -1301,6 +1303,8 @@ class JudgeAnalytics:
                 'skater_name': result.skater_name,
                 'element_name': '',  # PCS doesn't have element name
                 'element_type': result.score_type,
+                'element_notes': None,
+                'max_goe_allowed': None,
                 'judge_score': result.judge_score,
                 'panel_average': result.panel_average,
                 'deviation': result.deviation
@@ -1319,6 +1323,8 @@ class JudgeAnalytics:
                 'skater_name': result.skater_name,
                 'element_name': result.element_name,
                 'element_type': result.element_type,
+                'element_notes': result.element_notes,
+                'max_goe_allowed': result.max_goe_allowed,
                 'judge_score': result.judge_score,
                 'panel_average': result.panel_average,
                 'deviation': result.deviation
