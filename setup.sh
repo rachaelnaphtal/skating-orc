@@ -8,6 +8,9 @@ cat > ~/.streamlit/config.toml <<STREAMLITCFG
 headless = true
 port = ${PORT:-8501}
 enableCORS = false
+# Heroku/reverse-proxy: without this, st.file_uploader often fails with Axios 400/403.
+enableXsrfProtection = false
+maxUploadSize = 200
 
 [client]
 showSidebarNavigation = false

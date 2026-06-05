@@ -1,5 +1,8 @@
 # Hide automatic multipage links in the sidebar (``pages/*.py``). Each entrypoint can still use
 # ``st.sidebar``. For ``analysis_app.py``, navigation is the sidebar selectbox + Admin.
-# On Heroku, ``setup.sh`` should keep ``showSidebarNavigation = false`` if it rewrites config.
+# On Heroku, ``setup.sh`` rewrites server settings; keep ``showSidebarNavigation`` in sync.
+[server]
+maxUploadSize = 200
+
 [client]
 showSidebarNavigation = false
