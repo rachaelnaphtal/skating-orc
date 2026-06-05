@@ -651,6 +651,8 @@ class Element(Base):
     element_type: Mapped[str] = mapped_column(String)
     element_type_id: Mapped[Optional[int]] = mapped_column(Integer)
     base_value: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric)
+    notes: Mapped[Optional[str]] = mapped_column(String)
+    max_goe_allowed: Mapped[Optional[decimal.Decimal]] = mapped_column(Numeric)
 
     element_type_: Mapped[Optional['ElementType']] = relationship('ElementType', back_populates='element')
     skater_segment: Mapped['SkaterSegment'] = relationship('SkaterSegment', back_populates='element')

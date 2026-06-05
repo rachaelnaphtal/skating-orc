@@ -37,6 +37,7 @@ from report_html import build_judge_report_html
 from officials_competition_types import (
     COMPETITION_SCOPE_ALL,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    COMPETITION_SCOPE_INTERNATIONAL,
     COMPETITION_SCOPE_NQS,
     COMPETITION_SCOPE_QUALIFYING,
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
@@ -110,6 +111,7 @@ _COMPETITION_SCOPE_LABELS = (
     "NQS only",
     "Sectionals & championships",
     "Championships only",
+    "International",
 )
 
 _COMPETITION_SCOPE_LABEL_TO_KEY = {
@@ -118,6 +120,7 @@ _COMPETITION_SCOPE_LABEL_TO_KEY = {
     "NQS only": COMPETITION_SCOPE_NQS,
     "Sectionals & championships": COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
     "Championships only": COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    "International": COMPETITION_SCOPE_INTERNATIONAL,
 }
 
 

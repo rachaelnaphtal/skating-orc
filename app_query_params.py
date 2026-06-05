@@ -284,6 +284,7 @@ COMPETITION_SCOPE_SLUG_TO_LABEL = {
     "nqs": "NQS only",
     "sectionals": "Sectionals & championships",
     "championships": "Championships only",
+    "international": "International",
 }
 COMPETITION_SCOPE_LABEL_TO_SLUG = {
     v: k for k, v in COMPETITION_SCOPE_SLUG_TO_LABEL.items()
@@ -293,6 +294,7 @@ COMPETITION_SCOPE_LABEL_TO_SLUG = {
 from officials_competition_types import (  # noqa: E402
     COMPETITION_SCOPE_ALL,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    COMPETITION_SCOPE_INTERNATIONAL,
     COMPETITION_SCOPE_NQS,
     COMPETITION_SCOPE_QUALIFYING,
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
@@ -304,6 +306,7 @@ COMPETITION_SCOPE_LABEL_TO_KEY = {
     "NQS only": COMPETITION_SCOPE_NQS,
     "Sectionals & championships": COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
     "Championships only": COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
+    "International": COMPETITION_SCOPE_INTERNATIONAL,
 }
 
 _CROSS_JUDGE_METRICS = (

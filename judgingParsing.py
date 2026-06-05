@@ -27,7 +27,11 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from gcp_interactions_helper import read_file_from_gcp
-from rule_errors_policy import should_flag_rule_errors
+from rule_errors_policy import (
+    segment_is_pairs_for_rule_errors,
+    segment_supports_element_rule_errors,
+    should_flag_rule_errors,
+)
 
 USING_ISU_COMPONENT_METHOD = False
 
@@ -790,6 +794,51 @@ def ijs_event_label_to_db_segment_name(label: str) -> str:
     return event_name.strip()
 
 
+_SEGMENT_MATCH_IGNORE_TOKENS = frozenset({"SINGLE", "SKATING"})
+# Typos seen on competition index pages (token-level, after uppercasing).
+_SEGMENT_MATCH_TYPO_TOKENS = {
+    "WOMWN": "WOMEN",
+}
+
+
+def segment_name_match_key(name: str) -> str:
+    """
+    Canonical key for matching ``public.segment.name`` to FSM index cover labels.
+
+    Collapses separator variants (``MEN_SHORT_PROGRAM`` vs ``Men___Short_Program``)
+    and drops ``Single`` / ``Skating`` noise (``Men_Single_Skating___Short_Program``).
+    """
+    n = re.sub(r"[^A-Za-z0-9]+", "_", (name or ""))
+    n = re.sub(r"_+", "_", n.upper()).strip("_")
+    tokens = [t for t in n.split("_") if t and t not in _SEGMENT_MATCH_IGNORE_TOKENS]
+    tokens = [_SEGMENT_MATCH_TYPO_TOKENS.get(t, t) for t in tokens]
+    return "_".join(tokens)
+
+
+def find_segment_match_key(
+    name: str,
+    available_keys: list[str] | set[str],
+    *,
+    allow_fuzzy: bool = True,
+    fuzzy_cutoff: float = 0.97,
+) -> str | None:
+    """
+    Resolve a segment name to an index match key (exact, typo-normalized, then fuzzy).
+    """
+    import difflib
+
+    target = segment_name_match_key(name)
+    keys = list(available_keys)
+    if target in available_keys:
+        return target
+    if not allow_fuzzy:
+        return None
+    matches = difflib.get_close_matches(
+        target, keys, n=1, cutoff=fuzzy_cutoff
+    )
+    return matches[0] if matches else None
+
+
 def process_scores_html(soup, event_regex="", use_gcp=False):
     # Initialize list for storing extracted data
     elements_per_skater = defaultdict(list)
@@ -927,21 +976,27 @@ def create_all_element_dict(
                 if element_name_no_level and element_name_no_level[-1].isdigit():
                     element_name_no_level = element_name_no_level[:-1]
 
-                all_elements.append(
-                    {
-                        "Skater": skater,
-                        "Event": event_name,
-                        "Element": element["Element"],
-                        "Element Type": categorizeElement(element_name_no_level),
-                        "Panel Average": avg,
-                        "Judge Name": judge,
-                        "Judge Number": judgeNumber,
-                        "Score": judge_score,
-                        "Deviation": deviation,
-                        "Thrown out": thrown_out,
-                        "High": high,
-                    }
-                )
+                row = {
+                    "Skater": skater,
+                    "Event": event_name,
+                    "Element": element["Element"],
+                    "Notes": element.get("Notes"),
+                    "Element Type": categorizeElement(element_name_no_level),
+                    "Panel Average": avg,
+                    "Judge Name": judge,
+                    "Judge Number": judgeNumber,
+                    "Score": judge_score,
+                    "Deviation": deviation,
+                    "Thrown out": thrown_out,
+                    "High": high,
+                }
+                if element_should_store_max_goe(
+                    element["Element"], element.get("Notes"), event_name
+                ):
+                    row["Max GOE Allowed"] = compute_element_max_goe(
+                        element["Element"], element.get("Notes"), event_name
+                    )
+                all_elements.append(row)
     return all_elements
 
 
@@ -1068,26 +1123,16 @@ def extract_judge_scores(
         except ImportError:
             pass
 
-    element_errors = []
+    element_errors = detect_element_rule_errors(
+        elements_per_skater,
+        judges,
+        event_name,
+        judge_filter=judge_filter,
+        competition_start_date=competition_start_date,
+        competition_end_date=competition_end_date,
+    )
     element_deviations = []
     pcs_errors = []
-    flag_rule_errors = should_flag_rule_errors(
-        competition_start_date, competition_end_date
-    )
-    if flag_rule_errors:
-        if (
-            "Women" in event_name
-            or "Men" in event_name
-            or "Boys" in event_name
-            or "Girls" in event_name
-        ):
-            element_errors = findSinglesElementErrors(
-                elements_per_skater, judges, event_name, judge_filter=judge_filter
-            )
-        elif "Pairs" in event_name:
-            element_errors = findPairsElementErrors(
-                elements_per_skater, judges, event_name, judge_filter=judge_filter
-            )
 
     if not only_rule_errors:
         element_deviations = findElementDeviations(
@@ -1196,6 +1241,105 @@ def get_allowed_errors(num_skaters: int):
     return 5
 
 
+def detect_element_rule_errors(
+    elements_per_skater,
+    judges,
+    event_name: str,
+    *,
+    judge_filter: str = "",
+    competition_start_date=None,
+    competition_end_date=None,
+) -> list:
+    """Run singles/pairs element rule-error detection when policy and segment name allow."""
+    if not should_flag_rule_errors(competition_start_date, competition_end_date):
+        return []
+    if not segment_supports_element_rule_errors(event_name):
+        return []
+    if segment_is_pairs_for_rule_errors(event_name):
+        return findPairsElementErrors(
+            elements_per_skater, judges, event_name, judge_filter=judge_filter
+        )
+    return findSinglesElementErrors(
+        elements_per_skater, judges, event_name, judge_filter=judge_filter
+    )
+
+
+def compute_element_max_goe(
+    element_name: str,
+    notes,
+    event_name: str = "",
+) -> int:
+    """
+    Maximum GOE a judge may award given element markings and the info column.
+
+    Short-program NAR elements (``*`` / ``COMBO``) are capped at ``-5``.
+    Result is floored at ``-5``.
+    """
+    if "Short" in event_name and ("COMBO" in element_name or "*" in element_name):
+        return -5
+
+    max_goe = 5
+    number_downs = element_name.count("<<")
+    number_unders = element_name.count("<") - (number_downs * 2)
+    number_attention = element_name.count("!")
+    if (
+        notes is not None
+        and ("F" in notes or "e" in notes)
+        or "<<" in element_name
+        or (number_unders + number_attention) >= 2
+    ):
+        max_goe = 2
+    if notes is not None and "F" in notes:
+        max_goe = max_goe - 5
+    if notes is not None and "e" in notes:
+        max_goe -= 2
+    max_goe -= 3 * number_downs
+    max_goe -= 2 * number_unders
+    if notes is not None and "q" in notes:
+        max_goe -= 2 * element_name.count("q")
+    max_goe -= 1 * number_attention
+    return max(max_goe, -5)
+
+
+def element_should_store_max_goe(
+    element_name: str,
+    notes,
+    event_name: str = "",
+) -> bool:
+    """True when markings or info constrain GOE below the default +5 ceiling."""
+    if notes:
+        return True
+    if any(ch in element_name for ch in ("<", "!", "*")):
+        return True
+    if "Short" in event_name and "COMBO" in element_name:
+        return True
+    return False
+
+
+def element_protocol_metadata_from_parsed(
+    elements_per_skater: dict,
+    event_name: str = "",
+) -> dict[tuple[str, str], dict]:
+    """
+    Per (skater, element name): ``notes`` and optional ``max_goe_allowed``.
+
+    ``max_goe_allowed`` is set when markings/info constrain GOE; omitted otherwise.
+    """
+    out: dict[tuple[str, str], dict] = {}
+    for skater, elements in elements_per_skater.items():
+        for element in elements:
+            element_name = str(element["Element"])
+            notes = element.get("Notes")
+            key = (str(skater), element_name)
+            meta: dict = {"notes": notes}
+            if element_should_store_max_goe(element_name, notes, event_name):
+                meta["max_goe_allowed"] = compute_element_max_goe(
+                    element_name, notes, event_name
+                )
+            out[key] = meta
+    return out
+
+
 def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter=""):
     errors = []
     for skater in skater_scores:
@@ -1203,6 +1347,7 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
             element_name = element["Element"]
             notes = element["Notes"]
             allScores = element["Scores"]
+            max_allowed = compute_element_max_goe(element_name, notes, event_name)
 
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
@@ -1220,53 +1365,13 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
-                # Must be -5 if  it is a short and there is a +COMBO or *
-                if (
-                    "Short" in event_name
-                    and ("COMBO" in element_name or "*" in element_name)
-                    and allScores[judgeNumber - 1] > -5
-                ):
-                    errors.append(
-                        makeRuleError(
-                            skater,
-                            element,
-                            judgeNumber,
-                            judges,
-                            allScores,
-                            "Short Program NAR"
-                        )
+                if allScores[judgeNumber - 1] > max_allowed:
+                    description = (
+                        "Short Program NAR"
+                        if "Short" in event_name
+                        and ("COMBO" in element_name or "*" in element_name)
+                        else f"Max with errors is {max_allowed}"
                     )
-                    continue
-
-                max_goe = 5
-                number_downs = element_name.count("<<")
-                number_unders = element_name.count("<") - (number_downs * 2)
-                number_attention = element_name.count("!")
-                # If contains certain errors cannot start above a 2
-                if (
-                    notes is not None
-                    and ("F" in notes or "e" in notes)
-                    or "<<" in element_name
-                    or (number_unders + number_attention) >= 2
-                ):
-                    max_goe = 2
-                # Falls must subtract 5
-                if notes is not None and "F" in notes:
-                    max_goe = max_goe - 5
-                # e must subtract 2
-                if notes is not None and "e" in notes:
-                    max_goe -= 2
-                # << must subtract 3
-                max_goe -= 3 * number_downs
-                # Subtract 2 for <
-                max_goe -= 2 * number_unders
-                # Subtract 2 for q
-                if notes is not None and "q" in notes:
-                    max_goe -= 2 * element_name.count("q")
-                # Subtract 1 for attention
-                max_goe -= 1 * number_attention
-
-                if allScores[judgeNumber - 1] > max(max_goe, -5):
                     errors.append(
                         makeRuleError(
                             skater,
@@ -1274,7 +1379,8 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
                             judgeNumber,
                             judges,
                             allScores,
-                            f"Max with errors is {max(max_goe, -5)}",
+                            description,
+                            max_goe_allowed=max_allowed,
                         )
                     )
 
@@ -1285,13 +1391,19 @@ def findPairsElementErrors(skater_scores, judges, event_name, judge_filter=""):
     return findSinglesElementErrors(skater_scores, judges, event_name, judge_filter=judge_filter)
 
 
-def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
-    element_name = f"{element['Element']} {element['Notes']}"
-    if element["Notes"] is None:
-        element_name = element["Element"]
-    return {
+def makeRuleError(
+    skater,
+    element,
+    judgeNumber,
+    judges,
+    allScores,
+    description,
+    *,
+    max_goe_allowed=None,
+):
+    row = {
         "Skater": skater,
-        "Element": element_name,
+        "Element": element["Element"],
         "Judge Number": judgeNumber,
         "Judge Name": judges[judgeNumber - 1],
         "Judge Score": allScores[judgeNumber - 1],
@@ -1299,6 +1411,9 @@ def makeRuleError(skater, element, judgeNumber, judges, allScores, description):
         "Deviation": "Rule Error",
         "Description": description,
     }
+    if max_goe_allowed is not None:
+        row["Max GOE Allowed"] = max_goe_allowed
+    return row
 
 
 def findElementDeviations(

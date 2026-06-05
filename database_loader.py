@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import re
+import unicodedata
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.sql import bindparam, text
@@ -69,6 +70,81 @@ def normalize_scraped_judge_name(name: str | None) -> str:
     return s.strip()
 
 
+def _normalize_skater_name_key(name: str) -> str:
+    if not name:
+        return ""
+    t = unicodedata.normalize("NFKC", str(name))
+    t = t.strip().lower()
+    t = re.sub(r"[-_/.,;:'\"`]+", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def _skater_names_equivalent(parsed_name: str, db_name: str) -> bool:
+    """Match protocol skater labels to ``public.skater.name`` across case/order variants."""
+    ka = _normalize_skater_name_key(parsed_name)
+    kb = _normalize_skater_name_key(db_name)
+    if not ka or not kb:
+        return ka == kb
+    if ka == kb:
+        return True
+    return sorted(ka.split()) == sorted(kb.split())
+
+
+def _resolve_skater_dict_key(
+    skater_dict: dict[str, int], parsed_name: str
+) -> str | None:
+    text = str(parsed_name)
+    if text in skater_dict:
+        return text
+    for db_name in skater_dict:
+        if _skater_names_equivalent(text, db_name):
+            return db_name
+    return None
+
+
+_ELEMENT_MARKING_TOKEN_RE = re.compile(r"^[F*<!>qnscuSCUex,b|]+$", re.IGNORECASE)
+
+
+def _element_name_candidates_from_rule_error(element_label: str) -> list[str]:
+    """
+    DB element names omit separate notes; rule-error rows may still carry
+    ``\"3Lz+2T F\"`` or ``\"2F+2T+1Lo<<+2Lo<<* *\"`` from legacy formatting.
+    """
+    text = str(element_label).strip()
+    if not text:
+        return []
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            candidates.append(name)
+
+    add(text)
+    parts = text.split()
+    if len(parts) == 1:
+        return candidates
+    base = parts[0]
+    add(base)
+    tail = parts[1:]
+    if all(_ELEMENT_MARKING_TOKEN_RE.fullmatch(t) for t in tail):
+        add(base + "".join(tail))
+    return candidates
+
+
+def _resolve_element_dict_key(
+    elem_id_by_pair: dict[tuple[int, str], int],
+    skater_segment_id: int,
+    element_label: str,
+) -> str | None:
+    for candidate in _element_name_candidates_from_rule_error(element_label):
+        if (skater_segment_id, candidate) in elem_id_by_pair:
+            return candidate
+    return None
+
+
 def _competition_flags_from_discipline_type_name(
     name: str | None,
 ) -> tuple[bool, bool, bool, bool]:
@@ -121,7 +197,13 @@ class DatabaseLoader:
 
     def commit(self) -> None:
         """Flush pending ORM work and commit (used at end of batch scrapes)."""
+        self.session.flush()
         self.session.commit()
+
+    def _maybe_flush(self) -> None:
+        """Flush unless commits are deferred (backfill batches flush at ``commit()``)."""
+        if not self.defer_commits:
+            self.session.flush()
 
     def _persist(self) -> None:
         """Commit, or only flush when ``defer_commits`` is set (batch load)."""
@@ -953,11 +1035,33 @@ class DatabaseLoader:
         type_names = df["Element Type"].astype(str).unique().tolist()
         element_types_map = self._ensure_element_types_by_name(type_names)
 
-        element_specs: dict[tuple[int, str], str] = {}
+        element_specs: dict[tuple[int, str], tuple[str, str | None, decimal.Decimal | None]] = {}
+        has_notes_col = "Notes" in df.columns
+        has_max_goe_col = "Max GOE Allowed" in df.columns
         for _, r in df.iterrows():
             sid = skater_dict[str(r["Skater"])]
             ssid = ss_map[sid]
-            element_specs[(ssid, str(r["Element"]))] = str(r["Element Type"])
+            notes_val = None
+            if has_notes_col:
+                raw_notes = r.get("Notes")
+                if raw_notes is not None and pd.notna(raw_notes):
+                    text_notes = str(raw_notes).strip()
+                    notes_val = text_notes or None
+            max_goe_val = None
+            if has_max_goe_col:
+                raw_max = r.get("Max GOE Allowed")
+                if raw_max is not None and pd.notna(raw_max):
+                    max_goe_val = self._to_decimal(raw_max)
+            key = (ssid, str(r["Element"]))
+            if key not in element_specs:
+                element_specs[key] = (str(r["Element Type"]), notes_val, max_goe_val)
+            else:
+                etype, prev_notes, prev_max = element_specs[key]
+                if notes_val and not prev_notes:
+                    prev_notes = notes_val
+                if max_goe_val is not None and prev_max is None:
+                    prev_max = max_goe_val
+                element_specs[key] = (etype, prev_notes, prev_max)
 
         pairs = list(element_specs.keys())
         elem_id_by_pair: dict[tuple[int, str], int] = {}
@@ -972,7 +1076,7 @@ class DatabaseLoader:
             for el in elems:
                 k = (int(el.skater_segment_id), str(el.name))
                 elem_id_by_pair[k] = int(el.id)
-                etype_name = element_specs[k]
+                etype_name, notes_val, max_goe_val = element_specs[k]
                 etid = element_types_map[etype_name]
                 cur_etid = el.element_type_id
                 if el.element_type != etype_name or (
@@ -980,9 +1084,15 @@ class DatabaseLoader:
                 ):
                     el.element_type = etype_name
                     el.element_type_id = etid
+                if notes_val is not None and el.notes != notes_val:
+                    el.notes = notes_val
+                if max_goe_val is not None and not self._numeric_eq(
+                    el.max_goe_allowed, max_goe_val
+                ):
+                    el.max_goe_allowed = max_goe_val
 
         to_add: list[Element] = []
-        for (ssid, ename), etype_name in element_specs.items():
+        for (ssid, ename), (etype_name, notes_val, max_goe_val) in element_specs.items():
             if (ssid, ename) in elem_id_by_pair:
                 continue
             etid = element_types_map[etype_name]
@@ -992,6 +1102,8 @@ class DatabaseLoader:
                     element_type_id=etid,
                     element_type=etype_name,
                     skater_segment_id=ssid,
+                    notes=notes_val,
+                    max_goe_allowed=max_goe_val,
                 )
             )
         if to_add:
@@ -1055,6 +1167,318 @@ class DatabaseLoader:
         start, end = self._competition_dates_for_segment(segment_id)
         return should_flag_rule_errors(start, end)
 
+    def _build_segment_element_score_maps_from_rows(
+        self, rows
+    ) -> tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]]:
+        skater_dict: dict[str, int] = {}
+        ss_map: dict[int, int] = {}
+        elem_id_by_pair: dict[tuple[int, str], int] = {}
+        for skater_name, skater_id, ss_id, el_name, el_id in rows:
+            skater_dict[str(skater_name)] = int(skater_id)
+            ss_map[int(skater_id)] = int(ss_id)
+            elem_id_by_pair[(int(ss_id), str(el_name))] = int(el_id)
+        return skater_dict, ss_map, elem_id_by_pair
+
+    def _segment_element_score_maps(
+        self, segment_id: int
+    ) -> tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]]:
+        """Skater name → id, skater id → skater_segment id, (ss_id, element name) → element id."""
+        rows = self.session.execute(
+            select(
+                Skater.name,
+                Skater.id,
+                SkaterSegment.id,
+                Element.name,
+                Element.id,
+            )
+            .join(SkaterSegment, SkaterSegment.skater_id == Skater.id)
+            .join(Element, Element.skater_segment_id == SkaterSegment.id)
+            .where(SkaterSegment.segment_id == segment_id)
+        ).all()
+        return self._build_segment_element_score_maps_from_rows(rows)
+
+    def segment_element_score_maps_for_competition(
+        self, competition_id: int
+    ) -> dict[int, tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]]]:
+        """Preload score maps for every segment in a competition (one query)."""
+        rows = self.session.execute(
+            select(
+                SkaterSegment.segment_id,
+                Skater.name,
+                Skater.id,
+                SkaterSegment.id,
+                Element.name,
+                Element.id,
+            )
+            .join(SkaterSegment, SkaterSegment.skater_id == Skater.id)
+            .join(Element, Element.skater_segment_id == SkaterSegment.id)
+            .join(Segment, Segment.id == SkaterSegment.segment_id)
+            .where(Segment.competition_id == competition_id)
+        ).all()
+        by_segment: dict[int, list] = {}
+        for segment_id, skater_name, skater_id, ss_id, el_name, el_id in rows:
+            by_segment.setdefault(int(segment_id), []).append(
+                (skater_name, skater_id, ss_id, el_name, el_id)
+            )
+        return {
+            sid: self._build_segment_element_score_maps_from_rows(seg_rows)
+            for sid, seg_rows in by_segment.items()
+        }
+
+    def _reset_element_rule_errors_for_segment(self, segment_id: int) -> None:
+        element_ids = self.session.execute(
+            select(Element.id)
+            .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
+            .where(SkaterSegment.segment_id == segment_id)
+        ).scalars().all()
+        if not element_ids:
+            return
+        step = 500
+        for i in range(0, len(element_ids), step):
+            chunk = element_ids[i : i + step]
+            self.session.execute(
+                update(ElementScorePerJudge)
+                .where(ElementScorePerJudge.element_id.in_(chunk))
+                .values(is_rule_error=False)
+            )
+
+    def _bulk_update_element_metadata(self, updates: list[dict]) -> int:
+        """Bulk ORM update by element ``id`` (notes / max_goe_allowed)."""
+        if not updates:
+            return 0
+        step = 500
+        for i in range(0, len(updates), step):
+            chunk = updates[i : i + step]
+            self.session.execute(update(Element), chunk)
+        return len(updates)
+
+    def update_element_protocol_metadata_for_segment(
+        self,
+        segment_id: int,
+        element_metadata: dict[tuple[str, str], dict],
+        *,
+        score_maps: (
+            tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]] | None
+        ) = None,
+    ) -> int:
+        """
+        Set ``element.notes`` and ``element.max_goe_allowed`` from parsed protocol data.
+
+        ``element_metadata`` values are dicts with optional ``notes`` and
+        ``max_goe_allowed`` keys. Returns element rows updated.
+        """
+        if not element_metadata:
+            return 0
+        if score_maps is None:
+            skater_dict, ss_map, elem_id_by_pair = self._segment_element_score_maps(
+                segment_id
+            )
+        else:
+            skater_dict, ss_map, elem_id_by_pair = score_maps
+        resolved: list[tuple[int, dict]] = []
+        for (skater_name, element_name), meta in element_metadata.items():
+            db_skater = _resolve_skater_dict_key(skater_dict, str(skater_name))
+            if db_skater is None:
+                continue
+            skater_id = skater_dict[db_skater]
+            ss_id = ss_map.get(skater_id)
+            if ss_id is None:
+                continue
+            eid = elem_id_by_pair.get((ss_id, str(element_name)))
+            if eid is None:
+                continue
+            resolved.append((int(eid), meta))
+        if not resolved:
+            return 0
+        element_ids = [eid for eid, _ in resolved]
+        current_rows = self.session.execute(
+            select(Element.id, Element.notes, Element.max_goe_allowed).where(
+                Element.id.in_(element_ids)
+            )
+        ).all()
+        current = {
+            int(row.id): (row.notes, row.max_goe_allowed) for row in current_rows
+        }
+        updates: list[dict] = []
+        for eid, meta in resolved:
+            cur_notes, cur_max = current.get(eid, (None, None))
+            raw_notes = meta.get("notes")
+            normalized = (
+                (str(raw_notes).strip() if raw_notes is not None else None) or None
+            )
+            raw_max = meta.get("max_goe_allowed")
+            max_dec = (
+                self._to_decimal(raw_max) if raw_max is not None else None
+            )
+            new_max = cur_max
+            if max_dec is not None and (
+                cur_max is None or not self._numeric_eq(cur_max, max_dec)
+            ):
+                new_max = max_dec
+            if normalized == cur_notes and new_max == cur_max:
+                continue
+            updates.append({
+                "id": eid,
+                "notes": normalized,
+                "max_goe_allowed": new_max,
+            })
+        if not updates:
+            return 0
+        updated = self._bulk_update_element_metadata(updates)
+        self._maybe_flush()
+        return updated
+
+    def update_element_notes_for_segment(
+        self,
+        segment_id: int,
+        element_notes: dict[tuple[str, str], str | None],
+    ) -> int:
+        """Backward-compatible wrapper around ``update_element_protocol_metadata_for_segment``."""
+        metadata = {
+            key: {"notes": notes_val}
+            for key, notes_val in element_notes.items()
+        }
+        return self.update_element_protocol_metadata_for_segment(segment_id, metadata)
+
+    def _resolve_rule_error_pairs(
+        self,
+        rule_errors: list,
+        skater_dict: dict[str, int],
+        ss_map: dict[int, int],
+        elem_id_by_pair: dict[tuple[int, str], int],
+        judge_dict: dict[str, int],
+    ) -> tuple[list[tuple[int, int]], list[dict]]:
+        pairs: list[tuple[int, int]] = []
+        unresolved: list[dict] = []
+        for rule_error in rule_errors:
+            skater_label = str(rule_error.get("Skater", ""))
+            element_label = str(rule_error.get("Element", ""))
+            judge_label = str(rule_error.get("Judge Name", ""))
+            base = {
+                "skater": skater_label,
+                "element": element_label,
+                "judge": judge_label,
+            }
+            db_skater = _resolve_skater_dict_key(skater_dict, skater_label)
+            if db_skater is None:
+                unresolved.append({**base, "reason": "skater not in segment"})
+                continue
+            skater_id = skater_dict[db_skater]
+            ssid = ss_map.get(skater_id)
+            if ssid is None:
+                unresolved.append({**base, "reason": "skater not in segment"})
+                continue
+            db_element_name = _resolve_element_dict_key(
+                elem_id_by_pair, ssid, element_label
+            )
+            if db_element_name is None:
+                eid = None
+            else:
+                eid = elem_id_by_pair.get((ssid, db_element_name))
+            if eid is None:
+                unresolved.append({**base, "reason": "element not in segment"})
+                continue
+            jid = judge_dict.get(normalize_scraped_judge_name(judge_label))
+            if jid is None:
+                unresolved.append({**base, "reason": "judge not in segment"})
+                continue
+            pairs.append((eid, jid))
+        uniq = list(dict.fromkeys(pairs))
+        return uniq, unresolved
+
+    def preview_rule_errors_for_segment(
+        self,
+        segment_id: int,
+        rule_errors: list,
+        *,
+        panel_judge_names: list[str] | None = None,
+        score_maps: (
+            tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]] | None
+        ) = None,
+    ) -> dict:
+        """Resolve parsed rule errors without writing; for dry-run reporting."""
+        if not rule_errors:
+            return {"flagged": 0, "unresolved": []}
+        if score_maps is None:
+            skater_dict, ss_map, elem_id_by_pair = self._segment_element_score_maps(
+                segment_id
+            )
+        else:
+            skater_dict, ss_map, elem_id_by_pair = score_maps
+        judge_dict = self._judge_dict_for_rule_errors(
+            rule_errors, panel_judge_names or []
+        )
+        uniq, unresolved = self._resolve_rule_error_pairs(
+            rule_errors, skater_dict, ss_map, elem_id_by_pair, judge_dict
+        )
+        return {"flagged": len(uniq), "unresolved": unresolved}
+
+    def _judge_dict_for_rule_errors(
+        self,
+        rule_errors: list,
+        panel_judge_names: list[str],
+    ) -> dict[str, int]:
+        judge_names = list(
+            dict.fromkeys(
+                normalize_scraped_judge_name(str(n))
+                for n in panel_judge_names
+                if str(n).strip()
+            )
+        )
+        for err in rule_errors:
+            jn = normalize_scraped_judge_name(str(err.get("Judge Name", "")))
+            if jn and jn not in judge_names:
+                judge_names.append(jn)
+        return self._ensure_judges_by_name(judge_names)
+
+    def refresh_element_rule_errors(
+        self,
+        segment_id: int,
+        rule_errors: list,
+        *,
+        panel_judge_names: list[str] | None = None,
+        score_maps: (
+            tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]] | None
+        ) = None,
+        apply_rule_errors: bool | None = None,
+    ) -> dict:
+        """
+        Re-apply element rule errors on an existing segment (backfill / re-parse path).
+
+        Clears ``is_rule_error`` for all element scores in the segment. When the
+        competition is before 2018-07-01, leaves all flags cleared. Otherwise flags
+        matches from ``rule_errors``.
+
+        Returns ``{"flagged": int, "unresolved": list[dict]}`` where each unresolved
+        entry has ``skater``, ``element``, ``judge``, and ``reason``.
+        """
+        self._reset_element_rule_errors_for_segment(segment_id)
+        if apply_rule_errors is None:
+            apply_rule_errors = self._should_apply_rule_errors_for_segment(segment_id)
+        if not apply_rule_errors:
+            self._maybe_flush()
+            return {"flagged": 0, "unresolved": []}
+        if not rule_errors:
+            self._maybe_flush()
+            return {"flagged": 0, "unresolved": []}
+        if score_maps is None:
+            skater_dict, ss_map, elem_id_by_pair = self._segment_element_score_maps(
+                segment_id
+            )
+        else:
+            skater_dict, ss_map, elem_id_by_pair = score_maps
+        judge_dict = self._judge_dict_for_rule_errors(
+            rule_errors, panel_judge_names or []
+        )
+        flagged = self._apply_rule_errors_bulk(
+            rule_errors, skater_dict, ss_map, elem_id_by_pair, judge_dict
+        )
+        self._maybe_flush()
+        _, unresolved = self._resolve_rule_error_pairs(
+            rule_errors, skater_dict, ss_map, elem_id_by_pair, judge_dict
+        )
+        return {"flagged": flagged, "unresolved": unresolved}
+
     def _apply_rule_errors_bulk(
         self,
         rule_errors: list,
@@ -1062,18 +1486,12 @@ class DatabaseLoader:
         ss_map: dict[int, int],
         elem_id_by_pair: dict[tuple[int, str], int],
         judge_dict: dict[str, int],
-    ) -> None:
+    ) -> int:
         if not rule_errors:
-            return
-        pairs: list[tuple[int, int]] = []
-        for rule_error in rule_errors:
-            skater_id = skater_dict[str(rule_error["Skater"])]
-            ssid = ss_map[skater_id]
-            converted_name = str(rule_error["Element"]).split(" ")[0]
-            eid = elem_id_by_pair[(ssid, converted_name)]
-            jid = judge_dict[normalize_scraped_judge_name(str(rule_error["Judge Name"]))]
-            pairs.append((eid, jid))
-        uniq = list(dict.fromkeys(pairs))
+            return 0
+        uniq, _unresolved = self._resolve_rule_error_pairs(
+            rule_errors, skater_dict, ss_map, elem_id_by_pair, judge_dict
+        )
         step = 500
         for i in range(0, len(uniq), step):
             chunk = uniq[i : i + step]
@@ -1087,11 +1505,13 @@ class DatabaseLoader:
                 )
                 .values(is_rule_error=True)
             )
+        return len(uniq)
 
     def insert_rule_errors(self, rule_errors, segment_id):
         """Legacy per-row path; prefer rule errors applied in insert_element_scores."""
         if not rule_errors or not self._should_apply_rule_errors_for_segment(segment_id):
             return
+        _, _ss_map, elem_id_by_pair = self._segment_element_score_maps(segment_id)
         for rule_error in rule_errors:
             skater_id = (
                 self.session.query(Skater)
@@ -1105,15 +1525,12 @@ class DatabaseLoader:
                 .first()
                 .id
             )
-            converted_name = rule_error["Element"].split(" ")[0]
-            element_id = (
-                self.session.query(Element)
-                .filter_by(
-                    name=converted_name, skater_segment_id=skater_segment_id
-                )
-                .first()
-                .id
+            db_element_name = _resolve_element_dict_key(
+                elem_id_by_pair, skater_segment_id, rule_error["Element"]
             )
+            if db_element_name is None:
+                continue
+            element_id = elem_id_by_pair[(skater_segment_id, db_element_name)]
             judge_id = (
                 self.session.query(Judge)
                 .filter_by(name=normalize_scraped_judge_name(rule_error["Judge Name"]))
@@ -1126,7 +1543,7 @@ class DatabaseLoader:
                 .first()
             )
             score.is_rule_error = True
-        self._flush()
+        self._maybe_flush()
 
     def insert_pcs_scores(self, judgesNames, all_pcs_dict, segment_id):
         all_pcs_df = self._dataframe_pcs(all_pcs_dict)
