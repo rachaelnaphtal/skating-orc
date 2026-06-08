@@ -8,15 +8,37 @@ import psycopg2.extras
 from urllib.parse import urlparse
 
 _conn_params_cache: Optional[dict] = None
+_conn_params_cache_url: Optional[str] = None
+
+
+def _resolve_directory_database_url() -> str:
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if database_url:
+        if database_url.startswith("postgres://"):
+            return database_url.replace("postgres://", "postgresql://", 1)
+        return database_url
+    try:
+        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from database import resolve_database_url
+
+        url, _source = resolve_database_url()
+        if url and str(url).strip():
+            return str(url).strip()
+    except Exception:
+        pass
+    raise RuntimeError(
+        "DATABASE_URL is not set and could not be resolved from Streamlit secrets."
+    )
 
 
 def _conn_params() -> dict:
-    global _conn_params_cache
-    if _conn_params_cache is None:
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
-            raise RuntimeError("DATABASE_URL environment variable is not set.")
+    global _conn_params_cache, _conn_params_cache_url
+    database_url = _resolve_directory_database_url()
+    if _conn_params_cache is None or _conn_params_cache_url != database_url:
         parsed = urlparse(database_url)
+        _conn_params_cache_url = database_url
         _conn_params_cache = {
             "host": parsed.hostname,
             "port": parsed.port or 5432,

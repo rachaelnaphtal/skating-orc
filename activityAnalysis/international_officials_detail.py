@@ -40,6 +40,7 @@ try:
         directory_listing_tier_for_level,
         evaluate_requirements_for_appointment,
         format_competition_alternatives_detail,
+        format_seminar_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
@@ -76,6 +77,7 @@ except ModuleNotFoundError:
         directory_listing_tier_for_level,
         evaluate_requirements_for_appointment,
         format_competition_alternatives_detail,
+        format_seminar_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
@@ -540,18 +542,50 @@ def _streamlit_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         else:
             work = work.rename(columns={"competition_year": "Season"})
 
+    def _season_display_value(v: object) -> str:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        text = str(v).strip()
+        if not text:
+            return ""
+        try:
+            return format_usfs_season_code(int(text))
+        except (TypeError, ValueError):
+            return text
+
     columns = list(work.columns)
     data: dict[str, list[str]] = {}
     for col in columns:
         if col == "Season":
-            data[col] = [
-                format_usfs_season_code(int(v)) if pd.notna(v) else ""
-                for v in work[col]
-            ]
+            data[col] = [_season_display_value(v) for v in work[col]]
         else:
             data[col] = ["" if pd.isna(v) else str(v) for v in work[col]]
 
     return pd.DataFrame(data, columns=columns)
+
+
+def _render_seminar_details_table(seminars: pd.DataFrame | None) -> None:
+    st.markdown("### ISU seminar attendance")
+    st.caption(
+        "Seminars recorded for this appointment type and discipline "
+        "(Pairs seminars count toward Singles TC/TS appointments)."
+    )
+    if seminars is None or seminars.empty:
+        st.info("No seminar attendance recorded for this appointment.")
+        return
+    st.dataframe(
+        _streamlit_safe_dataframe(seminars),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Date": st.column_config.TextColumn("Date", width="small"),
+            "Season": st.column_config.TextColumn("Season", width="small"),
+            "In person": st.column_config.TextColumn("In person", width="small"),
+            "At event": st.column_config.TextColumn("At event", width="small"),
+            "Place": st.column_config.TextColumn("Place", width="medium"),
+            "Notes": st.column_config.TextColumn("Notes", width="large"),
+        },
+    )
 
 
 def _render_qualifying_activity_table(activity: pd.DataFrame | None, *, caption: str) -> None:
@@ -617,7 +651,7 @@ def _render_requirement_evaluation(title: str, ev: RequirementEvaluation) -> Non
     seasons = ", ".join(format_usfs_season_code(c) for c in ev.season_codes)
     st.caption(
         f"Season window: {seasons}. "
-        "International segments (types 15–17) count only when they meet ISU service definitions "
+        "International segments count only when they meet ISU service definitions "
         "(Singles ≥6 entries; Pairs/Dance ≥4; Synchronized ≥2 ISU Members only; "
         "≥2 ISU Members for Singles/Pairs/Dance when nations can be verified from names)."
     )
@@ -645,6 +679,10 @@ def _render_requirement_evaluation(title: str, ev: RequirementEvaluation) -> Non
                         "TC means Technical Controller on the event panel (protocol role), "
                         "not membership on an ISU Technical Committee."
                     )
+            elif rule.metric == "seminar_alternatives":
+                st.markdown("**Options:**")
+                for line in format_seminar_alternatives_detail(rule.detail, met=rule.met):
+                    st.markdown(f"- {line}")
             else:
                 st.write(f"Progress: {rule.detail}")
             if (
@@ -823,6 +861,8 @@ def render_appointment_detail_report(
     else:
         _render_requirement_evaluation("Promote to ISU", promote_primary)
 
+    _render_seminar_details_table(ctx.seminars)
+
     st.markdown("### Panel activity (this appointment)")
     st.caption(
         "Rule 411 column shows whether an international segment meets ISU entry minimums "
@@ -878,7 +918,7 @@ def render_appointment_detail_report(
 
     st.markdown("### International panel activity for other appointments")
     st.caption(
-        "International competitions (types 15–17) where this official served on panel for "
+        "International competitions where this official served on panel for "
         "other directory appointments in the report window."
     )
     if intl_other is None or intl_other.empty:

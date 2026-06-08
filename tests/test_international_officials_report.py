@@ -97,6 +97,26 @@ def test_build_appointment_detail_pdf_magic_bytes():
     assert len(pdf) > 200
 
 
+def test_build_appointment_detail_pdf_includes_seminar_section():
+    ctx = _minimal_context(
+        seminars=pd.DataFrame(
+            [
+                {
+                    "Date": "2025-10-01",
+                    "Season": "25-26 (2526)",
+                    "In person": "Yes",
+                    "At event": "No",
+                    "Place": "Geneva",
+                    "Notes": "Technical seminar",
+                }
+            ]
+        )
+    )
+    pdf = build_appointment_detail_pdf(ctx)
+    assert b"ISU seminar attendance" in pdf
+    assert b"Technical seminar" in pdf
+
+
 def test_build_appointment_detail_pdf_long_competition_name_and_panel_sections():
     long_name = (
         "2025 ISU Challenger Series Nebelhorn Trophy and International "

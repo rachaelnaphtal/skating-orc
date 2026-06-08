@@ -37,6 +37,20 @@ def test_streamlit_safe_dataframe_converts_int64_season():
     pa.Table.from_pandas(out)
 
 
+def test_streamlit_safe_dataframe_preserves_preformatted_season():
+    df = pd.DataFrame(
+        {
+            "Date": ["2024-03-01"],
+            "Season": ["23-24 (2324)"],
+            "In person": ["Yes"],
+            "Notes": ["Online"],
+        }
+    )
+    out = _streamlit_safe_dataframe(df)
+    assert out.loc[0, "Season"] == "23-24 (2324)"
+    pa.Table.from_pandas(out)
+
+
 def test_streamlit_safe_dataframe_from_qualifying_competition_columns():
     df = pd.DataFrame(
         {

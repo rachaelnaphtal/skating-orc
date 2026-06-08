@@ -581,7 +581,9 @@ st.caption(
     f"**International Data / Video Operator** combines SPD and Synchronized appointments "
     f"and all Singles, Pairs, Dance, and Synchronized panel work. "
     "Maintain/promote checks use each rule's season window before the selected listing season; "
-    "seminars, examinations, and ISU Communications inclusion are not automated. "
+    "Seminar requirements are evaluated when attendance is recorded in "
+    "``isu_official_seminar``; examinations and some ISU Communications "
+    "alternatives (e.g. Initial Judges Meeting) are not automated. "
     "Use **Open** in the summary table for a full appointment report."
 )
 
@@ -937,7 +939,7 @@ st.dataframe(
         "Intl competitions": st.column_config.NumberColumn(
             "Intl competitions",
             help=(
-                "Distinct ISU / international competitions (types 15–17) with at least one "
+                "Distinct ISU / international competitions with at least one "
                 f"matching Junior/Senior segment in seasons "
                 f"{', '.join(format_usfs_season_code(c) for c in report_season_codes)}."
             ),

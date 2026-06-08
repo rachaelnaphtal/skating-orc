@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 import json
+import re
 from typing import Any, Literal
 
 import pandas as pd
@@ -31,8 +32,15 @@ try:
     )
     from activityAnalysis.international_listing_seasons import (
         competition_year_matches_seasons,
+        format_usfs_season_code,
         season_codes_as_bind_strings,
+        season_codes_preceding_listing,
         season_year_sql_predicate,
+    )
+    from activityAnalysis.international_official_seminars import (
+        filter_seminars_for_appointment,
+        filter_seminars_to_season_codes,
+        load_official_seminars_bulk,
     )
     from activityAnalysis.load_activity_data import (
         activity_database_is_postgresql,
@@ -56,8 +64,15 @@ except ModuleNotFoundError:
     )
     from international_listing_seasons import (
         competition_year_matches_seasons,
+        format_usfs_season_code,
         season_codes_as_bind_strings,
+        season_codes_preceding_listing,
         season_year_sql_predicate,
+    )
+    from international_official_seminars import (
+        filter_seminars_for_appointment,
+        filter_seminars_to_season_codes,
+        load_official_seminars_bulk,
     )
     from load_activity_data import (
         activity_database_is_postgresql,
@@ -117,6 +132,16 @@ def listing_tier_display_label(listing_tier: str) -> str:
     if str(listing_tier or "").strip().lower() == "isu":
         return "ISU Championship"
     return "International"
+
+
+def user_facing_requirement_label(label: str) -> str:
+    """Strip internal competition-type id references from requirement labels."""
+    text = str(label or "").strip()
+    text = re.sub(r";\s*types\s+15\s*[–-]\s*17", "", text, flags=re.IGNORECASE)
+    text = re.sub(r";\s*types\s+15\s*[–-]\s*16", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\s*types\s+15\s*[–-]\s*17\s*\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ;")
 
 
 def is_isu_directory_level(appointment_level: Any) -> bool:
@@ -2014,6 +2039,150 @@ def enrich_summary_with_promote_first_eligible(
     return out
 
 
+def _seminars_for_rule_evaluation(
+    seminars_bulk: pd.DataFrame | None,
+    *,
+    official_id: int,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    seminars_by_official: dict[int, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    if seminars_bulk is not None:
+        if seminars_by_official is not None:
+            sub = seminars_by_official.get(int(official_id), seminars_bulk.iloc[0:0])
+        else:
+            sub = seminars_bulk.loc[seminars_bulk["official_id"] == int(official_id)]
+        return filter_seminars_for_appointment(
+            sub,
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            directory_discipline_id=directory_discipline_id,
+        )
+    return filter_seminars_for_appointment(
+        load_official_seminars_bulk([official_id]),
+        official_id=official_id,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+    )
+
+
+def _seminar_season_codes_for_window(
+    listing_season_code: int,
+    season_window: int,
+) -> list[int]:
+    return season_codes_preceding_listing(int(listing_season_code), int(season_window))
+
+
+def _seminar_delivery_label(in_person: bool | None, *, at_event: bool | None = None) -> str:
+    if at_event:
+        return "at event"
+    if in_person is None:
+        return "seminar"
+    return "in person" if in_person else "online"
+
+
+def _seminar_in_person_from_config(config: dict[str, Any]) -> bool | None:
+    if "in_person" not in config:
+        return None
+    return bool(config["in_person"])
+
+
+def _evaluate_seminar_count(
+    seminars: pd.DataFrame,
+    metric_config: Any,
+    *,
+    listing_season_code: int,
+    min_value: int,
+) -> tuple[bool, str]:
+    config = _parse_metric_config(metric_config)
+    in_person = _seminar_in_person_from_config(config)
+    at_event = bool(config["at_event"]) if "at_event" in config else None
+    season_window = int(config.get("season_window") or 0)
+    if season_window <= 0:
+        return False, "Seminar season window not configured"
+    codes = _seminar_season_codes_for_window(listing_season_code, season_window)
+    matched = filter_seminars_to_season_codes(
+        seminars, codes, in_person=in_person, at_event=at_event
+    )
+    actual = len(matched)
+    met = actual >= int(min_value)
+    seasons_label = ", ".join(format_usfs_season_code(c) for c in codes)
+    detail = (
+        f"{actual}/{min_value} {_seminar_delivery_label(in_person, at_event=at_event)}"
+        f" seminar{'s' if min_value != 1 else ''} ({seasons_label})"
+    )
+    return met, detail
+
+
+def _evaluate_seminar_alternatives(
+    seminars: pd.DataFrame,
+    metric_config: Any,
+    *,
+    listing_season_code: int,
+) -> tuple[bool, str, str]:
+    config = _parse_metric_config(metric_config)
+    alternatives = config.get("alternatives") or []
+    if not alternatives:
+        return False, "", "No seminar alternatives configured"
+
+    branch_summaries: list[str] = []
+    winning: tuple[str, str] | None = None
+    for alt in alternatives:
+        label = str(alt.get("label") or "Option")
+        requirements = alt.get("requirements") or []
+        branch_ok = True
+        parts: list[str] = []
+        for req in requirements:
+            in_person = _seminar_in_person_from_config(req)
+            at_event = bool(req["at_event"]) if "at_event" in req else None
+            season_window = int(req.get("season_window") or 0)
+            min_count = int(req.get("min") or 1)
+            if season_window <= 0:
+                branch_ok = False
+                parts.append("season window not configured")
+                continue
+            codes = _seminar_season_codes_for_window(listing_season_code, season_window)
+            matched = filter_seminars_to_season_codes(
+                seminars, codes, in_person=in_person, at_event=at_event
+            )
+            actual = len(matched)
+            seasons_label = ", ".join(format_usfs_season_code(c) for c in codes)
+            parts.append(
+                f"{actual}/{min_count} {_seminar_delivery_label(in_person, at_event=at_event)} "
+                f"({seasons_label})"
+            )
+            if actual < min_count:
+                branch_ok = False
+        summary = f"{label}: {', '.join(parts)}"
+        branch_summaries.append(summary)
+        if branch_ok and winning is None:
+            winning = (label, ", ".join(parts))
+
+    if winning is not None:
+        label, parts = winning
+        others = [s for s in branch_summaries if not s.startswith(f"{label}:")]
+        detail = f"Meets via {label} ({parts})"
+        if others:
+            detail += " — also checked: " + "; ".join(others)
+        return True, label, detail
+
+    return False, "", "Need one of: " + "; ".join(branch_summaries)
+
+
+def format_seminar_alternatives_detail(detail: str, *, met: bool) -> list[str]:
+    if not detail:
+        return []
+    if met and detail.startswith("Meets via "):
+        return [detail.replace("Meets via ", "Satisfied by: ", 1)]
+    if detail.startswith("Need one of: "):
+        return [
+            part.strip()
+            for part in detail[len("Need one of: ") :].split("; ")
+            if part.strip()
+        ]
+    return [detail]
+
+
 def _panel_for_rule_evaluation(
     panel_bulk: pd.DataFrame | None,
     *,
@@ -2059,14 +2228,40 @@ def _evaluate_rule(
     isu_level_id: int,
     panel_bulk: pd.DataFrame | None = None,
     panel_by_official: dict[int, pd.DataFrame] | None = None,
+    seminars_bulk: pd.DataFrame | None = None,
+    seminars_by_official: dict[int, pd.DataFrame] | None = None,
 ) -> RuleCheckResult:
     metric = str(rule_row["metric"])
     min_value = int(rule_row["min_value"])
-    display = str(rule_row["display_label"] or metric)
+    display = user_facing_requirement_label(str(rule_row["display_label"] or metric))
     roles = tuple(int(x) for x in (rule_row["role_appointment_type_ids"] or []) if x is not None)
     comp_types = tuple(int(x) for x in (rule_row["competition_type_ids"] or [15, 16, 17]))
     seg_levels = frozenset(rule_row["segment_levels"] or list(COUNTABLE_SEGMENT_LEVELS))
     include_qualifying_national = bool(rule_row.get("include_qualifying_national"))
+
+    if metric in ("seminar_count", "seminar_alternatives"):
+        seminars = _seminars_for_rule_evaluation(
+            seminars_bulk,
+            official_id=official_id,
+            appointment_type_id=appointment_type_id,
+            directory_discipline_id=directory_discipline_id,
+            seminars_by_official=seminars_by_official,
+        )
+        if metric == "seminar_count":
+            met, detail = _evaluate_seminar_count(
+                seminars,
+                rule_row.get("metric_config"),
+                listing_season_code=int(listing_season_code),
+                min_value=min_value,
+            )
+        else:
+            met, _via, detail = _evaluate_seminar_alternatives(
+                seminars,
+                rule_row.get("metric_config"),
+                listing_season_code=int(listing_season_code),
+            )
+        actual = 1 if met else 0
+        return RuleCheckResult(metric, display, min_value, actual, met, detail)
 
     if metric == "seasons_since_appointed":
         actual = _years_in_grade_for_current_appointment(
@@ -2312,6 +2507,8 @@ def evaluate_requirements_for_appointment(
     rules_df: pd.DataFrame | None = None,
     panel_bulk: pd.DataFrame | None = None,
     panel_by_official: dict[int, pd.DataFrame] | None = None,
+    seminars_bulk: pd.DataFrame | None = None,
+    seminars_by_official: dict[int, pd.DataFrame] | None = None,
     appointment_contexts: dict[tuple[int, int, int | None], dict[str, Any]] | None = None,
     appointment_rows_by_official: dict[int, list[dict[str, Any]]] | None = None,
     isu_listing_keys: set[tuple[int, int, int | None]] | None = None,
@@ -2412,6 +2609,8 @@ def evaluate_requirements_for_appointment(
                     isu_level_id=int(isu_level_id),
                     panel_bulk=panel_bulk,
                     panel_by_official=panel_by_official,
+                    seminars_bulk=seminars_bulk,
+                    seminars_by_official=seminars_by_official,
                 )
             )
 
@@ -2456,6 +2655,7 @@ def evaluate_requirements_summary_df(
     summary: pd.DataFrame,
     *,
     panel_bulk: pd.DataFrame | None = None,
+    seminars_bulk: pd.DataFrame | None = None,
     listing_season_code: int | None = None,
 ) -> pd.DataFrame:
     """
@@ -2478,6 +2678,16 @@ def evaluate_requirements_summary_df(
         panel_by_official = {
             int(oid): group for oid, group in panel.groupby("official_id", sort=False)
         }
+    seminars = (
+        seminars_bulk
+        if seminars_bulk is not None
+        else load_official_seminars_bulk(official_ids)
+    )
+    seminars_by_official: dict[int, pd.DataFrame] | None = None
+    if seminars is not None and not seminars.empty:
+        seminars_by_official = {
+            int(oid): group for oid, group in seminars.groupby("official_id", sort=False)
+        }
     appointment_contexts = _batch_appointment_contexts(official_ids)
     appointment_rows_by_official = load_official_international_appointment_rows(
         official_ids
@@ -2493,6 +2703,8 @@ def evaluate_requirements_summary_df(
         "rules_df": rules_df,
         "panel_bulk": panel,
         "panel_by_official": panel_by_official,
+        "seminars_bulk": seminars,
+        "seminars_by_official": seminars_by_official,
         "appointment_contexts": appointment_contexts,
         "appointment_rows_by_official": appointment_rows_by_official,
         "isu_listing_keys": isu_listing_keys,

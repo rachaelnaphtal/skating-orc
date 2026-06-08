@@ -542,6 +542,319 @@ def render_judge_directory_matcher_embedded() -> None:
     render_judge_official_matcher(embedded=True)
 
 
+def render_isu_official_seminars() -> None:
+    """Add and edit ISU seminar attendance for international listing requirements."""
+    from datetime import date
+
+    from international_listing_seasons import format_usfs_season_code, usfs_season_code_for_date
+    from international_official_seminars import (
+        delete_seminar_rows,
+        insert_seminar_row,
+        load_seminars_admin,
+        search_officials_for_seminar_admin,
+        seminar_table_exists,
+        update_seminar_row,
+    )
+    from international_officials_data import get_international_appointment_type_options
+    from load_activity_data import activity_database_is_postgresql, engine
+    from officials_analysis_models import Disciplines
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    st.subheader("ISU seminar attendance")
+    st.caption(
+        "Record ISU seminar attendance used for International Officials maintain / promote checks. "
+        "Apply migration **035** before use."
+    )
+
+    if not activity_database_is_postgresql():
+        st.error("Requires PostgreSQL with ``officials_analysis.isu_official_seminar``.")
+        return
+    if not seminar_table_exists():
+        st.warning(
+            "Table ``officials_analysis.isu_official_seminar`` not found — run "
+            "``activityAnalysis/migrations/035_isu_official_seminar.sql``."
+        )
+        return
+
+    appt_df = get_international_appointment_type_options()
+    appt_options = {
+        int(r.appointment_type_id): str(r.appointment_type)
+        for r in appt_df.itertuples(index=False)
+    }
+    with Session(engine) as session:
+        disc_rows = session.execute(
+            select(Disciplines.id, Disciplines.name).order_by(Disciplines.name.asc())
+        ).all()
+    _ALL_DISCIPLINES_ID = 0
+    disc_options: dict[int | None, str] = {None: "(all disciplines)"}
+    disc_select_options: dict[int, str] = {_ALL_DISCIPLINES_ID: "(all disciplines)"}
+    for disc_id, disc_name in disc_rows:
+        disc_options[int(disc_id)] = str(disc_name)
+        disc_select_options[int(disc_id)] = str(disc_name)
+
+    tab_add, tab_browse = st.tabs(["Add seminar", "Browse / edit"])
+
+    with tab_add:
+        st.markdown("**Find official**")
+        name_q = st.text_input(
+            "Search by name or member #",
+            key="admin_seminar_official_search",
+            placeholder="e.g. Smith or 12345",
+        )
+        matches = search_officials_for_seminar_admin(name_q) if name_q.strip() else pd.DataFrame()
+        if name_q.strip() and matches.empty:
+            st.info("No officials match that search.")
+        elif not matches.empty:
+            pick_labels = {
+                int(r.official_id): (
+                    f"{(r.full_name or '').strip() or f'Id {r.official_id}'}"
+                    f"{f' (#{r.mbr_number})' if r.mbr_number else ''}"
+                )
+                for r in matches.itertuples(index=False)
+            }
+            pick_official = st.selectbox(
+                "Official",
+                options=list(pick_labels.keys()),
+                format_func=lambda oid: pick_labels[int(oid)],
+                key="admin_seminar_official_pick",
+            )
+        else:
+            pick_official = None
+
+        st.markdown("**Seminar details**")
+        c1, c2 = st.columns(2)
+        with c1:
+            pick_appt = st.selectbox(
+                "Appointment type",
+                options=list(appt_options.keys()),
+                format_func=lambda x: appt_options[int(x)],
+                key="admin_seminar_appt_type",
+            )
+            pick_disc = st.selectbox(
+                "Discipline",
+                options=list(disc_options.keys()),
+                format_func=lambda x: disc_options[x],
+                key="admin_seminar_discipline",
+            )
+            seminar_date = st.date_input(
+                "Date of seminar",
+                value=date.today(),
+                key="admin_seminar_date",
+            )
+        with c2:
+            derived_season = usfs_season_code_for_date(seminar_date)
+            if st.session_state.get("admin_seminar_date_prev") != seminar_date:
+                st.session_state["admin_seminar_season"] = int(derived_season)
+                st.session_state["admin_seminar_date_prev"] = seminar_date
+            season_code = st.number_input(
+                "Season code",
+                min_value=0,
+                max_value=9999,
+                help=f"USFS season for the seminar date ({format_usfs_season_code(derived_season)}).",
+                key="admin_seminar_season",
+            )
+            in_person = st.checkbox("Attended in person", value=True, key="admin_seminar_in_person")
+            at_event = st.checkbox("Held at an event (not standalone)", key="admin_seminar_at_event")
+            place = st.text_input("Place", key="admin_seminar_place")
+        notes = st.text_area("Notes (optional)", key="admin_seminar_notes", height=80)
+
+        if st.button("Save seminar", type="primary", key="admin_seminar_save_new"):
+            if pick_official is None:
+                st.error("Search for and select an official first.")
+            else:
+                try:
+                    new_id = insert_seminar_row(
+                        official_id=int(pick_official),
+                        appointment_type_id=int(pick_appt),
+                        discipline_id=pick_disc,
+                        seminar_date=seminar_date,
+                        season_code=int(season_code),
+                        in_person=in_person,
+                        place=place,
+                        at_event=at_event,
+                        notes=notes,
+                    )
+                    st.success(f"Saved seminar row **{new_id}**.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    with tab_browse:
+        f1, f2, f3 = st.columns([2, 2, 1])
+        with f1:
+            browse_name = st.text_input(
+                "Filter by official name / member #",
+                key="admin_seminar_browse_name",
+            )
+        with f2:
+            appt_filter_options: dict[int | None, str] = {None: "(all appointment types)"}
+            appt_filter_options.update(appt_options)
+            browse_appt = st.selectbox(
+                "Appointment type",
+                options=list(appt_filter_options.keys()),
+                format_func=lambda x: appt_filter_options[x],
+                key="admin_seminar_browse_appt",
+            )
+        with f3:
+            browse_limit = st.number_input("Max rows", 50, 2000, 300, 50, key="admin_seminar_limit")
+
+        seminars = load_seminars_admin(
+            name_query=browse_name or None,
+            appointment_type_id=browse_appt,
+            limit=int(browse_limit),
+        )
+        if seminars.empty:
+            st.info("No seminar rows match the current filters.")
+            return
+
+        seminars = seminars.copy()
+        seminars["season_display"] = seminars["season_code"].map(
+            lambda c: f"{format_usfs_season_code(int(c))} ({int(c)})"
+            if pd.notna(c)
+            else ""
+        )
+
+        appt_name_to_id = {name: appt_id for appt_id, name in appt_options.items()}
+        disc_name_to_id = {
+            name: disc_id for disc_id, name in disc_select_options.items()
+        }
+        appt_names = sorted(appt_name_to_id.keys())
+        disc_names = sorted(disc_name_to_id.keys())
+
+        show_cols = [
+            "id",
+            "official_name",
+            "mbr_number",
+            "appointment_type",
+            "discipline",
+            "seminar_date",
+            "season_display",
+            "season_code",
+            "in_person",
+            "place",
+            "at_event",
+            "notes",
+        ]
+        view = seminars[show_cols].copy()
+        view["appointment_type"] = view["appointment_type"].fillna("").astype(str)
+        view["discipline"] = view["discipline"].apply(
+            lambda x: disc_select_options[_ALL_DISCIPLINES_ID]
+            if x is None or (isinstance(x, float) and pd.isna(x)) or not str(x).strip()
+            else str(x)
+        )
+        edited = st.data_editor(
+            view,
+            num_rows="fixed",
+            hide_index=True,
+            disabled=["id", "official_name", "mbr_number", "season_display"],
+            column_config={
+                "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                "official_name": st.column_config.TextColumn("Official", width="medium", pinned=True),
+                "mbr_number": st.column_config.TextColumn("Member #", width="small"),
+                "appointment_type": st.column_config.SelectboxColumn(
+                    "Appointment type",
+                    options=appt_names,
+                    required=True,
+                    width="medium",
+                ),
+                "discipline": st.column_config.SelectboxColumn(
+                    "Discipline",
+                    options=disc_names,
+                    required=True,
+                    width="medium",
+                ),
+                "seminar_date": st.column_config.DateColumn("Date", required=True),
+                "season_display": st.column_config.TextColumn(
+                    "Season",
+                    help="Display only; edit the season code column.",
+                    width="small",
+                ),
+                "season_code": st.column_config.NumberColumn(
+                    "Season code",
+                    min_value=0,
+                    max_value=9999,
+                    required=True,
+                    width="small",
+                ),
+                "in_person": st.column_config.CheckboxColumn("In person"),
+                "place": st.column_config.TextColumn("Place", width="medium"),
+                "at_event": st.column_config.CheckboxColumn("At event"),
+                "notes": st.column_config.TextColumn("Notes", width="large"),
+            },
+            key="admin_seminar_editor",
+        )
+
+        del_col, save_col = st.columns([1, 2])
+        with del_col:
+            delete_ids = st.multiselect(
+                "Delete row IDs",
+                options=sorted(edited["id"].astype(int).tolist()),
+                key="admin_seminar_delete_ids",
+            )
+            if st.button("Delete selected", key="admin_seminar_delete_btn"):
+                if not delete_ids:
+                    st.warning("Select at least one row ID to delete.")
+                else:
+                    removed = delete_seminar_rows(delete_ids)
+                    st.success(f"Deleted {removed} row(s).")
+                    st.rerun()
+
+        with save_col:
+            if st.button("Save edits", type="primary", key="admin_seminar_save_edits"):
+                changed = 0
+                for _, row in edited.iterrows():
+                    orig = view.loc[view["id"] == row["id"]].iloc[0]
+                    appt_name = str(row["appointment_type"] or "").strip()
+                    disc_name = str(row["discipline"] or "").strip()
+                    if appt_name not in appt_name_to_id:
+                        st.error(f"Unknown appointment type: {appt_name!r}")
+                        break
+                    if disc_name not in disc_name_to_id:
+                        st.error(f"Unknown discipline: {disc_name!r}")
+                        break
+                    appt_id = int(appt_name_to_id[appt_name])
+                    disc_id = disc_name_to_id[disc_name]
+                    disc_val = None if disc_id == _ALL_DISCIPLINES_ID else int(disc_id)
+                    row_changed = any(
+                        [
+                            appt_name != str(orig["appointment_type"] or "").strip(),
+                            disc_name != str(orig["discipline"] or "").strip(),
+                            pd.Timestamp(row["seminar_date"]).date()
+                            != pd.Timestamp(orig["seminar_date"]).date(),
+                            int(row["season_code"]) != int(orig["season_code"]),
+                            bool(row["in_person"]) != bool(orig["in_person"]),
+                            str(row.get("place") or "") != str(orig.get("place") or ""),
+                            bool(row["at_event"]) != bool(orig["at_event"]),
+                            str(row.get("notes") or "") != str(orig.get("notes") or ""),
+                        ]
+                    )
+                    if not row_changed:
+                        continue
+                    update_seminar_row(
+                        int(row["id"]),
+                        appointment_type_id=appt_id,
+                        discipline_id=disc_val,
+                        seminar_date=row["seminar_date"],
+                        season_code=int(row["season_code"]),
+                        in_person=bool(row["in_person"]),
+                        place=str(row.get("place") or ""),
+                        at_event=bool(row["at_event"]),
+                        notes=str(row.get("notes") or ""),
+                    )
+                    changed += 1
+                if changed:
+                    st.success(f"Updated {changed} row(s).")
+                    st.rerun()
+                else:
+                    st.info("No changes to save.")
+
+        st.caption(
+            f"Showing {len(edited)} row(s). Season codes use USFS format (e.g. 2526 = 25-26); "
+            "the Season column shows the readable label."
+        )
+
+
 def render_international_requirement_rules() -> None:
     """Edit ISU maintain / promote thresholds (Rules 412–416, 828–862)."""
     from load_activity_data import activity_database_is_postgresql
@@ -551,7 +864,8 @@ def render_international_requirement_rules() -> None:
     st.caption(
         "Thresholds for ISU maintain / promote service checks in the International Officials app. "
         "Apply migrations **017** and **018** before editing. "
-        "Seminars, exams, and age limits are not stored here."
+        "Seminar attendance is stored in ``isu_official_seminar`` (migration 035); "
+        "exams and age limits are not stored here."
     )
 
     if not activity_database_is_postgresql():

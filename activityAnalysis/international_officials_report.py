@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -35,6 +35,10 @@ try:
         load_international_panel_segments_bulk,
         split_panel_detail_by_scope,
     )
+    from activityAnalysis.international_official_seminars import (
+        load_official_seminars_bulk,
+        seminars_display_for_appointment,
+    )
     from activityAnalysis.international_requirements import (
         RequirementEvaluation,
         RuleCheckResult,
@@ -48,6 +52,7 @@ try:
         evaluate_requirements_for_appointment,
         first_listing_season_eligible_for_promote_years,
         format_competition_alternatives_detail,
+        format_seminar_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
@@ -71,6 +76,10 @@ except ModuleNotFoundError:
         load_international_panel_segments_bulk,
         split_panel_detail_by_scope,
     )
+    from international_official_seminars import (
+        load_official_seminars_bulk,
+        seminars_display_for_appointment,
+    )
     from international_requirements import (
         RequirementEvaluation,
         RuleCheckResult,
@@ -84,6 +93,7 @@ except ModuleNotFoundError:
         evaluate_requirements_for_appointment,
         first_listing_season_eligible_for_promote_years,
         format_competition_alternatives_detail,
+        format_seminar_alternatives_detail,
         listing_tier_display_label,
         should_evaluate_promote_requirements,
     )
@@ -138,6 +148,7 @@ class AppointmentDetailContext:
     grade_date: date | None = None
     promote_first_eligible_listing: int | None = None
     promote_first_eligible_display: str = "—"
+    seminars: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _demographics_display_value(value: int | None) -> str:
@@ -198,6 +209,7 @@ def build_appointment_detail_context(
     report_season_codes: list[int],
     active_only: bool,
     panel_bulk: pd.DataFrame | None = None,
+    seminars_bulk: pd.DataFrame | None = None,
     birthdates: dict[int, Any] | None = None,
     grade_dates: dict[tuple[int, int, int | None], Any] | None = None,
 ) -> AppointmentDetailContext:
@@ -233,6 +245,12 @@ def build_appointment_detail_context(
         isu_listing_keys=isu_listing_keys,
     )
 
+    seminars_by_official: dict[int, pd.DataFrame] | None = None
+    if seminars_bulk is not None and not seminars_bulk.empty:
+        seminars_by_official = {
+            int(oid): group for oid, group in seminars_bulk.groupby("official_id", sort=False)
+        }
+
     maintain_evals = evaluate_requirements_for_appointment(
         official_id,
         appointment_type_id,
@@ -240,6 +258,8 @@ def build_appointment_detail_context(
         "maintain",
         listing_season_code=listing_season_code,
         panel_bulk=panel,
+        seminars_bulk=seminars_bulk,
+        seminars_by_official=seminars_by_official,
         isu_level_id=isu_level_id,
         isu_listing_keys=isu_listing_keys,
     )
@@ -266,6 +286,8 @@ def build_appointment_detail_context(
             "promote",
             listing_season_code=listing_season_code,
             panel_bulk=panel,
+            seminars_bulk=seminars_bulk,
+            seminars_by_official=seminars_by_official,
             isu_level_id=isu_level_id,
             isu_listing_keys=isu_listing_keys,
         )
@@ -342,6 +364,13 @@ def build_appointment_detail_context(
         current_listing_season_code=listing_season_code,
     )
 
+    seminars = seminars_display_for_appointment(
+        official_id,
+        appointment_type_id,
+        discipline_id,
+        seminars_bulk=seminars_bulk,
+    )
+
     return AppointmentDetailContext(
         official_id=official_id,
         appointment_type_id=appointment_type_id,
@@ -374,6 +403,7 @@ def build_appointment_detail_context(
         grade_date=grade_date,
         promote_first_eligible_listing=first_promote,
         promote_first_eligible_display=promote_first_display,
+        seminars=seminars,
     )
 
 
@@ -569,6 +599,25 @@ def _pdf_write_data_table(
         _pdf_draw_table_row(pdf, texts, widths, row_h=row_h)
 
 
+_PDF_SEMINAR_COLUMNS = [
+    ("Date", "Date", 0.12),
+    ("Season", "Season", 0.14),
+    ("In person", "In person", 0.1),
+    ("At event", "At event", 0.1),
+    ("Place", "Place", 0.22),
+    ("Notes", "Notes", 0.32),
+]
+
+
+def _pdf_write_seminar_table(pdf: _ReportPDF, seminars: pd.DataFrame | None) -> None:
+    _pdf_write_data_table(
+        pdf,
+        seminars,
+        _PDF_SEMINAR_COLUMNS,
+        empty_message="No seminar attendance recorded for this appointment.",
+    )
+
+
 def _pdf_write_qualifying_table(pdf: _ReportPDF, activity: pd.DataFrame | None) -> None:
     _pdf_write_data_table(
         pdf,
@@ -700,6 +749,9 @@ def _pdf_write_rule_block(pdf: _ReportPDF, rule: RuleCheckResult) -> None:
     pdf.set_font("Helvetica", "", 8)
     if rule.metric == "competition_alternatives":
         for line in format_competition_alternatives_detail(rule.detail, met=rule.met):
+            _pdf_write_wrapped(pdf, f"  - {line}", line_h=4)
+    elif rule.metric == "seminar_alternatives":
+        for line in format_seminar_alternatives_detail(rule.detail, met=rule.met):
             _pdf_write_wrapped(pdf, f"  - {line}", line_h=4)
     else:
         _pdf_write_wrapped(pdf, f"  Progress: {rule.detail}", line_h=4)
@@ -841,6 +893,15 @@ def build_appointment_detail_pdf(ctx: AppointmentDetailContext) -> bytes:
             empty_message="No promotion requirement profile applies.",
         )
 
+    _pdf_write_heading(pdf, "ISU seminar attendance", level=2)
+    _pdf_write_body(
+        pdf,
+        "Seminars recorded for this appointment type and discipline "
+        "(Pairs seminars count toward Singles TC/TS appointments).",
+    )
+    _pdf_write_seminar_table(pdf, ctx.seminars)
+    pdf.ln(1)
+
     intl_this = (
         ctx.panel_international_this
         if ctx.panel_international_this is not None
@@ -913,6 +974,7 @@ def build_bulk_appointment_reports_zip(
         for _, r in summary.iterrows()
     ]
     grade_dates = load_grade_dates_for_appointments(grade_keys)
+    seminars_bulk = load_official_seminars_bulk(official_ids)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -927,6 +989,7 @@ def build_bulk_appointment_reports_zip(
                 report_season_codes=report_season_codes,
                 active_only=active_only,
                 panel_bulk=sub_panel,
+                seminars_bulk=seminars_bulk,
                 birthdates=birthdates,
                 grade_dates=grade_dates,
             )

@@ -238,6 +238,16 @@ def default_listing_season_code(as_of: date | None = None) -> int:
     return listing_season_code_from_calendar_year(listing_calendar_year(as_of))
 
 
+def usfs_season_code_for_date(d: date) -> int:
+    """Map a calendar date to its USFS season code (July 1 start)."""
+    if d.month >= 7:
+        start_yy = d.year % 100
+    else:
+        start_yy = (d.year - 1) % 100
+    end_yy = (start_yy + 1) % 100
+    return int(f"{start_yy:02d}{end_yy:02d}")
+
+
 def season_codes_preceding_listing(anchor_season_code: int, n: int) -> list[int]:
     """
     USFS season codes for the ``n`` seasons immediately before ``anchor_season_code``.

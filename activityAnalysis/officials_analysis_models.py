@@ -99,6 +99,9 @@ class Officials(Base):
     qualifying_form_responses: Mapped[List['QualifyingOfficialFormResponse']] = relationship(
         'QualifyingOfficialFormResponse', back_populates='official'
     )
+    isu_seminars: Mapped[List['IsuOfficialSeminar']] = relationship(
+        'IsuOfficialSeminar', back_populates='official'
+    )
 
 
 class IsuOfficial(Base):
@@ -459,3 +462,53 @@ class QualifyingOfficialCompetitionAvailability(Base):
     competition_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     availability_code: Mapped[str] = mapped_column(Text)
     raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class IsuOfficialSeminar(Base):
+    """ISU seminar attendance for international listing requirement evaluation."""
+
+    __tablename__ = 'isu_official_seminar'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['official_id'],
+            ['officials_analysis.officials.id'],
+            name='isu_official_seminar_official_id_fkey',
+        ),
+        ForeignKeyConstraint(
+            ['appointment_type_id'],
+            ['officials_analysis.appointment_types.id'],
+            name='isu_official_seminar_appointment_type_id_fkey',
+        ),
+        ForeignKeyConstraint(
+            ['discipline_id'],
+            ['officials_analysis.disciplines.id'],
+            name='isu_official_seminar_discipline_id_fkey',
+        ),
+        PrimaryKeyConstraint('id', name='isu_official_seminar_pkey'),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    official_id: Mapped[int] = mapped_column(Integer)
+    appointment_type_id: Mapped[int] = mapped_column(Integer)
+    discipline_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    seminar_date: Mapped[datetime.date] = mapped_column(Date)
+    season_code: Mapped[int] = mapped_column(Integer)
+    in_person: Mapped[bool] = mapped_column(Boolean)
+    place: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    at_event: Mapped[bool] = mapped_column(Boolean, server_default=text('false'))
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+    last_modified: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+    official: Mapped['Officials'] = relationship('Officials', back_populates='isu_seminars')
+    appointment_type: Mapped['AppointmentTypes'] = relationship('AppointmentTypes')
+    discipline: Mapped[Optional['Disciplines']] = relationship('Disciplines')

@@ -27,6 +27,7 @@ from activityAnalysis.international_listing_seasons import (
     listing_season_code_from_calendar_year,
     listing_season_codes_for_projection,
     season_codes_preceding_listing,
+    usfs_season_code_for_date,
 )
 
 
@@ -107,6 +108,12 @@ def test_listing_calendar_year():
     assert listing_calendar_year(date(2026, 3, 1)) == 2026
     assert default_listing_season_code(date(2027, 8, 1)) == 2627
     assert default_listing_season_code(date(2028, 8, 1)) == 2728
+
+
+def test_usfs_season_code_for_date():
+    assert usfs_season_code_for_date(date(2025, 9, 1)) == 2526
+    assert usfs_season_code_for_date(date(2026, 6, 15)) == 2526
+    assert usfs_season_code_for_date(date(2026, 7, 1)) == 2627
 
 
 def test_filter_panel_to_season_codes():

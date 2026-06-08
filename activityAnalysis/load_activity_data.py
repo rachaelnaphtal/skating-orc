@@ -176,6 +176,13 @@ def get_engine():
     return db_engine
 
 
+def refresh_activity_engine() -> None:
+    """Drop cached activity engine after ``DATABASE_URL`` / secrets change."""
+    get_engine.cache_clear()
+    global engine
+    engine = get_engine()
+
+
 engine = get_engine()
 
 # competition_type.id — identifies US Championships competitions (find/create rows).

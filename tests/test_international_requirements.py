@@ -1066,8 +1066,102 @@ def test_idvo_first_promote_year_uses_current_listing_without_year_rules(monkeyp
     )
 
 
+def test_user_facing_requirement_label_strips_type_ids():
+    assert ir.user_facing_requirement_label(
+        "Referee in ≥2 international competitions (4 seasons; types 15–17)"
+    ) == "Referee in ≥2 international competitions (4 seasons)"
+    assert ir.user_facing_requirement_label(
+        "TC in ≥3 competitions incl. ≥1 International Competition (4 seasons; types 15-17)"
+    ) == "TC in ≥3 competitions incl. ≥1 International Competition (4 seasons)"
+
+
+def test_evaluate_seminar_count_and_alternatives():
+    seminars = pd.DataFrame(
+        [
+            {
+                "official_id": 1,
+                "appointment_type_id": 13,
+                "discipline_id": 9,
+                "season_code": 2526,
+                "in_person": True,
+            },
+            {
+                "official_id": 1,
+                "appointment_type_id": 13,
+                "discipline_id": 9,
+                "season_code": 2425,
+                "in_person": False,
+            },
+        ]
+    )
+    met, detail = ir._evaluate_seminar_count(
+        seminars,
+        {"in_person": True, "season_window": 4},
+        listing_season_code=2627,
+        min_value=1,
+    )
+    assert met
+    assert "1/1 in person" in detail
+
+    met_alt, _via, detail_alt = ir._evaluate_seminar_alternatives(
+        seminars,
+        {
+            "alternatives": [
+                {
+                    "label": "In-person (4 seasons)",
+                    "requirements": [{"in_person": True, "season_window": 4, "min": 1}],
+                },
+                {
+                    "label": "Online (2 seasons)",
+                    "requirements": [{"in_person": False, "season_window": 2, "min": 1}],
+                },
+            ]
+        },
+        listing_season_code=2627,
+    )
+    assert met_alt
+    assert "In-person (4 seasons)" in detail_alt
+
+    met_any, detail_any = ir._evaluate_seminar_count(
+        seminars,
+        {"season_window": 2},
+        listing_season_code=2627,
+        min_value=1,
+    )
+    assert met_any
+    assert "2/1 seminar" in detail_any
+
+    at_event_df = pd.DataFrame(
+        [
+            {
+                "official_id": 1,
+                "appointment_type_id": 15,
+                "discipline_id": 1,
+                "season_code": 2526,
+                "in_person": True,
+                "at_event": True,
+            }
+        ]
+    )
+    met_event, _via, detail_event = ir._evaluate_seminar_alternatives(
+        at_event_df,
+        {
+            "alternatives": [
+                {
+                    "label": "At competition",
+                    "requirements": [{"season_window": 2, "min": 1, "at_event": True}],
+                }
+            ]
+        },
+        listing_season_code=2627,
+    )
+    assert met_event
+    assert "at event" in detail_event
+
+
 if __name__ == "__main__":
     test_isu_season_codes_preceding_july1()
     test_listing_calendar_year()
     test_championship_or_olympic_detection()
+    test_evaluate_seminar_count_and_alternatives()
     print("ok")
