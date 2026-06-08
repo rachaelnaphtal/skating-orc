@@ -13,7 +13,7 @@ from datetime import date
 import pandas as pd
 
 REPORT_LISTING_SEASON_DEFAULT = 2627
-REPORT_LISTING_SEASON_OPTIONS: tuple[int, ...] = (2627, 2728)
+REPORT_LISTING_SEASON_OPTIONS: tuple[int, ...] = (2627, 2728,2829)
 REPORT_SEASON_WINDOW_OPTIONS: tuple[int, ...] = (2, 3, 4)
 REPORT_SEASON_WINDOW_DEFAULT = 4
 

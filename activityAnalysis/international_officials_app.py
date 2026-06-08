@@ -910,7 +910,7 @@ st.dataframe(
     width="stretch",
     hide_index=True,
     column_config={
-        "Official": st.column_config.TextColumn("Official", width="medium"),
+        "Official": st.column_config.TextColumn("Official", width="medium", pinned=True),
         "Member #": st.column_config.TextColumn("Member #", width="small"),
         "Appointment": st.column_config.TextColumn("Appointment", width="medium"),
         "Level": st.column_config.TextColumn(

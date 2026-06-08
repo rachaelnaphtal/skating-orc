@@ -38,6 +38,48 @@ def test_fsm_team_event_pdf_header_includes_discipline():
     )
 
 
+WTT_INDEX_HTML = """
+<table>
+<tr>
+  <td></td><td></td>
+  <td><a href="FSKXTEAM--------------------------_EntryListbyEvent.pdf">Team Entries (pdf)</a></td>
+  <td></td><td></td>
+</tr>
+<tr>
+  <td>Men</td><td>Short Program</td>
+  <td><a href="SEG001OF.htm">Panel of Judges</a></td>
+  <td><a href="SEG001.htm">Starting Order / Detailed Classification</a></td>
+  <td><a href="FSKXTEAM--------------QUAL0001MN--_JudgesDetailsperSkater.pdf">Judges Scores (pdf)</a></td>
+</tr>
+<tr>
+  <td>Women</td><td>Free Skating</td>
+  <td><a href="SEG004OF.htm">Panel of Judges</a></td>
+  <td><a href="SEG004.htm">Starting Order / Detailed Classification</a></td>
+  <td><a href="FSKXTEAM--------------FNL-0002LD--_JudgesDetailsperSkater.pdf">Judges Scores (pdf)</a></td>
+</tr>
+<tr>
+  <td>Ice Dance</td><td>Rhythm Dance</td>
+  <td><a href="SEG007OF.htm">Panel of Judges</a></td>
+  <td><a href="SEG007.htm">Starting Order / Detailed Classification</a></td>
+  <td><a href="FSKXTEAM--------------QUAL0004DC--_JudgesDetailsperSkater.pdf">Judges Scores (pdf)</a></td>
+</tr>
+</table>
+"""
+
+
+def test_iter_fsm_index_cover_labels_world_team_trophy():
+    from downloadResults import iter_fsm_leaderboard_panel_href_and_cover_event
+
+    covers = [
+        c for _, c in iter_fsm_leaderboard_panel_href_and_cover_event(WTT_INDEX_HTML)
+    ]
+    assert covers == [
+        "Men - Short Program",
+        "Women - Free Skating",
+        "Ice Dance - Rhythm Dance",
+    ]
+
+
 def test_iter_fsm_index_cover_labels():
     from downloadResults import iter_fsm_leaderboard_panel_href_and_cover_event, get_page_contents
 

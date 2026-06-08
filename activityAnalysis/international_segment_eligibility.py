@@ -12,6 +12,10 @@ NOC codes are parsed from the last token of ``public.skater.name`` when it is th
 uppercase letters (common on ISU detailed results, e.g. ``Boglárka ZHANG HUN`` or
 ``Haydenettes USA``). When nations cannot be verified from names, entry counts still
 apply; member participation is marked unverified rather than failing the segment.
+
+Segments with **no** ``skater_segment`` rows are treated as hand-entered for
+international service tracking (officials/panel only, no scraped results) and pass
+Rule 411.
 """
 
 from __future__ import annotations
@@ -120,6 +124,32 @@ def min_entries_for_discipline(category: DisciplineCategory) -> int | None:
     return RULE411_MIN_ENTRIES.get(category)
 
 
+_HAND_ENTERED_SEGMENT_DETAIL = (
+    "Hand-entered segment (no skater results loaded); counts for international service"
+)
+
+
+def _hand_entered_segment_rule411_stats(
+    discipline_category: DisciplineCategory,
+    *,
+    segment_id: int = -1,
+) -> SegmentRule411Stats:
+    """Segments with zero entries are manually tracked; pass Rule 411."""
+    return SegmentRule411Stats(
+        segment_id=segment_id,
+        entry_count=0,
+        distinct_noc_count=0,
+        nocs_parsed_from_entries=0,
+        discipline_category=discipline_category,
+        min_entries_required=min_entries_for_discipline(discipline_category),
+        meets_entry_minimum=True,
+        meets_member_minimum=None,
+        eligible=True,
+        status_label="Yes",
+        detail=_HAND_ENTERED_SEGMENT_DETAIL,
+    )
+
+
 def _evaluate_synchronized_rule411(
     *,
     entry_count: int,
@@ -127,6 +157,8 @@ def _evaluate_synchronized_rule411(
     nocs_parsed_from_entries: int,
 ) -> SegmentRule411Stats:
     """Synchronized: two ISU Member countries only (no team-count minimum)."""
+    if entry_count == 0:
+        return _hand_entered_segment_rule411_stats("synchronized")
     if nocs_parsed_from_entries == 0:
         return SegmentRule411Stats(
             segment_id=-1,
@@ -187,6 +219,8 @@ def evaluate_segment_rule411(
     nocs_parsed_from_entries: int,
     discipline_category: DisciplineCategory,
 ) -> SegmentRule411Stats:
+    if entry_count == 0:
+        return _hand_entered_segment_rule411_stats(discipline_category)
     if discipline_category == "synchronized":
         return _evaluate_synchronized_rule411(
             entry_count=entry_count,
@@ -295,9 +329,11 @@ def load_segment_rule411_stats(segment_ids: list[int]) -> pd.DataFrame:
         empty_stats["rule411_distinct_noc_count"] = 0
         empty_stats["rule411_nocs_parsed"] = 0
         empty_stats["rule411_discipline_category"] = "other"
-        empty_stats["rule411_eligible"] = False
-        empty_stats["rule411_status"] = "No data"
-        empty_stats["rule411_detail"] = "No skater entries found for segment"
+        empty_stats["rule411_meets_entry_minimum"] = True
+        empty_stats["rule411_meets_member_minimum"] = pd.NA
+        empty_stats["rule411_eligible"] = True
+        empty_stats["rule411_status"] = "Yes"
+        empty_stats["rule411_detail"] = _HAND_ENTERED_SEGMENT_DETAIL
         return empty_stats[cols]
 
     names_by_segment: dict[int, list[str]] = {}
@@ -381,9 +417,16 @@ def enrich_panel_with_rule411_eligibility(panel: pd.DataFrame) -> pd.DataFrame:
             out.at[idx, "rule411_detail"] = "Missing segment id"
             continue
         if sid not in stats_by_segment.index:
-            out.at[idx, "rule411_eligible"] = False
-            out.at[idx, "rule411_status"] = "No data"
-            out.at[idx, "rule411_detail"] = "No skater entries found for segment"
+            category = discipline_category_from_segment(
+                segment_discipline=row.get("segment_discipline"),
+                segment_discipline_type_id=row.get("segment_discipline_type_id"),
+            )
+            manual = _hand_entered_segment_rule411_stats(category, segment_id=sid)
+            out.at[idx, "rule411_entry_count"] = manual.entry_count
+            out.at[idx, "rule411_distinct_noc_count"] = manual.distinct_noc_count
+            out.at[idx, "rule411_status"] = manual.status_label
+            out.at[idx, "rule411_detail"] = manual.detail
+            out.at[idx, "rule411_eligible"] = manual.eligible
             continue
         base = stats_by_segment.loc[sid]
         category = discipline_category_from_segment(

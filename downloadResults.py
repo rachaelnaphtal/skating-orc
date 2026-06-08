@@ -279,6 +279,8 @@ def _iter_fsm_index_panel_rows(page_contents: str):
         segment_name = tds[1].get_text(strip=True)
         # Team Event rows: col 0 is e.g. Men Single Skating, col 1 is Short Program;
         # category from the CAT row is Team Event (not the same as discipline_col).
+        # World Team Trophy and similar pages list discipline in col 0 with no per-discipline
+        # Entries row (only a single Team Entries link), so current_category stays empty.
         if (
             current_category
             and discipline_col
@@ -288,6 +290,8 @@ def _iter_fsm_index_panel_rows(page_contents: str):
             cover = f"{current_category} - {discipline_col} - {segment_name}"
         elif current_category and segment_name:
             cover = f"{current_category} - {segment_name}"
+        elif discipline_col and segment_name:
+            cover = f"{discipline_col} - {segment_name}"
         else:
             cover = segment_name or current_category or discipline_col
         yield {

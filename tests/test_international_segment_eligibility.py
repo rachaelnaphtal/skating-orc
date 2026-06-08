@@ -84,6 +84,19 @@ def test_evaluate_segment_rule411_singles_fail_entries():
     assert "5/6" in stats.detail
 
 
+def test_evaluate_segment_rule411_zero_entries_hand_entered():
+    for category in ("singles", "pairs", "dance", "synchronized"):
+        stats = evaluate_segment_rule411(
+            entry_count=0,
+            distinct_noc_count=0,
+            nocs_parsed_from_entries=0,
+            discipline_category=category,
+        )
+        assert stats.eligible
+        assert stats.status_label == "Yes"
+        assert "Hand-entered" in stats.detail
+
+
 def test_evaluate_segment_rule411_unverified_nations():
     stats = evaluate_segment_rule411(
         entry_count=8,
