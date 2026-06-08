@@ -454,7 +454,7 @@ def _pdf_short_discipline(value: Any) -> str:
         return ""
     lower = text.lower()
     if "synch" in lower:
-        return "Synch"
+        return "SYS"
     if "single" in lower:
         return "Singles"
     if "pair" in lower:

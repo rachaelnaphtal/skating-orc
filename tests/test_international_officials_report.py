@@ -10,6 +10,7 @@ import pytest
 
 from activityAnalysis.international_officials_report import (
     AppointmentDetailContext,
+    _pdf_short_discipline,
     _pdf_text,
     appointment_detail_pdf_filename,
     build_appointment_detail_pdf,
@@ -61,6 +62,11 @@ def _minimal_context(**overrides) -> AppointmentDetailContext:
     )
     base.update(overrides)
     return AppointmentDetailContext(**base)
+
+
+def test_pdf_short_discipline_uses_sys_for_synchronized():
+    assert _pdf_short_discipline("Synchronized") == "SYS"
+    assert _pdf_short_discipline("Synchronized Skating") == "SYS"
 
 
 def test_pdf_text_replaces_unicode_for_latin1():

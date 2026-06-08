@@ -1129,7 +1129,8 @@ def test_evaluate_seminar_count_and_alternatives():
         min_value=1,
     )
     assert met_any
-    assert "2/1 seminar" in detail_any
+    assert detail_any == "2/1 seminar (25-26, 24-25)"
+    assert "seminar seminar" not in detail_any
 
     at_event_df = pd.DataFrame(
         [

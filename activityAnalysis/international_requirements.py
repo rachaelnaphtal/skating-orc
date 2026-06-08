@@ -2107,10 +2107,13 @@ def _evaluate_seminar_count(
     actual = len(matched)
     met = actual >= int(min_value)
     seasons_label = ", ".join(format_usfs_season_code(c) for c in codes)
-    detail = (
-        f"{actual}/{min_value} {_seminar_delivery_label(in_person, at_event=at_event)}"
-        f" seminar{'s' if min_value != 1 else ''} ({seasons_label})"
-    )
+    delivery = _seminar_delivery_label(in_person, at_event=at_event)
+    plural = "" if min_value == 1 else "s"
+    if delivery == "seminar":
+        kind = f"seminar{plural}"
+    else:
+        kind = f"{delivery} seminar{plural}"
+    detail = f"{actual}/{min_value} {kind} ({seasons_label})"
     return met, detail
 
 
