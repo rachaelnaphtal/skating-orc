@@ -1075,6 +1075,75 @@ def test_user_facing_requirement_label_strips_type_ids():
     ) == "TC in ≥3 competitions incl. ≥1 International Competition (4 seasons)"
 
 
+def test_seminar_requirement_status_from_evaluation():
+    no_rules = ir.RequirementEvaluation(
+        rule_set_id=1,
+        isu_rule_ref="412.2.b",
+        purpose="maintain",
+        label="Judge maintain",
+        listing_tier="international",
+        season_window=3,
+        season_codes=[2425, 2526],
+        meets=True,
+        summary_note="Meets requirements",
+        rule_results=[
+            ir.RuleCheckResult(
+                metric="competition_count",
+                display_label="Competitions",
+                required=2,
+                actual=3,
+                met=True,
+            )
+        ],
+    )
+    assert ir.seminar_requirement_status_from_evaluation(no_rules) == ""
+
+    seminar_met = ir.RequirementEvaluation(
+        rule_set_id=2,
+        isu_rule_ref="412.2.b",
+        purpose="maintain",
+        label="Referee maintain",
+        listing_tier="international",
+        season_window=4,
+        season_codes=[2223, 2324, 2425, 2526],
+        meets=True,
+        summary_note="Meets requirements",
+        rule_results=[
+            ir.RuleCheckResult(
+                metric="seminar_alternatives",
+                display_label="Seminar",
+                required=1,
+                actual=1,
+                met=True,
+            )
+        ],
+    )
+    assert ir.seminar_requirement_status_from_evaluation(seminar_met) == "Yes"
+
+    seminar_unmet = ir.RequirementEvaluation(
+        rule_set_id=3,
+        isu_rule_ref="412.4.b",
+        purpose="promote",
+        label="Referee promote",
+        listing_tier="international",
+        season_window=4,
+        season_codes=[2223, 2324, 2425, 2526],
+        meets=False,
+        summary_note="Need seminar",
+        rule_results=[
+            ir.RuleCheckResult(
+                metric="seminar_count",
+                display_label="In-person seminar",
+                required=1,
+                actual=0,
+                met=False,
+            )
+        ],
+    )
+    assert ir.seminar_requirement_status_from_evaluation(seminar_unmet) == "No"
+    assert ir.seminar_requirement_status_from_evaluation(None) == ""
+
+
 def test_evaluate_seminar_count_and_alternatives():
     seminars = pd.DataFrame(
         [

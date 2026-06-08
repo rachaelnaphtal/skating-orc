@@ -38,6 +38,7 @@ try:
         season_year_sql_predicate,
     )
     from activityAnalysis.international_official_seminars import (
+        batch_seminars_for_appointment_keys,
         filter_seminars_for_appointment,
         filter_seminars_to_season_codes,
         load_official_seminars_bulk,
@@ -70,6 +71,7 @@ except ModuleNotFoundError:
         season_year_sql_predicate,
     )
     from international_official_seminars import (
+        batch_seminars_for_appointment_keys,
         filter_seminars_for_appointment,
         filter_seminars_to_season_codes,
         load_official_seminars_bulk,
@@ -2046,7 +2048,10 @@ def _seminars_for_rule_evaluation(
     appointment_type_id: int,
     directory_discipline_id: Any,
     seminars_by_official: dict[int, pd.DataFrame] | None = None,
+    seminars_for_appointment: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    if seminars_for_appointment is not None:
+        return seminars_for_appointment
     if seminars_bulk is not None:
         if seminars_by_official is not None:
             sub = seminars_by_official.get(int(official_id), seminars_bulk.iloc[0:0])
@@ -2233,6 +2238,7 @@ def _evaluate_rule(
     panel_by_official: dict[int, pd.DataFrame] | None = None,
     seminars_bulk: pd.DataFrame | None = None,
     seminars_by_official: dict[int, pd.DataFrame] | None = None,
+    seminars_for_appointment: pd.DataFrame | None = None,
 ) -> RuleCheckResult:
     metric = str(rule_row["metric"])
     min_value = int(rule_row["min_value"])
@@ -2249,6 +2255,7 @@ def _evaluate_rule(
             appointment_type_id=appointment_type_id,
             directory_discipline_id=directory_discipline_id,
             seminars_by_official=seminars_by_official,
+            seminars_for_appointment=seminars_for_appointment,
         )
         if metric == "seminar_count":
             met, detail = _evaluate_seminar_count(
@@ -2512,6 +2519,7 @@ def evaluate_requirements_for_appointment(
     panel_by_official: dict[int, pd.DataFrame] | None = None,
     seminars_bulk: pd.DataFrame | None = None,
     seminars_by_official: dict[int, pd.DataFrame] | None = None,
+    seminars_for_appointment: pd.DataFrame | None = None,
     appointment_contexts: dict[tuple[int, int, int | None], dict[str, Any]] | None = None,
     appointment_rows_by_official: dict[int, list[dict[str, Any]]] | None = None,
     isu_listing_keys: set[tuple[int, int, int | None]] | None = None,
@@ -2614,6 +2622,7 @@ def evaluate_requirements_for_appointment(
                     panel_by_official=panel_by_official,
                     seminars_bulk=seminars_bulk,
                     seminars_by_official=seminars_by_official,
+                    seminars_for_appointment=seminars_for_appointment,
                 )
             )
 
@@ -2644,6 +2653,90 @@ def evaluate_requirements_for_appointment(
     return out
 
 
+def _summary_appointment_keys(
+    summary: pd.DataFrame,
+) -> list[tuple[int, int, int | None]]:
+    keys: list[tuple[int, int, int | None]] = []
+    seen: set[tuple[int, int, int | None]] = set()
+    for row in summary.itertuples(index=False):
+        key = (
+            int(row.official_id),
+            int(row.appointment_type_id),
+            _nullable_int_for_sql(row.discipline_id),
+        )
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def _seminar_status_for_appointment(
+    official_id: int,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    purpose: Purpose,
+    *,
+    listing_tier: str,
+    listing_season_code: int,
+    purpose_rules: pd.DataFrame,
+    seminars_for_appointment: pd.DataFrame,
+    appt_ctx: dict[str, Any],
+    appointment_rows: list[dict[str, Any]],
+    international_level_id: int,
+    isu_level_id: int,
+    isu_listing_keys: set[tuple[int, int, int | None]] | None,
+) -> str:
+    """Evaluate only seminar rules for one summary row (no panel activity queries)."""
+    if purpose_rules.empty:
+        return ""
+
+    appointment_level_id = appt_ctx.get("level_id")
+    for rule_set_id, group in purpose_rules.groupby("rule_set_id", sort=False):
+        head = group.iloc[0]
+        if str(head["listing_tier"]) != listing_tier:
+            continue
+        applies, _ = _rule_set_applies(
+            head,
+            appointment_type_id=appointment_type_id,
+            directory_discipline_id=directory_discipline_id,
+            appointment_level_id=appointment_level_id,
+            international_level_id=international_level_id,
+            isu_level_id=isu_level_id,
+            purpose=purpose,
+            official_id=official_id,
+            isu_listing_keys=isu_listing_keys,
+        )
+        if not applies:
+            continue
+
+        seminar_rows = group.loc[group["metric"].isin(_SEMINAR_METRICS)]
+        if seminar_rows.empty:
+            return ""
+
+        season_window = int(head["season_window"])
+        season_codes = season_codes_preceding_listing(listing_season_code, season_window)
+        rule_results: list[RuleCheckResult] = []
+        for _, rule_row in seminar_rows.sort_values("rule_sort_order").iterrows():
+            rule_results.append(
+                _evaluate_rule(
+                    rule_row,
+                    official_id=official_id,
+                    appointment_type_id=appointment_type_id,
+                    directory_discipline_id=directory_discipline_id,
+                    season_codes=season_codes,
+                    listing_season_code=listing_season_code,
+                    appt_ctx=appt_ctx,
+                    appointment_rows=appointment_rows,
+                    international_level_id=int(international_level_id),
+                    isu_level_id=int(isu_level_id),
+                    seminars_for_appointment=seminars_for_appointment,
+                )
+            )
+        return "Yes" if all(r.met for r in rule_results) else "No"
+
+    return ""
+
+
 def _primary_requirement_evaluation(
     evals: list[RequirementEvaluation],
 ) -> RequirementEvaluation | None:
@@ -2654,18 +2747,38 @@ def _primary_requirement_evaluation(
     return applicable[0] if applicable else evals[0]
 
 
+_SEMINAR_METRICS = frozenset({"seminar_count", "seminar_alternatives"})
+
+
+def seminar_requirement_status_from_evaluation(
+    evaluation: RequirementEvaluation | None,
+) -> str:
+    """``Yes`` / ``No`` when seminar rules exist; empty when none apply."""
+    if evaluation is None or evaluation.not_applicable:
+        return ""
+    seminar_rules = [
+        r for r in evaluation.rule_results if r.metric in _SEMINAR_METRICS
+    ]
+    if not seminar_rules:
+        return ""
+    return "Yes" if all(r.met for r in seminar_rules) else "No"
+
+
 def evaluate_requirements_summary_df(
     summary: pd.DataFrame,
     *,
     panel_bulk: pd.DataFrame | None = None,
     seminars_bulk: pd.DataFrame | None = None,
     listing_season_code: int | None = None,
+    include_maintain_promote: bool = True,
+    include_seminar_columns: bool = True,
 ) -> pd.DataFrame:
     """
-    Add maintain / promote columns to an international activity summary DataFrame.
+    Add maintain / promote and/or seminar summary columns.
+
     Expects columns: official_id, appointment_type_id, discipline_id.
     """
-    if summary.empty:
+    if summary.empty or not (include_maintain_promote or include_seminar_columns):
         return summary
 
     listing_season_code = (
@@ -2674,23 +2787,44 @@ def evaluate_requirements_summary_df(
         else REPORT_LISTING_SEASON_DEFAULT
     )
     rules_df = _load_rule_sets()
-    official_ids = summary["official_id"].astype(int).unique().tolist()
-    panel = panel_bulk if panel_bulk is not None else load_international_panel_segments_bulk(official_ids)
-    panel_by_official: dict[int, pd.DataFrame] | None = None
-    if panel is not None and not panel.empty:
-        panel_by_official = {
-            int(oid): group for oid, group in panel.groupby("official_id", sort=False)
-        }
-    seminars = (
-        seminars_bulk
-        if seminars_bulk is not None
-        else load_official_seminars_bulk(official_ids)
+    maintain_rules = (
+        rules_df.loc[rules_df["purpose"] == "maintain"]
+        if not rules_df.empty
+        else rules_df
     )
-    seminars_by_official: dict[int, pd.DataFrame] | None = None
-    if seminars is not None and not seminars.empty:
-        seminars_by_official = {
-            int(oid): group for oid, group in seminars.groupby("official_id", sort=False)
-        }
+    promote_rules = (
+        rules_df.loc[rules_df["purpose"] == "promote"]
+        if not rules_df.empty
+        else rules_df
+    )
+
+    official_ids = summary["official_id"].astype(int).unique().tolist()
+    panel: pd.DataFrame | None = None
+    panel_by_official: dict[int, pd.DataFrame] | None = None
+    if include_maintain_promote:
+        panel = (
+            panel_bulk
+            if panel_bulk is not None
+            else load_international_panel_segments_bulk(official_ids)
+        )
+        if panel is not None and not panel.empty:
+            panel_by_official = {
+                int(oid): group for oid, group in panel.groupby("official_id", sort=False)
+            }
+
+    seminars = pd.DataFrame()
+    seminars_by_key: dict[tuple[int, int, int | None], pd.DataFrame] = {}
+    if include_seminar_columns or include_maintain_promote:
+        seminars = (
+            seminars_bulk
+            if seminars_bulk is not None
+            else load_official_seminars_bulk(official_ids)
+        )
+        seminars_by_key = batch_seminars_for_appointment_keys(
+            seminars,
+            _summary_appointment_keys(summary),
+        )
+
     appointment_contexts = _batch_appointment_contexts(official_ids)
     appointment_rows_by_official = load_official_international_appointment_rows(
         official_ids
@@ -2701,24 +2835,13 @@ def evaluate_requirements_summary_df(
         international_level_id = _international_level_id(session)
         isu_level_id = _isu_level_id(session)
 
-    batch_kwargs = {
-        "listing_season_code": listing_season_code,
-        "rules_df": rules_df,
-        "panel_bulk": panel,
-        "panel_by_official": panel_by_official,
-        "seminars_bulk": seminars,
-        "seminars_by_official": seminars_by_official,
-        "appointment_contexts": appointment_contexts,
-        "appointment_rows_by_official": appointment_rows_by_official,
-        "isu_listing_keys": isu_listing_keys,
-        "international_level_id": international_level_id,
-        "isu_level_id": isu_level_id,
-    }
-
+    empty_seminars = seminars.iloc[0:0] if not seminars.empty else seminars
     maintain_notes: list[str] = []
     maintain_meets: list[str] = []
     promote_notes: list[str] = []
     promote_meets: list[str] = []
+    seminar_maintain: list[str] = []
+    seminar_promote: list[str] = []
 
     for row in summary.itertuples(index=False):
         oid = int(row.official_id)
@@ -2726,63 +2849,166 @@ def evaluate_requirements_summary_df(
         disc = _nullable_int_for_sql(row.discipline_id)
         appt_level = getattr(row, "appointment_level", "") or ""
         appt_level_id = _nullable_int_for_sql(getattr(row, "appointment_level_id", None))
-
-        maintain_evals = evaluate_requirements_for_appointment(
-            oid, atid, disc, "maintain", **batch_kwargs
+        appt_key = (oid, atid, disc)
+        seminars_for_appt = seminars_by_key.get(appt_key, empty_seminars)
+        appt_ctx = _appointment_context_from_batch(
+            appointment_contexts, oid, atid, disc
         )
+        appointment_rows = appointment_rows_by_official.get(oid, [])
         listing_tier = directory_listing_tier_for_level(
             appt_level,
             level_id=appt_level_id,
             isu_level_id=isu_level_id,
             international_level_id=international_level_id,
         )
-        tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
-        tier_applicable = [e for e in tier_rules if not e.not_applicable]
 
-        if tier_applicable:
-            best = tier_applicable[0]
-            maintain_meets.append("Yes" if best.meets else "No")
-            maintain_notes.append(best.summary_note)
-        elif tier_rules:
-            best = tier_rules[0]
-            maintain_meets.append("N/A")
-            maintain_notes.append(best.not_applicable_reason or best.summary_note)
-        else:
-            maintain_meets.append("N/A")
-            maintain_notes.append("")
-
-        if not should_evaluate_promote_requirements(
-            oid,
-            atid,
-            disc,
-            appt_level,
-            appt_level_id,
-            isu_level_id=isu_level_id,
-            isu_listing_keys=isu_listing_keys,
-        ):
-            promote_meets.append("")
-            promote_notes.append("")
-        else:
-            promote_evals = evaluate_requirements_for_appointment(
-                oid, atid, disc, "promote", **batch_kwargs
+        if include_maintain_promote:
+            maintain_evals = evaluate_requirements_for_appointment(
+                oid,
+                atid,
+                disc,
+                "maintain",
+                listing_season_code=listing_season_code,
+                rules_df=maintain_rules,
+                panel_bulk=panel,
+                panel_by_official=panel_by_official,
+                seminars_bulk=seminars,
+                seminars_for_appointment=seminars_for_appt,
+                appointment_contexts=appointment_contexts,
+                appointment_rows_by_official=appointment_rows_by_official,
+                isu_listing_keys=isu_listing_keys,
+                international_level_id=international_level_id,
+                isu_level_id=isu_level_id,
             )
-            promote_primary = _primary_requirement_evaluation(promote_evals)
-            if promote_primary is not None and not promote_primary.not_applicable:
-                promote_meets.append("Yes" if promote_primary.meets else "No")
-                promote_notes.append(promote_primary.summary_note)
+            tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
+            tier_applicable = [e for e in tier_rules if not e.not_applicable]
+
+            if tier_applicable:
+                best = tier_applicable[0]
+                maintain_meets.append("Yes" if best.meets else "No")
+                maintain_notes.append(best.summary_note)
+                if include_seminar_columns:
+                    seminar_maintain.append(
+                        seminar_requirement_status_from_evaluation(best)
+                    )
+            elif tier_rules:
+                best = tier_rules[0]
+                maintain_meets.append("N/A")
+                maintain_notes.append(best.not_applicable_reason or best.summary_note)
+                if include_seminar_columns:
+                    seminar_maintain.append("")
             else:
-                promote_meets.append("N/A")
-                promote_notes.append(
-                    promote_primary.not_applicable_reason or promote_primary.summary_note
-                    if promote_primary is not None
-                    else ""
+                maintain_meets.append("N/A")
+                maintain_notes.append("")
+                if include_seminar_columns:
+                    seminar_maintain.append("")
+        elif include_seminar_columns:
+            seminar_maintain.append(
+                _seminar_status_for_appointment(
+                    oid,
+                    atid,
+                    disc,
+                    "maintain",
+                    listing_tier=listing_tier,
+                    listing_season_code=listing_season_code,
+                    purpose_rules=maintain_rules,
+                    seminars_for_appointment=seminars_for_appt,
+                    appt_ctx=appt_ctx,
+                    appointment_rows=appointment_rows,
+                    international_level_id=int(international_level_id),
+                    isu_level_id=int(isu_level_id),
+                    isu_listing_keys=isu_listing_keys,
+                )
+            )
+
+        if include_maintain_promote:
+            if not should_evaluate_promote_requirements(
+                oid,
+                atid,
+                disc,
+                appt_level,
+                appt_level_id,
+                isu_level_id=isu_level_id,
+                isu_listing_keys=isu_listing_keys,
+            ):
+                promote_meets.append("")
+                promote_notes.append("")
+                if include_seminar_columns:
+                    seminar_promote.append("")
+            else:
+                promote_evals = evaluate_requirements_for_appointment(
+                    oid,
+                    atid,
+                    disc,
+                    "promote",
+                    listing_season_code=listing_season_code,
+                    rules_df=promote_rules,
+                    panel_bulk=panel,
+                    panel_by_official=panel_by_official,
+                    seminars_bulk=seminars,
+                    seminars_for_appointment=seminars_for_appt,
+                    appointment_contexts=appointment_contexts,
+                    appointment_rows_by_official=appointment_rows_by_official,
+                    isu_listing_keys=isu_listing_keys,
+                    international_level_id=international_level_id,
+                    isu_level_id=isu_level_id,
+                )
+                promote_primary = _primary_requirement_evaluation(promote_evals)
+                if promote_primary is not None and not promote_primary.not_applicable:
+                    promote_meets.append("Yes" if promote_primary.meets else "No")
+                    promote_notes.append(promote_primary.summary_note)
+                    if include_seminar_columns:
+                        seminar_promote.append(
+                            seminar_requirement_status_from_evaluation(promote_primary)
+                        )
+                else:
+                    promote_meets.append("N/A")
+                    promote_notes.append(
+                        promote_primary.not_applicable_reason or promote_primary.summary_note
+                        if promote_primary is not None
+                        else ""
+                    )
+                    if include_seminar_columns:
+                        seminar_promote.append("")
+        elif include_seminar_columns:
+            if not should_evaluate_promote_requirements(
+                oid,
+                atid,
+                disc,
+                appt_level,
+                appt_level_id,
+                isu_level_id=isu_level_id,
+                isu_listing_keys=isu_listing_keys,
+            ):
+                seminar_promote.append("")
+            else:
+                seminar_promote.append(
+                    _seminar_status_for_appointment(
+                        oid,
+                        atid,
+                        disc,
+                        "promote",
+                        listing_tier=listing_tier,
+                        listing_season_code=listing_season_code,
+                        purpose_rules=promote_rules,
+                        seminars_for_appointment=seminars_for_appt,
+                        appt_ctx=appt_ctx,
+                        appointment_rows=appointment_rows,
+                        international_level_id=int(international_level_id),
+                        isu_level_id=int(isu_level_id),
+                        isu_listing_keys=isu_listing_keys,
+                    )
                 )
 
     out = summary.copy()
-    out["maintain"] = maintain_meets
-    out["maintain_note"] = maintain_notes
-    out["promote"] = promote_meets
-    out["promote_note"] = promote_notes
+    if include_maintain_promote:
+        out["maintain"] = maintain_meets
+        out["maintain_note"] = maintain_notes
+        out["promote"] = promote_meets
+        out["promote_note"] = promote_notes
+    if include_seminar_columns:
+        out["seminar_maintain"] = seminar_maintain
+        out["seminar_promote"] = seminar_promote
     return out
 
 

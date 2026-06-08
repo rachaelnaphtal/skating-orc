@@ -167,7 +167,8 @@ def _load_summary(
     level_id: int | None,
     official_id: int | None,
     active_only: bool,
-    include_requirements: bool,
+    include_maintain_promote: bool,
+    include_seminar_columns: bool,
     listing_season_code: int,
     report_season_window: int,
 ):
@@ -211,11 +212,13 @@ def _load_summary(
         summary = enrich_summary_with_promote_first_eligible(
             summary, listing_season_code=listing_season_code
         )
-    if include_requirements and not summary.empty:
+    if (include_maintain_promote or include_seminar_columns) and not summary.empty:
         summary = evaluate_requirements_summary_df(
             summary,
-            panel_bulk=panel,
+            panel_bulk=panel if include_maintain_promote else None,
             listing_season_code=listing_season_code,
+            include_maintain_promote=include_maintain_promote,
+            include_seminar_columns=include_seminar_columns,
         )
     return summary, report_season_codes
 
@@ -366,6 +369,7 @@ def _render_appointment_detail_from_query_params() -> bool:
         params["official_id"],
         active_only,
         False,
+        False,
         listing_season_code,
         report_season_window,
     )
@@ -436,6 +440,10 @@ if query_params_changed(_INTL_QP_FLAG):
         apply_bool_param("activity_detail", "intl_show_activity_detail")
     elif qp_get("scope_counts") is not None:
         apply_bool_param("scope_counts", "intl_show_activity_detail")
+    if qp_get("sem_maintain") is not None:
+        apply_bool_param("sem_maintain", "intl_show_seminar_maintain")
+    if qp_get("sem_promote") is not None:
+        apply_bool_param("sem_promote", "intl_show_seminar_promote")
     level_qp = qp_get_int("level")
     if level_qp is not None:
         st.session_state["intl_level_pick"] = level_qp
@@ -467,6 +475,14 @@ if "intl_show_activity_detail" not in st.session_state:
         st.session_state["intl_show_activity_detail"] = qp_get("scope_counts") == "1"
     else:
         st.session_state["intl_show_activity_detail"] = False
+if "intl_show_seminar_maintain" not in st.session_state:
+    st.session_state["intl_show_seminar_maintain"] = (
+        qp_get("sem_maintain") == "1" if qp_get("sem_maintain") is not None else False
+    )
+if "intl_show_seminar_promote" not in st.session_state:
+    st.session_state["intl_show_seminar_promote"] = (
+        qp_get("sem_promote") == "1" if qp_get("sem_promote") is not None else False
+    )
 
 view_mode = st.sidebar.radio(
     "View",
@@ -522,6 +538,30 @@ show_activity_detail = st.sidebar.checkbox(
     ),
 )
 
+show_seminar_maintain = st.sidebar.checkbox(
+    "Seminar maintain column",
+    key="intl_show_seminar_maintain",
+    disabled=_on_detail_page,
+    help=(
+        "Adds a column showing whether seminar maintain requirements are met. "
+        "Empty when no seminar requirement applies."
+        if not _on_detail_page
+        else "Seminar columns are only shown on the summary table."
+    ),
+)
+
+show_seminar_promote = st.sidebar.checkbox(
+    "Seminar promote column",
+    key="intl_show_seminar_promote",
+    disabled=_on_detail_page,
+    help=(
+        "Adds a column showing whether seminar promote requirements are met. "
+        "Empty when no seminar requirement applies."
+        if not _on_detail_page
+        else "Seminar columns are only shown on the summary table."
+    ),
+)
+
 listing_season_code = st.sidebar.selectbox(
     "Listing season",
     options=list(REPORT_LISTING_SEASON_OPTIONS),
@@ -556,6 +596,8 @@ sync_query_params(
     req="1" if include_requirements else "0",
     active="1" if active_only else "0",
     activity_detail="1" if show_activity_detail else "0",
+    sem_maintain="1" if show_seminar_maintain else "0",
+    sem_promote="1" if show_seminar_promote else "0",
 )
 
 if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
@@ -698,6 +740,7 @@ with st.spinner("Loading activity..."):
         official_id,
         active_only,
         include_requirements,
+        show_seminar_maintain or show_seminar_promote,
         int(listing_season_code),
         int(report_season_window),
     )
@@ -825,6 +868,8 @@ summary_display = summary.rename(
         "maintain_note": "Maintain detail",
         "promote": "Promote",
         "promote_note": "Promote detail",
+        "seminar_maintain": "Seminar maintain",
+        "seminar_promote": "Seminar promote",
     }
 )
 for col in (_age_col_label, _yrs_in_grade_col_label):
@@ -900,6 +945,16 @@ show_cols = [
                 "Promote detail",
             ]
             if include_requirements
+            else []
+        ),
+        *(
+            ["Seminar maintain"]
+            if show_seminar_maintain
+            else []
+        ),
+        *(
+            ["Seminar promote"]
+            if show_seminar_promote
             else []
         ),
         "Report",
@@ -999,6 +1054,22 @@ st.dataframe(
         "Promote detail": st.column_config.TextColumn(
             "Promote detail",
             width="large",
+        ),
+        "Seminar maintain": st.column_config.TextColumn(
+            "Seminar maintain",
+            help=(
+                "Whether seminar maintain requirements are met for this appointment. "
+                "Blank when no seminar requirement applies."
+            ),
+            width="small",
+        ),
+        "Seminar promote": st.column_config.TextColumn(
+            "Seminar promote",
+            help=(
+                "Whether seminar promote requirements are met for this appointment. "
+                "Blank when no seminar requirement applies."
+            ),
+            width="small",
         ),
         "Report": st.column_config.LinkColumn(
             "Report",

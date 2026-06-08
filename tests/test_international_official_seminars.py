@@ -13,6 +13,7 @@ from activityAnalysis.international_official_seminars import (
     DISCIPLINE_ID_PAIRS,
     DISCIPLINE_ID_SINGLES,
     INTERNATIONAL_TECHNICAL_CONTROLLER_APPOINTMENT_TYPE_ID,
+    batch_seminars_for_appointment_keys,
     filter_seminars_for_appointment,
     filter_seminars_to_season_codes,
     seminar_discipline_matches,
@@ -105,6 +106,42 @@ def test_filter_seminars_for_appointment_and_season_window():
     )
     assert len(at_event) == 1
     assert int(at_event.iloc[0]["id"]) == 3
+
+
+def test_batch_seminars_for_appointment_keys_reuses_filtered_rows():
+    seminars = pd.DataFrame(
+        [
+            {
+                "id": 1,
+                "official_id": 10,
+                "appointment_type_id": 13,
+                "discipline_id": 9,
+                "seminar_date": date(2025, 10, 1),
+                "season_code": 2526,
+                "in_person": True,
+                "place": "Colorado Springs",
+                "at_event": False,
+                "notes": None,
+            },
+            {
+                "id": 2,
+                "official_id": 11,
+                "appointment_type_id": 13,
+                "discipline_id": 4,
+                "seminar_date": date(2025, 10, 1),
+                "season_code": 2526,
+                "in_person": True,
+                "place": "Montreal",
+                "at_event": False,
+                "notes": None,
+            },
+        ]
+    )
+    keys = [(10, 13, 9), (10, 13, 9), (11, 13, 4)]
+    batched = batch_seminars_for_appointment_keys(seminars, keys)
+    assert len(batched) == 2
+    assert len(batched[(10, 13, 9)]) == 1
+    assert len(batched[(11, 13, 4)]) == 1
 
 
 def test_seminars_display_for_appointment():

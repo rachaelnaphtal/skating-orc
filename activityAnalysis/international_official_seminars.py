@@ -4,7 +4,7 @@ Load and filter ISU seminar attendance for international listing requirements.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 import pandas as pd
 from sqlalchemy import bindparam, text
@@ -119,6 +119,37 @@ def load_official_seminars_bulk(official_ids: list[int] | None = None) -> pd.Dat
     if not rows:
         return pd.DataFrame(columns=list(_SEMINAR_COLUMNS))
     return pd.DataFrame([dict(r) for r in rows])
+
+
+def batch_seminars_for_appointment_keys(
+    seminars: pd.DataFrame,
+    keys: Iterable[tuple[int, int, int | None]],
+) -> dict[tuple[int, int, int | None], pd.DataFrame]:
+    """Pre-filter seminar rows once per summary appointment key."""
+    empty = (
+        seminars.iloc[0:0]
+        if seminars is not None and not seminars.empty
+        else pd.DataFrame(columns=list(_SEMINAR_COLUMNS))
+    )
+    by_official: dict[int, pd.DataFrame] = {}
+    if seminars is not None and not seminars.empty:
+        by_official = {
+            int(oid): group for oid, group in seminars.groupby("official_id", sort=False)
+        }
+
+    out: dict[tuple[int, int, int | None], pd.DataFrame] = {}
+    for oid, atid, disc in keys:
+        key = (int(oid), int(atid), disc)
+        if key in out:
+            continue
+        sub = by_official.get(int(oid), empty)
+        out[key] = filter_seminars_for_appointment(
+            sub,
+            official_id=int(oid),
+            appointment_type_id=int(atid),
+            directory_discipline_id=disc,
+        )
+    return out
 
 
 def filter_seminars_for_appointment(
