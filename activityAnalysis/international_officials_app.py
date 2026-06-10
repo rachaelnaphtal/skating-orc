@@ -759,25 +759,10 @@ if view_mode == INTL_VIEW_MAJOR_EVENTS:
     )
 
     appt_df = _load_appointment_type_options()
-    appt_options = [_ALL_LABEL] + [
-        int(x)
-        for x in appt_df["appointment_type_id"].astype(int).tolist()
-        if int(x) != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
-    ]
+    appt_options = [_ALL_LABEL] + appt_df["appointment_type_id"].astype(int).tolist()
     appt_labels = {_ALL_LABEL: _ALL_LABEL}
     for row in appt_df.itertuples(index=False):
-        if int(row.appointment_type_id) != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
-            appt_labels[int(row.appointment_type_id)] = row.appointment_type
-
-    disc_df = _load_discipline_options(None, DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP, active_only)
-    disc_options = [_ALL_LABEL]
-    disc_labels = {_ALL_LABEL: _ALL_LABEL}
-    if not disc_df.empty:
-        disc_options.extend(disc_df["discipline_id"].astype(int).tolist())
-        for row in disc_df.itertuples(index=False):
-            disc_labels[int(row.discipline_id)] = (
-                row.discipline or f"Discipline {row.discipline_id}"
-            )
+        appt_labels[int(row.appointment_type_id)] = row.appointment_type
 
     if _intl_url_changed:
         _apply_major_events_filters_from_query()
@@ -812,15 +797,45 @@ if view_mode == INTL_VIEW_MAJOR_EVENTS:
             format_func=lambda x: appt_labels.get(x, str(x)),
             key="intl_major_event_appt",
         )
-    with col_d:
-        pick_disc = st.selectbox(
-            "Discipline",
-            options=disc_options,
-            format_func=lambda x: disc_labels.get(x, str(x)),
-            key="intl_major_event_disc",
-        )
 
     major_appt_id = _sentinel(pick_appt)
+    major_idvo_only = major_appt_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+    if major_idvo_only and st.session_state.get("intl_major_event_disc") != _ALL_LABEL:
+        st.session_state["intl_major_event_disc"] = _ALL_LABEL
+
+    disc_df = _load_discipline_options(
+        major_appt_id, DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP, active_only
+    )
+    disc_options = [_ALL_LABEL]
+    disc_labels = {_ALL_LABEL: _ALL_LABEL}
+    if not major_idvo_only and not disc_df.empty:
+        disc_options.extend(disc_df["discipline_id"].astype(int).tolist())
+        for row in disc_df.itertuples(index=False):
+            disc_labels[int(row.discipline_id)] = (
+                row.discipline or f"Discipline {row.discipline_id}"
+            )
+
+    with col_d:
+        if major_idvo_only:
+            st.selectbox(
+                "Discipline",
+                options=[_ALL_LABEL],
+                index=0,
+                disabled=True,
+                help=(
+                    f"IDVO appointments are combined as "
+                    f"“{DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL}”."
+                ),
+            )
+            pick_disc = _ALL_LABEL
+        else:
+            pick_disc = st.selectbox(
+                "Discipline",
+                options=disc_options,
+                format_func=lambda x: disc_labels.get(x, str(x)),
+                key="intl_major_event_disc",
+            )
+
     major_disc_id = _sentinel(pick_disc)
 
     _sync_intl_query_params(

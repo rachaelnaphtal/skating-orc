@@ -129,6 +129,23 @@ def test_referee_segment_discipline_filter_allows_event_level_rows():
     assert params == {}
 
 
+def test_idvo_segment_discipline_filter_uses_combined_disciplines():
+    sql, params = ime._segment_discipline_filter_sql(
+        appointment_type_id=16,
+        discipline_id=None,
+    )
+    assert "idvo_segment_discipline_type_ids" in sql
+    assert params["idvo_segment_discipline_type_ids"] == [1, 2, 3, 5]
+
+
+def test_all_roles_segment_discipline_filter_includes_synchronized():
+    sql, params = ime._segment_discipline_filter_sql(
+        appointment_type_id=None,
+        discipline_id=None,
+    )
+    assert params["spd_segment_discipline_type_ids"] == [1, 2, 3, 5]
+
+
 def test_major_event_pre_appointment_mask():
     display = pd.DataFrame({"achieved_year": [2010]}, index=[0])
     mask = ime.major_event_pre_appointment_mask(display, ["2009", "2010", "2011"])

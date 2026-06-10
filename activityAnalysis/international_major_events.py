@@ -1,7 +1,7 @@
 """
 Major ISU event activity matrix for international officials (Worlds, Europeans, etc.).
 
-Rows: officials with ISU directory appointments in Singles, Pairs, or Ice Dance.
+Rows: officials with ISU directory appointments in Singles, Pairs, Ice Dance, or IDVO.
 Columns: calendar years with role/discipline abbreviations (e.g. ``J-D``).
 """
 
@@ -15,7 +15,7 @@ _CURRENT_YEAR = datetime.now().year
 YEARS_SINCE_LAST_SORT_SENTINEL = 9999
 
 import pandas as pd
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import bindparam, or_, select, text
 from sqlalchemy.orm import Session
 
 try:
@@ -27,6 +27,7 @@ try:
         year_from_competition_name,
     )
     from activityAnalysis.international_officials_data import (
+        IDVO_SEGMENT_DISCIPLINE_TYPE_IDS,
         INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
         INTERNATIONAL_APPOINTMENT_TYPE_IDS,
         _discipline_match_sql,
@@ -56,6 +57,7 @@ except ModuleNotFoundError:
         year_from_competition_name,
     )
     from international_officials_data import (
+        IDVO_SEGMENT_DISCIPLINE_TYPE_IDS,
         INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
         INTERNATIONAL_APPOINTMENT_TYPE_IDS,
         _discipline_match_sql,
@@ -221,10 +223,39 @@ def _resolve_national_role_ids(appointment_type_id: int | None) -> list[int]:
     return sorted(set(roles))
 
 
-def _resolve_directory_discipline_ids(discipline_id: int | None) -> list[int] | None:
+def _resolve_directory_discipline_ids(
+    discipline_id: int | None,
+    *,
+    appointment_type_id: int | None = None,
+) -> list[int] | None:
+    if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+        return None
     if discipline_id is None:
         return list(SPD_DIRECTORY_DISCIPLINE_IDS)
     return [int(discipline_id)]
+
+
+def _isu_major_event_official_scope(
+    where_parts: list[Any],
+    *,
+    appointment_type_id: int | None,
+    discipline_id: int | None,
+) -> None:
+    """Narrow directory rows to ISU SPD and/or IDVO appointments for the matrix."""
+    if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+        return
+    if appointment_type_id is not None:
+        if discipline_id is None:
+            where_parts.append(Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)))
+        return
+    if discipline_id is not None:
+        return
+    where_parts.append(
+        or_(
+            Appointments.appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
+            Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)),
+        )
+    )
 
 
 def _collapse_qualified_officials(qualified: pd.DataFrame) -> pd.DataFrame:
@@ -268,7 +299,7 @@ def load_isu_spd_appointments_for_eligibility(
     active_appointments_only: bool = True,
 ) -> pd.DataFrame:
     """
-    All ISU SPD directory appointments for officials (ignores role/discipline UI filters).
+    All ISU SPD and IDVO directory appointments for officials (ignores role/discipline UI filters).
 
     Used to compute years eligible (max across appointments) and pre-appointment shading.
     """
@@ -282,9 +313,11 @@ def load_isu_spd_appointments_for_eligibility(
     )
     where_parts.append(Appointments.level_id == int(isu_level_id))
     where_parts.append(
-        Appointments.appointment_type_id != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+        or_(
+            Appointments.appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
+            Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)),
+        )
     )
-    where_parts.append(Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)))
     where_parts.append(Appointments.official_id.in_(ids))
 
     with Session(engine) as session:
@@ -416,21 +449,21 @@ def get_isu_spd_qualified_officials(
     active_appointments_only: bool = True,
 ) -> pd.DataFrame:
     """
-    Officials with active ISU-level international appointments in Singles / Pairs / Dance.
+    Officials with active ISU-level international appointments in SPD and/or IDVO.
 
     Returns one row per official even when they hold multiple matching appointments.
     """
-    disc_ids = _resolve_directory_discipline_ids(discipline_id)
     where_parts = _international_appointment_filter_clauses(
         appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
         active_appointments_only=active_appointments_only,
     )
     where_parts.append(Appointments.level_id == int(isu_level_id))
-    where_parts.append(
-        Appointments.appointment_type_id != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+    _isu_major_event_official_scope(
+        where_parts,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
     )
-    if disc_ids is not None:
-        where_parts.append(Appointments.discipline_id.in_(disc_ids))
 
     with Session(engine) as session:
         stmt = (
@@ -457,6 +490,11 @@ def _segment_discipline_filter_sql(
     discipline_id: int | None,
 ) -> tuple[str, dict[str, Any]]:
     if appointment_type_id is not None and discipline_id is None:
+        if int(appointment_type_id) == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+            return (
+                " AND s.discipline_type_id IN :idvo_segment_discipline_type_ids",
+                {"idvo_segment_discipline_type_ids": list(IDVO_SEGMENT_DISCIPLINE_TYPE_IDS)},
+            )
         nat = national_segment_appointment_type_id(int(appointment_type_id))
         # Referees are often listed once per event without a segment discipline.
         if nat == 4:
@@ -479,7 +517,7 @@ def _segment_discipline_filter_sql(
         )
     return (
         " AND s.discipline_type_id IN :spd_segment_discipline_type_ids",
-        {"spd_segment_discipline_type_ids": [1, 2, 3]},
+        {"spd_segment_discipline_type_ids": list(IDVO_SEGMENT_DISCIPLINE_TYPE_IDS)},
     )
 
 
@@ -561,6 +599,8 @@ def _query_major_event_assignment_rows(
         stmt = stmt.bindparams(bindparam("segment_discipline_type_ids", expanding=True))
     if "spd_segment_discipline_type_ids" in disc_params:
         stmt = stmt.bindparams(bindparam("spd_segment_discipline_type_ids", expanding=True))
+    if "idvo_segment_discipline_type_ids" in disc_params:
+        stmt = stmt.bindparams(bindparam("idvo_segment_discipline_type_ids", expanding=True))
 
     try:
         with Session(engine) as session:
@@ -748,9 +788,10 @@ def format_major_event_matrix_for_display(matrix: pd.DataFrame) -> tuple[pd.Data
 
 def major_event_matrix_legend() -> str:
     return (
-        "J = Judge, R = Referee, TC = Technical Controller, TS = Technical Specialist; "
+        "J = Judge, R = Referee, TC = Technical Controller, TS = Technical Specialist, "
+        "DO = International Data & Video Operator; "
         "S = Singles, P = Pairs, D = Ice Dance (e.g. J-D = dance judge). "
         "Gray year cells are on or before the official's earliest ISU appointment year. "
         "Years eligible is the current calendar year minus the year of their earliest "
-        "ISU Singles/Pairs/Dance appointment."
+        "ISU SPD or IDVO appointment."
     )
