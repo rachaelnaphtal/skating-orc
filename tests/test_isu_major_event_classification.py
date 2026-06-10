@@ -64,6 +64,10 @@ def test_classify_olympics():
     assert (
         classify_isu_major_event("European Youth Olympic Festival 2025") is None
     )
+    assert (
+        classify_isu_major_event("Road to 26 Trophy (OWG test event)") is None
+    )
+    assert classify_isu_major_event("OWG 2026") is None
 
 
 def test_classify_grand_prix_final():

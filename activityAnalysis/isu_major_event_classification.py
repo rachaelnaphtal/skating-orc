@@ -29,7 +29,7 @@ MAJOR_ISU_EVENT_LABELS: dict[str, str] = {
 MAJOR_ISU_EVENT_KEYS: tuple[str, ...] = tuple(MAJOR_ISU_EVENT_LABELS.keys())
 
 _GP_FINAL = re.compile(r"\b(?:grand\s+prix\s+final|gp\s+final)\b", re.I)
-_OLYMPIC_WINTER_GAMES = re.compile(r"\bolympic\s+winter\s+games\b|\bowg\b", re.I)
+_OLYMPIC_WINTER_GAMES = re.compile(r"\bolympic\s+winter\s+games\b", re.I)
 _SYNCHRO = re.compile(r"\bsynchro(?:nized)?\b", re.I)
 _JUNIOR_WORLDS = re.compile(
     r"\b(?:world\s+junior|junior\s+world)\b(?:\s+figure\s+skating)?\s+championships?\b",
@@ -80,7 +80,7 @@ def _is_junior_world_championship(name: str) -> bool:
 
 
 def _is_olympic_winter_games(name: str) -> bool:
-    """Olympic Winter Games (OWG) only — not EYOF, YOG, or other ``olympic`` festivals."""
+    """Olympic Winter Games only — not test events, EYOF, YOG, or other ``olympic`` festivals."""
     if any(
         phrase in name
         for phrase in (
@@ -88,6 +88,9 @@ def _is_olympic_winter_games(name: str) -> bool:
             "youth olympic festival",
             "european youth olympic festival",
             "eyof",
+            "test event",
+            "test events",
+            "test skating",
         )
     ):
         return False

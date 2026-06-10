@@ -1016,6 +1016,44 @@ def scrape(
                         note_warning(
                             f"Failed to parse segment {cover_label!r} ({scores_url}): {exc}"
                         )
+                        if write_to_database and competition_id:
+                            panel_rows = (
+                                event_info_dict.get("segment_official_rows") or None
+                            )
+                            cover = (event_info_dict.get("cover_label") or "").strip()
+                            db_key = (
+                                judgingParsing.ijs_event_label_to_db_segment_name(
+                                    cover
+                                )
+                                or None
+                            )
+                            if panel_rows and db_key:
+                                agg_all_element_df, agg_all_pcs_df = handleEventResults(
+                                    report_name,
+                                    write_to_database,
+                                    judge_filter,
+                                    agg_all_element_df,
+                                    agg_all_pcs_df,
+                                    database_obj,
+                                    competition_id,
+                                    proccessed_segments,
+                                    judge_errors,
+                                    event_details,
+                                    detailed_rule_errors,
+                                    i,
+                                    judges,
+                                    db_key,
+                                    None,
+                                    None,
+                                    None,
+                                    [],
+                                    [],
+                                    {},
+                                    {},
+                                    segment_official_rows=panel_rows,
+                                    segment_db_key=db_key,
+                                    segment_stats=segment_stats,
+                                )
                         i = i + 1
                         continue
                     segment_official_rows = None
@@ -1232,19 +1270,27 @@ def handleEventResults(report_name, write_to_database, judge_filter, agg_all_ele
             and segment_official_rows
             and row_segment_key
         ):
-            segment_id = database_obj.get_segment_id(
-                row_segment_key, competition_id
-            )
+            if row_segment_key not in proccessed_segments:
+                segment_id = database_obj.insert_segment(
+                    row_segment_key, competition_id
+                )
+                proccessed_segments.append(row_segment_key)
+                if segment_stats is not None:
+                    segment_stats["written"] = segment_stats.get("written", 0) + 1
+            else:
+                segment_id = database_obj.get_segment_id(
+                    row_segment_key, competition_id
+                )
             if segment_id is not None:
                 database_obj.replace_segment_officials(
                     segment_id, segment_official_rows
                 )
                 _LOG.debug(
-                    "Officials only (skipped segment) %s", row_segment_key
+                    "Officials only (skipped scores) %s", row_segment_key
                 )
             else:
                 note_warning(
-                    f"Skipped scores for {row_segment_key!r}; no segment row in DB "
+                    f"Skipped scores for {row_segment_key!r}; could not create segment "
                     f"— officials not written"
                 )
         return agg_all_element_df, agg_all_pcs_df
