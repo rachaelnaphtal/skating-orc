@@ -292,48 +292,6 @@ def years_eligible_for_appointment(
     return max(0, end - ach)
 
 
-def load_isu_spd_appointments_for_eligibility(
-    official_ids: Iterable[int],
-    *,
-    isu_level_id: int,
-    active_appointments_only: bool = True,
-) -> pd.DataFrame:
-    """
-    All ISU SPD and IDVO directory appointments for officials (ignores role/discipline UI filters).
-
-    Used to compute years eligible (max across appointments) and pre-appointment shading.
-    """
-    ids = sorted({int(x) for x in official_ids if x is not None})
-    if not ids:
-        return pd.DataFrame(columns=["official_id", "achieved_date"])
-
-    where_parts = _international_appointment_filter_clauses(
-        appointment_type_id=None,
-        active_appointments_only=active_appointments_only,
-    )
-    where_parts.append(Appointments.level_id == int(isu_level_id))
-    where_parts.append(
-        or_(
-            Appointments.appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
-            Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)),
-        )
-    )
-    where_parts.append(Appointments.official_id.in_(ids))
-
-    with Session(engine) as session:
-        stmt = (
-            select(
-                Appointments.official_id,
-                Appointments.achieved_date,
-            )
-            .where(*where_parts)
-            .order_by(Appointments.official_id.asc(), Appointments.achieved_date.asc())
-        )
-        rows = session.execute(stmt).all()
-
-    return pd.DataFrame(rows, columns=["official_id", "achieved_date"])
-
-
 def _matrix_year_columns(matrix: pd.DataFrame) -> list[int]:
     return sorted(
         int(c)
@@ -363,8 +321,8 @@ def enrich_major_event_matrix_eligibility(
     appointment_rows: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Set ``eligible_years`` from the earliest ISU appointment year and ``achieved_year``
-    for pre-appointment cell shading.
+    Set ``eligible_years`` from the earliest matching ISU appointment year (per UI
+    filters) and ``achieved_year`` for pre-appointment cell shading.
     """
     if matrix.empty:
         return matrix
@@ -736,12 +694,12 @@ def get_international_major_event_matrix(
     matrix = _ensure_matrix_year_columns(matrix, event_calendar_years)
     matrix = _apply_major_event_cell_labels(matrix, activity)
     matrix = matrix.drop_duplicates(subset=["official_id"], keep="first").reset_index(drop=True)
-    appt_rows = load_isu_spd_appointments_for_eligibility(
-        matrix["official_id"].astype(int).tolist(),
-        isu_level_id=isu_level_id,
-        active_appointments_only=active_appointments_only,
+    # ``qualified`` is already scoped to appointment type / discipline filters with the
+    # earliest matching ISU achieved_date per official.
+    return enrich_major_event_matrix_eligibility(
+        matrix,
+        qualified.loc[:, ["official_id", "achieved_date"]],
     )
-    return enrich_major_event_matrix_eligibility(matrix, appt_rows)
 
 
 def format_major_event_matrix_for_display(matrix: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
@@ -793,5 +751,5 @@ def major_event_matrix_legend() -> str:
         "S = Singles, P = Pairs, D = Ice Dance (e.g. J-D = dance judge). "
         "Gray year cells are on or before the official's earliest ISU appointment year. "
         "Years eligible is the current calendar year minus the year of their earliest "
-        "ISU SPD or IDVO appointment."
+        "ISU appointment matching the selected appointment type and discipline filters."
     )

@@ -79,7 +79,7 @@ def test_years_eligible_for_appointment():
     assert ime.years_eligible_for_appointment(2025, current_year=2025) == 0
 
 
-def test_enrich_major_event_matrix_eligibility_uses_max():
+def test_enrich_major_event_matrix_eligibility_uses_earliest():
     matrix = pd.DataFrame(
         {
             "official_id": [1],
