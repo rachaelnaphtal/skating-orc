@@ -1229,6 +1229,61 @@ def test_evaluate_seminar_count_and_alternatives():
     assert "at event" in detail_event
 
 
+def test_judge_referee_at_event_seminar_not_in_four_season_in_person_branch():
+    """At-event seminars satisfy the 2-season branch only, not in-person (4 seasons)."""
+    seminars = pd.DataFrame(
+        [
+            {
+                "official_id": 1,
+                "appointment_type_id": 13,
+                "discipline_id": 9,
+                "season_code": 2526,
+                "in_person": True,
+                "at_event": True,
+            }
+        ]
+    )
+    judge_referee_config = {
+        "alternatives": [
+            {
+                "label": "In-person ISU seminar (4 seasons)",
+                "requirements": [
+                    {
+                        "in_person": True,
+                        "at_event": False,
+                        "season_window": 4,
+                        "min": 1,
+                    }
+                ],
+            },
+            {
+                "label": "Online ISU seminar (2 seasons)",
+                "requirements": [{"in_person": False, "season_window": 2, "min": 1}],
+            },
+            {
+                "label": "Seminar at designated competition (2 seasons)",
+                "requirements": [{"at_event": True, "season_window": 2, "min": 1}],
+            },
+        ]
+    }
+    met_alt, via, _detail = ir._evaluate_seminar_alternatives(
+        seminars,
+        judge_referee_config,
+        listing_season_code=2627,
+    )
+    assert met_alt
+    assert via == "Seminar at designated competition (2 seasons)"
+
+    met_promote, detail_promote = ir._evaluate_seminar_count(
+        seminars,
+        {"in_person": True, "at_event": False, "season_window": 4},
+        listing_season_code=2627,
+        min_value=1,
+    )
+    assert not met_promote
+    assert "0/1" in detail_promote
+
+
 if __name__ == "__main__":
     test_isu_season_codes_preceding_july1()
     test_listing_calendar_year()

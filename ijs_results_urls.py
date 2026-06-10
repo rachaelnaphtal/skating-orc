@@ -1,9 +1,10 @@
 """
 USFS IJS competition ``results_url`` helpers.
 
-**Storage:** ``public.competition.results_url`` is the full results entry URL when known
-(e.g. ends with ``/index.asp`` for classic events). FSM / Swiss Timing events are any URL
-that does **not** end with ``/index.asp`` — there is no assumed ``/index.htm`` suffix.
+**Storage:** ``public.competition.results_url`` is the canonical results entry URL:
+
+- Classic USFS IJS: ``…/index.asp`` (legacy base paths without a suffix get ``/index.asp``).
+- FSM / Swiss Timing / ISU: ``…/index.htm`` (directory URLs without a suffix get ``/index.htm``).
 
 Run migration ``011_competition_results_url_full_index.sql`` to append ``/index.asp`` to
 legacy base-only classic rows already in the database.
@@ -15,6 +16,7 @@ import re
 
 _INDEX_ASP = "/index.asp"
 _INDEX_HTM = "/index.htm"
+_INDEX_HTML = "/index.html"
 _LEGACY_BASE_RE = re.compile(r"/leaderboard/results/\d{4}/\d+$", re.IGNORECASE)
 
 
@@ -24,7 +26,17 @@ def _strip_trailing_slash(url: str) -> str:
 
 def results_url_for_storage(url: str) -> str:
     """Normalize a URL before persisting on ``competition.results_url``."""
-    return _strip_trailing_slash(url)
+    u = _strip_trailing_slash(url)
+    if not u:
+        return ""
+    lower = u.lower()
+    if lower.endswith(_INDEX_ASP):
+        return u
+    if lower.endswith(_INDEX_HTM) or lower.endswith(_INDEX_HTML):
+        return u
+    if is_legacy_base_results_url(u):
+        return f"{u}{_INDEX_ASP}"
+    return f"{u}{_INDEX_HTM}"
 
 
 def is_fsm_results_url(url: str) -> bool:
@@ -48,16 +60,10 @@ def results_url_dedupe_key(url: str) -> str:
     """
     Case-folded key for set membership (discover skip-if-in-database).
 
-    Treats legacy base paths as equivalent to their ``/index.asp`` form so rows match
-    before and after migration ``011``.
+    Canonicalizes via :func:`results_url_for_storage` so ``wc2007`` and
+    ``wc2007/index.htm`` dedupe together.
     """
-    u = results_url_for_storage(url)
-    lower = u.lower()
-    if lower.endswith(_INDEX_ASP):
-        return lower
-    if is_legacy_base_results_url(u):
-        return f"{u}{_INDEX_ASP}".lower()
-    return lower
+    return results_url_for_storage(url).lower()
 
 
 def results_page_url(stored: str | None) -> str | None:
@@ -81,7 +87,7 @@ def scrape_join_base(stored: str) -> str:
     """
     u = _strip_trailing_slash(results_url_for_storage(stored))
     lower = u.lower()
-    for suffix in (_INDEX_ASP, _INDEX_HTM):
+    for suffix in (_INDEX_ASP, _INDEX_HTM, _INDEX_HTML):
         if lower.endswith(suffix):
             return u[: -len(suffix)]
     return u
@@ -89,18 +95,20 @@ def scrape_join_base(stored: str) -> str:
 
 def results_url_lookup_keys(url: str) -> list[str]:
     """``results_url`` values to try when matching an existing competition row."""
-    u = results_url_for_storage(url)
-    keys: list[str] = [u]
-    if is_legacy_base_results_url(u):
-        keys.append(f"{u}{_INDEX_ASP}")
-    else:
-        base = scrape_join_base(u)
-        if base and base != u:
-            keys.append(base)
+    canonical = results_url_for_storage(url)
+    keys: list[str] = [canonical]
+    base = scrape_join_base(canonical)
+    if base and base != canonical:
+        keys.append(base)
+    raw = _strip_trailing_slash(url)
+    if raw and raw != canonical and raw != base:
+        keys.append(raw)
+    if is_legacy_base_results_url(raw):
+        keys.append(f"{raw}{_INDEX_ASP}")
     out: list[str] = []
     seen: set[str] = set()
     for k in keys:
-        if k not in seen:
+        if k and k not in seen:
             seen.add(k)
             out.append(k)
     return out

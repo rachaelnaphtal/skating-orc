@@ -2,10 +2,23 @@ import pandas as pd
 import pyarrow as pa
 
 from activityAnalysis.international_officials_detail import (
+    INTL_VIEW_DETAIL,
+    INTL_VIEW_MAJOR_EVENTS,
+    INTL_VIEW_SUMMARY,
     _appointment_nav_key,
     _appointment_nav_label,
     _streamlit_safe_dataframe,
+    intl_view_mode_from_query_param,
+    intl_view_query_slug_for_mode,
 )
+
+
+def test_intl_view_query_param_round_trip():
+    assert intl_view_mode_from_query_param("major_events") == INTL_VIEW_MAJOR_EVENTS
+    assert intl_view_mode_from_query_param("summary") == INTL_VIEW_SUMMARY
+    assert intl_view_mode_from_query_param("appointment") == INTL_VIEW_DETAIL
+    assert intl_view_query_slug_for_mode(INTL_VIEW_MAJOR_EVENTS) == "major_events"
+    assert intl_view_query_slug_for_mode(INTL_VIEW_SUMMARY) == "summary"
 
 
 def test_appointment_nav_label_includes_discipline():

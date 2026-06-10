@@ -702,6 +702,21 @@ class DatabaseLoader:
         competitions = (self.session.query(Competition).filter(Competition.location == None).all())
         return [competition.results_url for competition in competitions]
     
+    def _competition_by_results_url(self, url: str) -> Competition | None:
+        from ijs_results_urls import results_url_for_storage, results_url_lookup_keys
+
+        canonical = results_url_for_storage(url)
+        for key in results_url_lookup_keys(url):
+            existing = (
+                self.session.query(Competition).filter_by(results_url=key).first()
+            )
+            if existing:
+                if existing.results_url != canonical:
+                    existing.results_url = canonical
+                    self._persist()
+                return existing
+        return None
+
     def updateCompetition(
         self,
         url,
@@ -716,7 +731,7 @@ class DatabaseLoader:
         officials_analysis_competition_type_id=None,
         update_officials_competition_type=False,
     ):
-        existing = self.session.query(Competition).filter_by(results_url=url).first()
+        existing = self._competition_by_results_url(url)
         if not existing:
             raise ValueError(
                 f"updateCompetition: no competition with results_url={url!r}"
@@ -778,7 +793,14 @@ class DatabaseLoader:
         return len(ids)
     
     def getSegmentNamesForCompetition(self, url):
-        segments = (self.session.query(Segment).join(Competition, Segment.competition_id == Competition.id).filter(Competition.results_url == url).all())
+        competition = self._competition_by_results_url(url)
+        if not competition:
+            return []
+        segments = (
+            self.session.query(Segment)
+            .filter(Segment.competition_id == competition.id)
+            .all()
+        )
         return [segment.name for segment in segments]
 
     def insert_competition(
@@ -791,14 +813,17 @@ class DatabaseLoader:
         international=None,
         officials_analysis_competition_type_id=None,
     ):
-        existing = self.session.query(Competition).filter_by(results_url=url).first()
+        from ijs_results_urls import results_url_for_storage
+
+        canonical_url = results_url_for_storage(url)
+        existing = self._competition_by_results_url(url)
         if not existing:
             q_flag = False if qualifying is None else qualifying
             n_flag = False if nqs is None else nqs
             i_flag = False if international is None else international
             new = Competition(
                 name=name,
-                results_url=url,
+                results_url=canonical_url,
                 year=year,
                 qualifying=q_flag,
                 nqs=n_flag,

@@ -145,6 +145,44 @@ def _fsm_normalize_pdf_text(text: str) -> str:
     )
 
 
+def _fsm_is_protocol_junk_line(line: str) -> bool:
+    """
+    True for repeated FSM column headers and other non-data rows.
+
+    Modern ISU PDFs often extract the reversed ``Info`` column label as a
+    standalone ``ofnI`` line when layout tolerance is tight.
+    """
+    s = (line or "").strip()
+    if not s:
+        return True
+    if s == "ofnI" or s.startswith("ofnI "):
+        return True
+    if s in ("Value Panel", "Base Scores of", "Number", "= + + -"):
+        return True
+    if re.match(r"^GOE J\d", s):
+        return True
+    if re.match(r"^printed:\s", s, re.I):
+        return True
+    if re.fullmatch(r"-?\d+\.\d+\s+-?\d+\.\d+", s):
+        return True
+    junk_prefixes = (
+        "# Executed",
+        "Elements Value",
+        "Element Component",
+        "Program Components",
+        "JUDGES DETAILS",
+        "Total Total",
+        "Rank Name",
+        "Code Score",
+        "Starting",
+        "Score Score",
+        "Judges Total",
+        "Deductions:",
+        "Nation Segment",
+    )
+    return any(s.startswith(p) for p in junk_prefixes)
+
+
 def _fsm_strip_element_number(line: str, element_number: int) -> tuple[str, int, bool]:
     """
     Strip a leading PDF element index and sync the expected counter to it.
@@ -180,6 +218,19 @@ def parse_fsm_element_judge_scores(raw: str) -> tuple[list[float | None], int | 
         if re.fullmatch(r"-?\d+(?:\.\d+)?", tok):
             scores.append(float(tok))
     return scores, missing_idx
+
+
+def _has_scorable_judge_goes(scores: list | None) -> bool:
+    """True when at least one judge GOE/PCS value was present in the PDF."""
+    return any(score is not None for score in (scores or []))
+
+
+def _is_explicit_pdf_dash_score(scores: list | None, judge_index: int) -> bool:
+    """True when ``scores[judge_index]`` is ``None`` because the PDF had ``-`` there."""
+    if judge_index < 0:
+        return False
+    parsed = scores or []
+    return judge_index < len(parsed) and parsed[judge_index] is None
 
 
 def consensus_missing_judge_index(
@@ -259,6 +310,9 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
     event_name = ""
 
     judge_count = None
+    current_skater = None
+    element_number = 1
+    buffer = ""
 
     for page in pdf.pages:
         text = page.extract_text(
@@ -298,10 +352,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             ):
                 return (None, None, None, event_name)
 
-        current_skater = None
         has_bonus = False
-        buffer = ""
-        element_number=1
 
         for i, line in enumerate(lines):
 
@@ -328,13 +379,19 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                 skater_name = skater_match.group(2).strip()
                 technical_score = float(skater_match.group(5))
                 current_skater = skater_name
-                element_number=1
+                element_number = 1
 
                 if current_skater not in elements_per_skater:
                     elements_per_skater[current_skater] = []
                     pcs_per_skater[current_skater] = []
                     skater_details[current_skater] = technical_score
 
+                continue
+
+            if _fsm_is_protocol_junk_line(line):
+                continue
+
+            if not current_skater:
                 continue
 
             # # -----------------------------
@@ -356,14 +413,14 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             line, element_number, jumped = _fsm_strip_element_number(
                 line, element_number
             )
-            if jumped:
-                _parsing_log(
-                    f"element number catch-up for {skater_name} {event_name} "
-                    f"(previous line: {lines[i - 1]!r})",
-                    issue=True,
-                )
 
             element_match = match_element_fsm(line)
+            if jumped and element_match:
+                _parsing_log(
+                    f"element number catch-up for {current_skater} {event_name} "
+                    f"(previous line: {lines[i - 1]!r})",
+                    issue=False,
+                )
 
             # -----------------------------
             # PCS regex (very loose)
@@ -412,25 +469,14 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             if current_skater and pcs_match:
                 component = pcs_match.group(1)
                 raw = pcs_match.group(3)
-                total_score = float(pcs_match.group(4))
-
-                digits = raw.replace(" ", "")
-                scores = []
-                i = 0
-                current = ""
-
-                while i < len(digits):
-                    current += digits[i]
-                    if digits[i] == ".":
-                        current += digits[i+1:i+3]
-                        scores.append(float(current))
-                        current = ""
-                        i += 3
-                    else:
-                        i += 1
-
-                missing_idx = None
-                if judge_count and len(scores) < judge_count:
+                scores, missing_idx = parse_fsm_element_judge_scores(raw)
+                if not scores:
+                    scores = [
+                        float(x)
+                        for x in re.findall(r"-?\d+(?:\.\d+)?", raw)
+                    ]
+                    missing_idx = None
+                if judge_count and len(scores) < judge_count and missing_idx is None:
                     missing_idx = len(scores)
                 pcs_per_skater[current_skater].append({
                     "Component": component,
@@ -466,21 +512,26 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
 def match_pcs_fsm(line):
+    """
+    PCS row: component, factor, per-judge scores (may include ``-``), total.
+
+    The total is always the last decimal on the line (older PDFs may omit it).
+    """
     return re.match(
-                r"""
-                    ^
-                    (Timing|Presentation|Skating\ Skills|Composition|Artistic\ Appeal)
-                    \s+
-                    (\d+(?:\.\d+)?)                            # Factor
-                    \s+
-                    ((?:\d+(?:\.\d+)?\s+){2,8}\d+(?:\.\d+)?)   # Per-judge PCS scores (3–9)
-                    \s+
-                    (\d+(?:\.\d+)?)                            # Total
-                    $
-                    """,
-                line,
-                re.VERBOSE,
-            )
+        rf"""
+        ^
+        ({_FSM_PCS_COMPONENT_ALTS})
+        \s+
+        (\d+(?:\.\d+)?)                            # Factor
+        \s+
+        (.+)                                       # Per-judge scores (greedy; total follows)
+        \s+
+        (\d+(?:\.\d+)?)                            # Total
+        \s*$
+        """,
+        line.strip(),
+        re.VERBOSE | re.IGNORECASE,
+    )
 
 def match_element_fsm(line):
     return re.match(
@@ -496,7 +547,7 @@ def match_element_fsm(line):
         (-?\d+(?:\.\d+)?)                      # GOE
 
         \s+
-        ((?:(?:-?\d+|-)\s+){2,8}(?:-?\d+|-))   # Judge GOEs (3–9; ``-`` = missing)
+        ((?:(?:-?\d+|-)\s+){2,11}(?:-?\d+|-))   # Judge GOEs (3–12; ``-`` = missing)
 
         (?:\s+(\d+(?:\.\d+)?))?                # Optional bonus (e.g. 1.00)
 
@@ -726,7 +777,45 @@ def extract_skater_element_sections(soup):
 
 
 _FSM_SEGMENT_IN_HEADER_RE = re.compile(
-    r"\b(Short Program|Free Skating|Rhythm Dance|Free Dance)\b",
+    r"\b(Short Program|Free Skating|Short Dance|Rhythm Dance|Free Dance|"
+    r"Compulsory Dance|Original Dance)\b",
+    re.IGNORECASE,
+)
+_FSM_LEGACY_COMBINED_HEADER_RE = re.compile(
+    r"^"
+    r"(?P<discipline>MEN|LADIES|WOMEN|PAIR(?:S)?|ICE\s+DANCE)\s+"
+    r"(?P<segment>SHORT\s+PROGRAM|FREE\s+SKATING|SHORT\s+DANCE|FREE\s+DANCE|"
+    r"RHYTHM\s+DANCE|COMPULSORY\s+DANCE|ORIGINAL\s+DANCE)"
+    r"\s+JUDGES\s+DETAILS\s+PER\s+SKATER"
+    r"$",
+    re.IGNORECASE,
+)
+_FSM_LEGACY_DISCIPLINE_LABELS = {
+    "MEN": "Men",
+    "LADIES": "Ladies",
+    "WOMEN": "Ladies",
+    "PAIR": "Pairs",
+    "PAIRS": "Pairs",
+    "ICE DANCE": "Ice Dance",
+}
+# Longer slash labels first (pre-2018 ISU PDFs). Modern names kept for current protocols.
+_FSM_PCS_COMPONENT_ALTS = (
+    r"Transition\s*/\s*Linking\s+Footwork"
+    r"|Performance\s*/\s*Execution"
+    r"|Choreography\s*/\s*Composition"
+    r"|Linking\s+Footwork\s*/\s*Movement"
+    r"|Interpretation\s*/\s*Timing"
+    r"|Skating\s+Skills"
+    r"|Artistic\s+Appeal"
+    r"|Presentation"
+    r"|Composition"
+    r"|Choreography"
+    r"|Performance"
+    r"|Interpretation"
+    r"|Timing"
+)
+_FSM_PCS_COMPONENT_LINE_RE = re.compile(
+    rf"^({_FSM_PCS_COMPONENT_ALTS}|Program\s+Components)",
     re.IGNORECASE,
 )
 _FSM_TEAM_SUBSEGMENT_LINE_RE = re.compile(
@@ -750,7 +839,22 @@ def fsm_event_label_from_pdf_lines(lines: list[str]) -> str:
     Swiss Timing USFS PDFs often put ``JUDGES DETAILS PER SKATER`` after translation
     lines; discipline and segment sit a few lines above (e.g. ``Men Single Skating``,
     ``TUE 10 FEB 2026 Short Program``).
+
+    Pre-2017 ISU PDFs often combine discipline, segment, and title on one line, e.g.
+    ``MEN SHORT PROGRAM JUDGES DETAILS PER SKATER``.
     """
+    for line in lines[:30]:
+        legacy = _FSM_LEGACY_COMBINED_HEADER_RE.match(line.strip())
+        if legacy:
+            disc_key = re.sub(
+                r"\s+", " ", legacy.group("discipline").strip().upper()
+            )
+            disc = _FSM_LEGACY_DISCIPLINE_LABELS.get(
+                disc_key, legacy.group("discipline").strip().title()
+            )
+            seg = re.sub(r"\s+", " ", legacy.group("segment").strip()).title()
+            return f"{disc} - {seg}"
+
     discipline = ""
     segment = ""
     team_sub: tuple[str, str] | None = None
@@ -766,6 +870,8 @@ def fsm_event_label_from_pdf_lines(lines: list[str]) -> str:
             segment = seg_m.group(1)
             continue
         if _FSM_HEADER_NOISE_RE.match(line):
+            continue
+        if _FSM_PCS_COMPONENT_LINE_RE.match(line):
             continue
         if re.search(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN)\b", line, re.I) and segment:
             continue
@@ -956,32 +1062,30 @@ def create_all_element_dict(
             if not filtered_scores:
                 continue
             avg = sum(filtered_scores) / len(filtered_scores)
+            parsed_scores = element.get("Scores") or []
             for judgeNumber, judge in enumerate(judges, start=1):
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
-                    from ijs_scrape_log import record_parsing_issue
+                    if not _is_explicit_pdf_dash_score(parsed_scores, judgeNumber - 1):
+                        from ijs_scrape_log import record_parsing_issue
 
-                    record_parsing_issue(
-                        "missing_element_score",
-                        event_name,
-                        skater=skater,
-                        judge_number=judgeNumber,
-                    )
+                        record_parsing_issue(
+                            "missing_element_score",
+                            event_name,
+                            skater=skater,
+                            judge_number=judgeNumber,
+                        )
                     continue
 
                 deviation = judge_score - avg
                 thrown_out = is_score_thrown_out(judge_score, all_scores)
                 high = judge_score > avg
-                element_name_no_level = element["Element"] or ""
-                if element_name_no_level and element_name_no_level[-1].isdigit():
-                    element_name_no_level = element_name_no_level[:-1]
-
                 row = {
                     "Skater": skater,
                     "Event": event_name,
                     "Element": element["Element"],
                     "Notes": element.get("Notes"),
-                    "Element Type": categorizeElement(element_name_no_level),
+                    "Element Type": categorizeElement(element["Element"]),
                     "Panel Average": avg,
                     "Judge Name": judge,
                     "Judge Number": judgeNumber,
@@ -1023,17 +1127,19 @@ def create_all_pcs_dict(judges, pcs_per_skater, event_name):
             if not filtered_scores:
                 continue
             avg = sum(filtered_scores) / len(filtered_scores)
+            parsed_scores = pcs_mark.get("Scores") or []
             for judgeNumber, judge in enumerate(judges, start=1):
                 judge_score = all_scores[judgeNumber - 1]
                 if judge_score is None:
-                    from ijs_scrape_log import record_parsing_issue
+                    if not _is_explicit_pdf_dash_score(parsed_scores, judgeNumber - 1):
+                        from ijs_scrape_log import record_parsing_issue
 
-                    record_parsing_issue(
-                        "missing_pcs_score",
-                        event_name,
-                        skater=skater,
-                        judge_number=judgeNumber,
-                    )
+                        record_parsing_issue(
+                            "missing_pcs_score",
+                            event_name,
+                            skater=skater,
+                            judge_number=judgeNumber,
+                        )
                     continue
                 deviation = judge_score - avg
                 thrown_out = is_score_thrown_out(judge_score, all_scores)
@@ -1202,31 +1308,83 @@ def match_skater(line, has_bonus):
             line,
         )
 
+_MATCH_SKATER_FSM_MODERN_RE = re.compile(
+    r"""
+    ^
+    (\d+)                              # 1- skate order
+    \s+
+    (.+?)                              # 2- name (may include 3-letter NOC before start #)
+    \s+
+    (\d{1,3})                          # 3- start order
+    \s+
+    (-?\d+\.\d+)                       # 4- total
+    \s+
+    (-?\d+\.\d+)                       # 5- TES
+    \s+
+    (-?\d+\.\d+)                       # 6- PCS
+    \s+
+    (-?\d+\.\d+)                       # 7- deductions
+    $
+    """,
+    re.VERBOSE,
+)
+# Pre-2017 ISU PDFs: NOC after name, no start #, no deductions column.
+_MATCH_SKATER_FSM_LEGACY_RE = re.compile(
+    r"""
+    ^
+    (\d+)                              # 1- skate order
+    \s+
+    (.+?)                              # 2- name (pairs may include ``/``)
+    \s+
+    ([A-Z]{3})                         # 3- NOC
+    \s+
+    (-?\d+\.\d+)                       # 4- total
+    \s+
+    (-?\d+\.\d+)                       # 5- TES
+    \s+
+    (-?\d+\.\d+)                       # 6- PCS
+    $
+    """,
+    re.VERBOSE,
+)
+# ca. 2009 ISU PDFs: NOC plus deductions column (four score fields).
+_MATCH_SKATER_FSM_LEGACY_NOC_DEDUCTIONS_RE = re.compile(
+    r"""
+    ^
+    (\d+)                              # 1- skate order
+    \s+
+    (.+?)                              # 2- name (pairs may include ``/``)
+    \s+
+    ([A-Z]{3})                         # 3- NOC
+    \s+
+    (-?\d+\.\d+)                       # 4- total
+    \s+
+    (-?\d+\.\d+)                       # 5- TES
+    \s+
+    (-?\d+\.\d+)                       # 6- PCS
+    \s+
+    (-?\d+\.\d+)                       # 7- deductions
+    $
+    """,
+    re.VERBOSE,
+)
+
+
 def match_skater_fsm(line):
     """
-    FSM skater header: order, name (unicode / may include NOC), start #, total, TES, PCS, deductions.
+    FSM skater header: order, name, start # or NOC, total, TES, PCS, optional deductions.
+
+    Modern protocols use a numeric start order and deductions column; older ISU PDFs
+    use a three-letter NOC (sometimes with deductions, sometimes without).
+    Group 5 is always TES for all layouts.
     """
-    return re.match(
-        r"""
-        ^
-        (\d+)                              # 1- skate order
-        \s+
-        (.+?)                              # 2- name (may include 3-letter NOC before start #)
-        \s+
-        (\d{1,3})                          # 3- start order
-        \s+
-        (-?\d+\.\d+)                       # 4- total
-        \s+
-        (-?\d+\.\d+)                       # 5- TES
-        \s+
-        (-?\d+\.\d+)                       # 6- PCS
-        \s+
-        (-?\d+\.\d+)                       # 7- deductions
-        $
-        """,
-        line,
-        re.VERBOSE,
-    )
+    m = _MATCH_SKATER_FSM_MODERN_RE.match(line)
+    if m:
+        return m
+    m = _MATCH_SKATER_FSM_LEGACY_NOC_DEDUCTIONS_RE.match(line)
+    if m:
+        return m
+    return _MATCH_SKATER_FSM_LEGACY_RE.match(line)
 
 
 def get_allowed_errors(num_skaters: int):
@@ -1347,13 +1505,18 @@ def findSinglesElementErrors(skater_scores, judges, event_name, judge_filter="")
             element_name = element["Element"]
             notes = element["Notes"]
             allScores = element["Scores"]
+            if not _has_scorable_judge_goes(allScores):
+                continue
             max_allowed = compute_element_max_goe(element_name, notes, event_name)
 
             judgeNumber = 1
             for judgeNumber in range(1, len(allScores) + 1):
                 
                 if allScores[judgeNumber - 1] is None:
-                    if judgeNumber < len(judges) + 1:
+                    if (
+                        judgeNumber < len(judges) + 1
+                        and not _is_explicit_pdf_dash_score(allScores, judgeNumber - 1)
+                    ):
                         from ijs_scrape_log import record_parsing_issue
 
                         record_parsing_issue(
@@ -1430,7 +1593,10 @@ def findElementDeviations(
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
-                    if judgeNumber < len(judges) + 1:
+                    if (
+                        judgeNumber < len(judges) + 1
+                        and not _is_explicit_pdf_dash_score(allScores, judgeNumber - 1)
+                    ):
                         from ijs_scrape_log import record_parsing_issue
 
                         record_parsing_issue(
@@ -1479,7 +1645,10 @@ def findPCSDeviations(
             avg = sum(filtered_scores) / len(filtered_scores)
             for judgeNumber in range(1, len(allScores) + 1):
                 if allScores[judgeNumber - 1] is None:
-                    if judgeNumber < len(judges) + 1:
+                    if (
+                        judgeNumber < len(judges) + 1
+                        and not _is_explicit_pdf_dash_score(allScores, judgeNumber - 1)
+                    ):
                         from ijs_scrape_log import record_parsing_issue
 
                         record_parsing_issue(

@@ -2,9 +2,41 @@ from openpyxl.formatting.rule import ColorScaleRule
 import re
 
 
+# ISU spin codes: level/position suffixes include ``3p4``, ``3pB``, ``1B``, ``3V1`` (reduced value).
+_SPIN_CODE_RE = re.compile(
+    r"^(?P<base>"
+    r"FCCoSp|FCSSp|FCoSp|CCoSp|CoSp|PCoSp|"
+    r"FCSp|FLSp|FUSp|FSSp|CSSp|CCSp|CLSp|CUSp|"
+    r"USp|LSp|CSp|SSp|DSp|PSp"
+    r")"
+    r"(?:\d+p(?:\d+|B)|\d+B|\d+(?:V\d*)?)?"
+    r"$",
+    re.IGNORECASE,
+)
+
+
+def strip_element_level_suffix(element: str) -> str:
+    """
+    Remove trailing level / position suffix from protocol element codes for categorization.
+
+    Examples: ``CCoSp3`` → ``CCoSp``, ``CoSp3p4`` → ``CoSp``, ``FCSp4V`` → ``FCSp``,
+    ``FSSp3V1`` → ``FSSp``.
+    Non-spin codes fall back to stripping a single trailing digit (``StSq4`` → ``StSq``).
+    """
+    element = (element or "").strip()
+    if not element:
+        return ""
+    m = _SPIN_CODE_RE.match(element)
+    if m:
+        return m.group("base")
+    if element[-1].isdigit():
+        return element[:-1]
+    return element
+
+
 # Return type of element
 def categorizeElement(element):
-    element = (element or "").replace("<", "").strip()
+    element = strip_element_level_suffix((element or "").replace("<", "").strip())
     if not element:
         return ""
     if "+fm" in element:
@@ -31,8 +63,6 @@ def categorizeElement(element):
     if not element:
         return ""
     if element[-1] == "V" or element[-1] == "v":
-        element = element[:-1]
-    if element and element[-1].isdigit():
         element = element[:-1]
     if not element:
         return ""
@@ -83,20 +113,41 @@ def categorizeElement(element):
         "pSTwW": "Twizzle",
         "CiStW": "Step Sequence",
         "SoPSt": "Step Sequence",
+        "NtSeSt":"Step Sequence",
+        "OFStL": "Step Sequence",
+        'SyTwL': "Twizzle",
+        'PStL':"Step Sequence",
         "PSt": "Step Sequence",
+        "NtMiSt": "Step Sequence",
+        "NtDiSt": "Step Sequence",
+        "SqTwL": "Twizzle",
         "PStW": "Step Sequence",
         "OFTW": "Step Sequence",
         "SoOFT": "Step Sequence",
+        "CCiSt":"Step Sequence",
+        "CSeSt":"Step Sequence",
+        "CCiSt":"Step Sequence",
+        "ACiSt":"Step Sequence",
+        "SpSt":"Step Sequence",
         "SqTw": "Twizzle",
         "pSoTw": "Twizzle",
         "ChTw": "Twizzle",
         "SoSqTw": "Twizzle",
         "SoTw": "Twizzle",
         "SqTw": "Twizzle",
+        "STw":"Twizzle",
+        "NtMiTw":"Twizzle",
+        "FSTw":"Twizzle",
+        "BSTw":"Twizzle",
         "SqTwW": "Twizzle",
         "PiF": "Pivot Figure",
         "DiSt": "Step Sequence",
         "NtCiSt": "Step Sequence",
+        'SlSt':"Step Sequence",
+        'GW1Se':"Pattern dance",
+        'GW2Se':"Pattern dance",
+        "SpSq":"Spiral Sequence",
+        "MiStNt":"Step Sequence",
         "OFT": "Step Sequence",
         "OFSt": "Step Sequence",
         "OFStW": "Step Sequence",

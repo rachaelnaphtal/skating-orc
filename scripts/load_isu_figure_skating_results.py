@@ -193,26 +193,16 @@ def season_title_from_compact_code(season: str) -> str:
 
 
 def normalize_results_base_url(url: str) -> str:
-    """
-    Results entry URL for scrape and ``competition.results_url``.
+    """Results entry URL for scrape and ``competition.results_url``."""
+    from ijs_results_urls import results_url_for_storage
 
-    Classic pages keep ``/index.asp``. All other URLs (ISU / Swiss Timing) get
-    ``/index.htm`` when no index file is present.
-    """
-    u = (url or "").strip().rstrip("/")
-    if not u:
-        return ""
-    lower = u.lower()
-    if lower.endswith("/index.asp"):
-        return u
-    if lower.endswith("/index.htm") or lower.endswith("/index.html"):
-        return u
-    return f"{u}/index.htm"
+    return results_url_for_storage(url)
 
 
 def is_fsm_results_url(url: str) -> bool:
-    """Most ISU/Swiss Timing result pages use ``index.htm``; classic IJS uses ``index.asp``."""
-    return not (url or "").strip().lower().endswith("/index.asp")
+    from ijs_results_urls import is_fsm_results_url as _is_fsm
+
+    return _is_fsm(url)
 
 
 def _clean_embedded_url(url: str) -> str:

@@ -25,6 +25,7 @@ ensure_database_for_streamlit()
 
 from app_query_params import (
     apply_bool_param,
+    apply_choice_param,
     apply_int_select_param,
     mark_query_params_applied,
     qp_get,
@@ -67,11 +68,24 @@ from activityAnalysis.international_official_demographics import OFFICIAL_AGE_OU
 from activityAnalysis.international_official_demographics import (
     enrich_summary_with_listing_demographics,
 )
+from activityAnalysis.international_major_events import (
+    MAJOR_ISU_EVENT_KEYS,
+    MAJOR_ISU_EVENT_LABELS,
+    format_major_event_matrix_for_display,
+    get_international_major_event_matrix,
+    major_event_matrix_legend,
+    style_major_event_matrix_display,
+)
 from activityAnalysis.international_officials_detail import (
     INTL_VIEW_DETAIL,
+    INTL_VIEW_MAJOR_EVENTS,
     INTL_VIEW_OPTIONS,
     INTL_VIEW_SUMMARY,
     appointment_detail_url,
+    discipline_id_from_param,
+    discipline_id_to_param,
+    intl_view_mode_from_query_param,
+    intl_view_query_slug_for_mode,
     open_last_appointment_detail,
     parse_appointment_detail_params,
     remember_last_appointment_detail,
@@ -87,6 +101,7 @@ from activityAnalysis.international_segment_eligibility import (
     enrich_panel_with_rule411_eligibility,
 )
 from activityAnalysis.international_requirements import (
+    DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
     enrich_summary_with_promote_first_eligible,
     evaluate_requirements_summary_df,
 )
@@ -104,6 +119,16 @@ st.set_page_config(
 _CACHE_TTL_SEC = 120
 _ALL_LABEL = "(All)"
 _INTL_QP_FLAG = "_intl_officials_qp_tuple"
+
+
+def _mark_intl_query_params() -> None:
+    mark_query_params_applied(_INTL_QP_FLAG)
+
+
+def _sync_intl_query_params(**params) -> None:
+    """Mirror filters to the URL and snapshot them so widget changes are not reverted."""
+    sync_query_params(**params)
+    _mark_intl_query_params()
 
 
 @st.cache_data(ttl=_CACHE_TTL_SEC)
@@ -312,10 +337,72 @@ def _load_appointment_data_date():
         return session.execute(select(sqlfunc.max(Appointments.achieved_date))).scalar()
 
 
+@st.cache_data(ttl=_CACHE_TTL_SEC)
+def _load_major_event_matrix(
+    event_key: str,
+    appointment_type_id: int | None,
+    discipline_id: int | None,
+    active_only: bool,
+):
+    return get_international_major_event_matrix(
+        event_key=event_key,
+        appointment_type_id=appointment_type_id,
+        discipline_id=discipline_id,
+        isu_level_id=DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
+        active_appointments_only=active_only,
+    )
+
+
 def _sentinel(value, *, all_label: str = _ALL_LABEL) -> int | None:
     if value is None or value == all_label:
         return None
     return int(value)
+
+
+def _apply_major_events_filters_from_query() -> None:
+    apply_choice_param("event", "intl_major_event_key", MAJOR_ISU_EVENT_KEYS)
+    appt_raw = qp_get("appt")
+    if appt_raw is not None:
+        if appt_raw.strip().lower() == "all":
+            st.session_state["intl_major_event_appt"] = _ALL_LABEL
+        else:
+            appt_id = qp_get_int("appt")
+            if appt_id is not None:
+                st.session_state["intl_major_event_appt"] = appt_id
+    did_raw = qp_get("did")
+    if did_raw is not None:
+        if did_raw.strip().lower() == "none":
+            st.session_state["intl_major_event_disc"] = _ALL_LABEL
+        else:
+            disc_id = discipline_id_from_param(did_raw)
+            if disc_id is not None:
+                st.session_state["intl_major_event_disc"] = disc_id
+
+
+def _major_events_query_params(
+    *,
+    event_key: str,
+    major_appt_id: int | None,
+    major_disc_id: int | None,
+    active_only: bool,
+) -> dict[str, str | None]:
+    return {
+        "view": intl_view_query_slug_for_mode(INTL_VIEW_MAJOR_EVENTS),
+        "active": "1" if active_only else "0",
+        "event": event_key,
+        "appt": str(major_appt_id) if major_appt_id is not None else "all",
+        "did": discipline_id_to_param(major_disc_id),
+        "oid": None,
+        "atid": None,
+        "listing": None,
+        "seasons": None,
+        "req": None,
+        "activity_detail": None,
+        "scope_counts": None,
+        "sem_maintain": None,
+        "sem_promote": None,
+        "level": None,
+    }
 
 
 def _summary_row_for_appointment(
@@ -426,7 +513,9 @@ if st.sidebar.button("Refresh data"):
 
 _on_detail_page = qp_get("view") == "appointment"
 
-if query_params_changed(_INTL_QP_FLAG):
+_intl_url_changed = query_params_changed(_INTL_QP_FLAG)
+
+if _intl_url_changed:
     apply_int_select_param(
         "listing", "intl_listing_season", REPORT_LISTING_SEASON_OPTIONS
     )
@@ -447,11 +536,9 @@ if query_params_changed(_INTL_QP_FLAG):
     level_qp = qp_get_int("level")
     if level_qp is not None:
         st.session_state["intl_level_pick"] = level_qp
-    if qp_get("view") == "appointment":
-        st.session_state["intl_view_mode"] = INTL_VIEW_DETAIL
-    elif qp_get("view") is None:
-        st.session_state["intl_view_mode"] = INTL_VIEW_SUMMARY
-    mark_query_params_applied(_INTL_QP_FLAG)
+    view_from_url = intl_view_mode_from_query_param(qp_get("view"))
+    if view_from_url is not None:
+        st.session_state["intl_view_mode"] = view_from_url
 
 if "intl_listing_season" not in st.session_state:
     st.session_state["intl_listing_season"] = REPORT_LISTING_SEASON_DEFAULT
@@ -483,6 +570,12 @@ if "intl_show_seminar_promote" not in st.session_state:
     st.session_state["intl_show_seminar_promote"] = (
         qp_get("sem_promote") == "1" if qp_get("sem_promote") is not None else False
     )
+if "intl_major_event_key" not in st.session_state:
+    st.session_state["intl_major_event_key"] = MAJOR_ISU_EVENT_KEYS[0]
+if "intl_major_event_appt" not in st.session_state:
+    st.session_state["intl_major_event_appt"] = _ALL_LABEL
+if "intl_major_event_disc" not in st.session_state:
+    st.session_state["intl_major_event_disc"] = _ALL_LABEL
 
 view_mode = st.sidebar.radio(
     "View",
@@ -490,6 +583,14 @@ view_mode = st.sidebar.radio(
     key="intl_view_mode",
     horizontal=True,
 )
+
+_prev_view_mode = st.session_state.get("_intl_prev_view_mode")
+if view_mode == INTL_VIEW_MAJOR_EVENTS and _prev_view_mode != INTL_VIEW_MAJOR_EVENTS:
+    if qp_get("appt") is None:
+        st.session_state["intl_major_event_appt"] = _ALL_LABEL
+    if qp_get("did") is None:
+        st.session_state["intl_major_event_disc"] = _ALL_LABEL
+st.session_state["_intl_prev_view_mode"] = view_mode
 
 _detail_nav_params = parse_appointment_detail_params()
 _detail_listing_season = int(st.session_state["intl_listing_season"])
@@ -514,93 +615,128 @@ active_only = st.sidebar.checkbox(
     help="When checked, only directory appointments with active = true are included.",
 )
 
-include_requirements = st.sidebar.checkbox(
-    "Include ISU maintain / promote checks",
-    key="intl_include_requirements",
-    disabled=_on_detail_page,
-    help=(
-        "Adds Maintain and Promote columns on the summary list (slower). "
-        "Appointment detail pages always show full requirement breakdowns."
-        if not _on_detail_page
-        else "Maintain and promote checks are always shown on appointment detail pages."
-    ),
-)
+if view_mode != INTL_VIEW_MAJOR_EVENTS:
+    include_requirements = st.sidebar.checkbox(
+        "Include ISU maintain / promote checks",
+        key="intl_include_requirements",
+        disabled=_on_detail_page,
+        help=(
+            "Adds Maintain and Promote columns on the summary list (slower). "
+            "Appointment detail pages always show full requirement breakdowns."
+            if not _on_detail_page
+            else "Maintain and promote checks are always shown on appointment detail pages."
+        ),
+    )
 
-show_activity_detail = st.sidebar.checkbox(
-    "Show activity detail",
-    key="intl_show_activity_detail",
-    disabled=_on_detail_page,
-    help=(
-        "Adds international vs national competition and segment counts to the summary "
-        "table and top metrics. Appointment detail pages always show activity breakdown."
-        if not _on_detail_page
-        else "Activity counts are always shown on appointment detail pages."
-    ),
-)
+    show_activity_detail = st.sidebar.checkbox(
+        "Show activity detail",
+        key="intl_show_activity_detail",
+        disabled=_on_detail_page,
+        help=(
+            "Adds international vs national competition and segment counts to the summary "
+            "table and top metrics. Appointment detail pages always show activity breakdown."
+            if not _on_detail_page
+            else "Activity counts are always shown on appointment detail pages."
+        ),
+    )
 
-show_seminar_maintain = st.sidebar.checkbox(
-    "Seminar maintain column",
-    key="intl_show_seminar_maintain",
-    disabled=_on_detail_page,
-    help=(
-        "Adds a column showing whether seminar maintain requirements are met. "
-        "Empty when no seminar requirement applies."
-        if not _on_detail_page
-        else "Seminar columns are only shown on the summary table."
-    ),
-)
+    show_seminar_maintain = st.sidebar.checkbox(
+        "Seminar maintain column",
+        key="intl_show_seminar_maintain",
+        disabled=_on_detail_page,
+        help=(
+            "Adds a column showing whether seminar maintain requirements are met. "
+            "Empty when no seminar requirement applies."
+            if not _on_detail_page
+            else "Seminar columns are only shown on the summary table."
+        ),
+    )
 
-show_seminar_promote = st.sidebar.checkbox(
-    "Seminar promote column",
-    key="intl_show_seminar_promote",
-    disabled=_on_detail_page,
-    help=(
-        "Adds a column showing whether seminar promote requirements are met. "
-        "Empty when no seminar requirement applies."
-        if not _on_detail_page
-        else "Seminar columns are only shown on the summary table."
-    ),
-)
+    show_seminar_promote = st.sidebar.checkbox(
+        "Seminar promote column",
+        key="intl_show_seminar_promote",
+        disabled=_on_detail_page,
+        help=(
+            "Adds a column showing whether seminar promote requirements are met. "
+            "Empty when no seminar requirement applies."
+            if not _on_detail_page
+            else "Seminar columns are only shown on the summary table."
+        ),
+    )
+else:
+    include_requirements = False
+    show_activity_detail = False
+    show_seminar_maintain = False
+    show_seminar_promote = False
 
-listing_season_code = st.sidebar.selectbox(
-    "Listing season",
-    options=list(REPORT_LISTING_SEASON_OPTIONS),
-    key="intl_listing_season",
-    format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
-    help=(
-        "ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one. "
-        "Age and years in grade use the listing reference date "
-        f"(e.g. {format_listing_reference_july1(2627)} for 26-27)."
-    ),
-)
+if view_mode != INTL_VIEW_MAJOR_EVENTS:
+    listing_season_code = st.sidebar.selectbox(
+        "Listing season",
+        options=list(REPORT_LISTING_SEASON_OPTIONS),
+        key="intl_listing_season",
+        format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
+        help=(
+            "ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one. "
+            "Age and years in grade use the listing reference date "
+            f"(e.g. {format_listing_reference_july1(2627)} for 26-27)."
+        ),
+    )
 
-report_season_window = st.sidebar.selectbox(
-    "Seasons in report",
-    options=list(REPORT_SEASON_WINDOW_OPTIONS),
-    key="intl_report_season_window",
-    help="Filter competition/segment counts and detail to this many seasons before the listing season.",
-)
+    report_season_window = st.sidebar.selectbox(
+        "Seasons in report",
+        options=list(REPORT_SEASON_WINDOW_OPTIONS),
+        key="intl_report_season_window",
+        help="Filter competition/segment counts and detail to this many seasons before the listing season.",
+    )
 
-report_season_codes = season_codes_preceding_listing(listing_season_code, report_season_window)
-st.sidebar.caption(
-    "Report seasons: "
-    + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
-)
-st.sidebar.caption(
-    f"Age / years in grade reference: {format_listing_reference_july1(listing_season_code)}"
-)
+    report_season_codes = season_codes_preceding_listing(
+        listing_season_code, report_season_window
+    )
+    st.sidebar.caption(
+        "Report seasons: "
+        + ", ".join(format_usfs_season_code(c) for c in report_season_codes)
+    )
+    st.sidebar.caption(
+        f"Age / years in grade reference: {format_listing_reference_july1(listing_season_code)}"
+    )
 
-sync_query_params(
-    listing=str(int(listing_season_code)),
-    seasons=str(int(report_season_window)),
-    req="1" if include_requirements else "0",
-    active="1" if active_only else "0",
-    activity_detail="1" if show_activity_detail else "0",
-    sem_maintain="1" if show_seminar_maintain else "0",
-    sem_promote="1" if show_seminar_promote else "0",
-)
+    _sync_intl_query_params(
+        view=intl_view_query_slug_for_mode(INTL_VIEW_SUMMARY),
+        listing=str(int(listing_season_code)),
+        seasons=str(int(report_season_window)),
+        req="1" if include_requirements else "0",
+        active="1" if active_only else "0",
+        activity_detail="1" if show_activity_detail else "0",
+        sem_maintain="1" if show_seminar_maintain else "0",
+        sem_promote="1" if show_seminar_promote else "0",
+        oid=None,
+        atid=None,
+        event=None,
+        appt=None,
+        did=None,
+    )
+else:
+    listing_season_code = int(st.session_state.get("intl_listing_season", REPORT_LISTING_SEASON_DEFAULT))
+    report_season_window = int(
+        st.session_state.get("intl_report_season_window", REPORT_SEASON_WINDOW_DEFAULT)
+    )
+    report_season_codes = season_codes_preceding_listing(
+        listing_season_code, report_season_window
+    )
 
 if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
+    _sync_intl_query_params(
+        view=intl_view_query_slug_for_mode(INTL_VIEW_DETAIL),
+        active="1" if active_only else "0",
+        oid=None,
+        atid=None,
+        did=None,
+        listing=None,
+        seasons=None,
+        req=None,
+        event=None,
+        appt=None,
+    )
     st.title("International Officials Activity")
     st.caption("Choose an appointment to open its detail report.")
     render_detail_appointment_nav(
@@ -612,7 +748,185 @@ if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
     )
     st.stop()
 
-if _render_appointment_detail_from_query_params():
+if view_mode == INTL_VIEW_DETAIL and _render_appointment_detail_from_query_params():
+    st.stop()
+
+if view_mode == INTL_VIEW_MAJOR_EVENTS:
+    st.title("Major ISU Events Activity")
+    st.caption(
+        "Calendar-year matrix of panel service at ISU Championship-tier events "
+        "(Worlds, Olympics, Junior Worlds, Four Continents, Europeans) and the Grand Prix Final."
+    )
+
+    appt_df = _load_appointment_type_options()
+    appt_options = [_ALL_LABEL] + [
+        int(x)
+        for x in appt_df["appointment_type_id"].astype(int).tolist()
+        if int(x) != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
+    ]
+    appt_labels = {_ALL_LABEL: _ALL_LABEL}
+    for row in appt_df.itertuples(index=False):
+        if int(row.appointment_type_id) != INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
+            appt_labels[int(row.appointment_type_id)] = row.appointment_type
+
+    disc_df = _load_discipline_options(None, DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP, active_only)
+    disc_options = [_ALL_LABEL]
+    disc_labels = {_ALL_LABEL: _ALL_LABEL}
+    if not disc_df.empty:
+        disc_options.extend(disc_df["discipline_id"].astype(int).tolist())
+        for row in disc_df.itertuples(index=False):
+            disc_labels[int(row.discipline_id)] = (
+                row.discipline or f"Discipline {row.discipline_id}"
+            )
+
+    if _intl_url_changed:
+        _apply_major_events_filters_from_query()
+    else:
+        _sync_intl_query_params(
+            **_major_events_query_params(
+                event_key=st.session_state.get(
+                    "intl_major_event_key", MAJOR_ISU_EVENT_KEYS[0]
+                ),
+                major_appt_id=_sentinel(
+                    st.session_state.get("intl_major_event_appt", _ALL_LABEL)
+                ),
+                major_disc_id=_sentinel(
+                    st.session_state.get("intl_major_event_disc", _ALL_LABEL)
+                ),
+                active_only=active_only,
+            )
+        )
+
+    col_e, col_a, col_d = st.columns(3)
+    with col_e:
+        event_key = st.selectbox(
+            "Event",
+            options=list(MAJOR_ISU_EVENT_KEYS),
+            format_func=lambda k: MAJOR_ISU_EVENT_LABELS.get(k, k),
+            key="intl_major_event_key",
+        )
+    with col_a:
+        pick_appt = st.selectbox(
+            "Appointment type",
+            options=appt_options,
+            format_func=lambda x: appt_labels.get(x, str(x)),
+            key="intl_major_event_appt",
+        )
+    with col_d:
+        pick_disc = st.selectbox(
+            "Discipline",
+            options=disc_options,
+            format_func=lambda x: disc_labels.get(x, str(x)),
+            key="intl_major_event_disc",
+        )
+
+    major_appt_id = _sentinel(pick_appt)
+    major_disc_id = _sentinel(pick_disc)
+
+    _sync_intl_query_params(
+        **_major_events_query_params(
+            event_key=event_key,
+            major_appt_id=major_appt_id,
+            major_disc_id=major_disc_id,
+            active_only=active_only,
+        )
+    )
+
+    with st.spinner("Loading event matrix..."):
+        matrix = _load_major_event_matrix(
+            event_key,
+            major_appt_id,
+            major_disc_id,
+            active_only,
+        )
+
+    if matrix.empty:
+        st.info("No ISU-appointed officials match the current filters.")
+        st.stop()
+
+    display, year_cols = format_major_event_matrix_for_display(matrix)
+    if "Years since last" in display.columns:
+        display = display.sort_values(
+            "Years since last",
+            ascending=True,
+            na_position="last",
+        )
+    total_officials = int(matrix["official_id"].nunique())
+    times_col = "Times at event" if "Times at event" in display.columns else "total_championships"
+    total_assignments = (
+        int(pd.to_numeric(display[times_col], errors="coerce").fillna(0).sum())
+        if times_col in display.columns
+        else 0
+    )
+
+    m1, m2 = st.columns(2)
+    m1.metric("Officials", total_officials)
+    m2.metric("Total event assignments", total_assignments)
+
+    show_cols = [
+        c
+        for c in [
+            "Official",
+            "Years eligible",
+            "Years since last",
+            "Most recent year",
+            "Times at event",
+            *year_cols,
+        ]
+        if c in display.columns
+    ]
+    styled_display = style_major_event_matrix_display(display, year_cols)
+    hide_cols = [c for c in display.columns if c not in show_cols]
+    if hide_cols:
+        styled_display = styled_display.hide(subset=hide_cols, axis="columns")
+    st.dataframe(
+        styled_display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Official": st.column_config.TextColumn("Official", width="medium", pinned=True),
+            "Years eligible": st.column_config.NumberColumn(
+                "Years eligible",
+                format="%d",
+                help=(
+                    "Current calendar year minus the year of their earliest ISU "
+                    "Singles/Pairs/Dance appointment."
+                ),
+                width="small",
+            ),
+            "Years since last": st.column_config.NumberColumn(
+                "Years since last",
+                format="%d",
+                help="Blank if never at this event.",
+                width="small",
+            ),
+            "Most recent year": st.column_config.NumberColumn(
+                "Most recent year",
+                format="%d",
+                width="small",
+            ),
+            "Times at event": st.column_config.NumberColumn(
+                "Times at event",
+                format="%d",
+                help="Distinct calendar years with panel service at this event (selected role and discipline).",
+            ),
+            **{
+                y: st.column_config.TextColumn(
+                    y,
+                    help=f"Panel role(s) at {MAJOR_ISU_EVENT_LABELS.get(event_key, event_key)}",
+                    width="small",
+                )
+                for y in year_cols
+            },
+        },
+    )
+    st.caption(major_event_matrix_legend())
+
+    appt_date = _load_appointment_data_date()
+    if appt_date is not None:
+        st.caption(
+            f"Directory appointment data current as of {pd.Timestamp(appt_date):%-m/%-d/%Y}"
+        )
     st.stop()
 
 st.title("International Officials Activity")
@@ -730,7 +1044,7 @@ with col_f4:
 
 official_id = _sentinel(pick_official)
 
-sync_query_params(level=str(level_id) if level_id is not None else None)
+_sync_intl_query_params(level=str(level_id) if level_id is not None else None)
 
 with st.spinner("Loading activity..."):
     summary, report_season_codes = _load_summary(

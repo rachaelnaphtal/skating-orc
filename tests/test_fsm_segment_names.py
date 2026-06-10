@@ -38,6 +38,52 @@ def test_fsm_team_event_pdf_header_includes_discipline():
     )
 
 
+WC2016_MEN_SP_HEADER = [
+    "ISU World Figure Skating Championships 2016",
+    "MEN SHORT PROGRAM JUDGES DETAILS PER SKATER",
+    "Starting Total Total Total Total",
+    "Rank Name Nation Number Segment Element Program Component Deductions",
+    "1 Yuzuru HANYU JPN 110.56 61.52 49.04",
+    "Program Components Factor",
+    "Skating Skills 1.00 9.75 10.00 9.75 9.50 10.00 10.00 10.00 9.75 10.00 9.89",
+]
+
+
+def test_fsm_event_label_from_2016_combined_header():
+    raw = fsm_event_label_from_pdf_lines(WC2016_MEN_SP_HEADER)
+    assert raw == "Men - Short Program"
+    assert ijs_event_label_to_db_segment_name(raw) == "Men___Short_Program"
+
+
+def test_fsm_event_label_from_2009_ice_dance_compulsory_and_original():
+    cd = [
+        "ISU World Figure Skating Championships 2009",
+        "ICE DANCE COMPULSORY DANCE JUDGES DETAILS PER SKATER",
+    ]
+    od = [
+        "ISU World Figure Skating Championships 2009",
+        "ICE DANCE ORIGINAL DANCE JUDGES DETAILS PER SKATER",
+    ]
+    assert fsm_event_label_from_pdf_lines(cd) == "Ice Dance - Compulsory Dance"
+    assert fsm_event_label_from_pdf_lines(od) == "Ice Dance - Original Dance"
+    assert (
+        ijs_event_label_to_db_segment_name(fsm_event_label_from_pdf_lines(cd))
+        == "Ice_Dance___Compulsory_Dance"
+    )
+
+
+def test_fsm_event_label_from_2016_ice_dance_short_dance_header():
+    lines = [
+        "ISU World Figure Skating Championships 2016",
+        "ICE DANCE SHORT DANCE JUDGES DETAILS PER SKATER",
+        "1 Gabriella PAPADAKIS / Guillaume CIZERON FRA 76.29 38.46 37.83",
+        "Skating Skills 0.80 8.75 9.75 9.25 9.50 9.75 9.25 9.00 9.50 9.75 9.43",
+    ]
+    raw = fsm_event_label_from_pdf_lines(lines)
+    assert raw == "Ice Dance - Short Dance"
+    assert ijs_event_label_to_db_segment_name(raw) == "Ice_Dance___Short_Dance"
+
+
 WTT_INDEX_HTML = """
 <table>
 <tr>
