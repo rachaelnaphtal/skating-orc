@@ -7,6 +7,9 @@ with pickled element marks. Ranking and σ̂ benchmark pools each concatenate ma
 **σ̂ cache**: fitted bin parameters for a benchmark season window (reused when ranking
 scope is narrower).
 
+**Summary shard cache**: mergeable per-judge stats per season×discipline at a fixed σ̂ fit
+(skips re-loading raw marks when σ̂ and summaries are warm).
+
 **Full-run cache** (legacy): exact filter-set blob; still checked first for old rows.
 """
 
@@ -25,20 +28,30 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from analytics import JudgeAnalytics
+from database import ensure_orm_tables
 from element_deviation_ranking import (
     ElementRankingShard,
     SHARD_MARK_COLUMNS,
+    annotate_normalized_marks,
     apply_min_marks_to_ranking_result,
     attach_judge_identities,
     benchmark_scope_kwargs_from_run_params,
     benchmark_competition_scope,
     benchmark_season_bounds,
+    build_ranking_display_table,
+    build_sigma_bins_dataframe,
+    compute_control_scores,
     compute_element_ranking_data_fingerprint,
+    compute_mergeable_judge_summary,
+    control_scores_by_element,
     discipline_ids_for_element_ranking,
     finish_element_deviation_rankings_from_marks,
     fit_sigma_params_from_marks,
     iter_element_ranking_shards,
     load_element_marking_data,
+    marking_score_summary,
+    merge_mergeable_judge_summaries,
+    memory_efficient_mode,
     ranking_scope_kwargs_from_run_params,
     run_params_benchmark_compute_key,
     run_params_compute_key,
@@ -52,6 +65,7 @@ from models import (
     Competition,
     ElementDeviationRankingCache,
     ElementDeviationRankingShardCache,
+    ElementDeviationRankingShardSummaryCache,
     ElementDeviationRankingSigmaCache,
 )
 
@@ -113,10 +127,22 @@ def _require_postgres(bind: Engine) -> None:
         )
 
 
-def ensure_element_ranking_cache_tables(bind: Engine) -> None:
-    ElementDeviationRankingShardCache.__table__.create(bind, checkfirst=True)
-    ElementDeviationRankingSigmaCache.__table__.create(bind, checkfirst=True)
-    ElementDeviationRankingCache.__table__.create(bind, checkfirst=True)
+def ensure_element_ranking_cache_tables(session: Session) -> None:
+    ensure_orm_tables(
+        session,
+        ElementDeviationRankingShardCache.__table__,
+        ElementDeviationRankingShardSummaryCache.__table__,
+        ElementDeviationRankingSigmaCache.__table__,
+        ElementDeviationRankingCache.__table__,
+    )
+
+
+def shard_summary_cache_key(shard_key: str, sigma_key: str, floor_sigma: float) -> str:
+    payload = json.dumps(
+        {"shard_key": shard_key, "sigma_key": sigma_key, "floor_sigma": float(floor_sigma)},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
 def _benchmark_pool_fingerprint(
@@ -135,23 +161,23 @@ def _load_sigma_cache_row(
     session: Session,
     analytics: JudgeAnalytics,
     run_params: tuple,
+    *,
+    validate_fingerprint: bool = True,
 ) -> dict | None:
-    ensure_element_ranking_cache_tables(session.get_bind())
     key = benchmark_sigma_cache_key(run_params)
     row = session.get(ElementDeviationRankingSigmaCache, key)
     if row is None:
         return None
-    bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
-    expected = _benchmark_pool_fingerprint(session, analytics, bench_scope)
-    if row.data_fingerprint != expected:
-        session.delete(row)
-        session.commit()
-        return None
+    if validate_fingerprint:
+        bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
+        expected = _benchmark_pool_fingerprint(session, analytics, bench_scope)
+        if row.data_fingerprint != expected:
+            session.expunge(row)
+            return None
     try:
         params = pickle.loads(row.params_payload)
     except Exception:
-        session.delete(row)
-        session.commit()
+        session.expunge(row)
         return None
     if not isinstance(params, dict):
         return None
@@ -167,7 +193,6 @@ def _save_sigma_cache_row(
     n_marks: int,
 ) -> None:
     _require_postgres(session.get_bind())
-    ensure_element_ranking_cache_tables(session.get_bind())
     rp = unpack_element_ranking_run_params(run_params)
     bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
     bs, be = benchmark_season_bounds(run_params)
@@ -221,7 +246,12 @@ def get_or_fit_benchmark_sigma_params(
     bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
     separate = uses_separate_benchmark_pool(run_params)
 
-    cached = _load_sigma_cache_row(session, analytics, run_params)
+    cached = _load_sigma_cache_row(
+        session,
+        analytics,
+        run_params,
+        validate_fingerprint=not cache_only,
+    )
     if cached is not None:
         sigma_ref = None
         if separate:
@@ -256,6 +286,218 @@ def get_or_fit_benchmark_sigma_params(
         )
     sigma_ref = bench_marks if separate else None
     return params, sigma_ref, False
+
+
+def _load_shard_summary_row(
+    session: Session,
+    analytics: JudgeAnalytics,
+    shard: ElementRankingShard,
+    *,
+    sigma_key: str,
+    floor_sigma: float,
+    validate_fingerprint: bool = True,
+) -> dict[str, Any] | None:
+    sk = shard_cache_key(shard)
+    key = shard_summary_cache_key(sk, sigma_key, floor_sigma)
+    row = session.get(ElementDeviationRankingShardSummaryCache, key)
+    if row is None:
+        return None
+    if float(row.floor_sigma) != float(floor_sigma):
+        session.expunge(row)
+        return None
+    if validate_fingerprint:
+        expected = _shard_fingerprint(session, analytics, shard)
+        if row.data_fingerprint != expected:
+            session.expunge(row)
+            return None
+    try:
+        payload = pickle.loads(row.summary_payload)
+    except Exception:
+        session.expunge(row)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _save_shard_summary_row(
+    session: Session,
+    analytics: JudgeAnalytics,
+    shard: ElementRankingShard,
+    *,
+    sigma_key: str,
+    floor_sigma: float,
+    mergeable_summary: pd.DataFrame,
+    control_by_element: pd.DataFrame,
+    n_marks: int,
+) -> None:
+    _require_postgres(session.get_bind())
+    sk = shard_cache_key(shard)
+    key = shard_summary_cache_key(sk, sigma_key, floor_sigma)
+    fingerprint = _shard_fingerprint(session, analytics, shard)
+    payload = pickle.dumps(
+        {
+            "mergeable_summary": mergeable_summary,
+            "control_by_element": control_by_element,
+        },
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+    now = datetime.now(timezone.utc)
+    row = {
+        "cache_key": key,
+        "shard_key": sk,
+        "sigma_key": sigma_key,
+        "floor_sigma": float(floor_sigma),
+        "data_fingerprint": fingerprint,
+        "summary_payload": payload,
+        "n_marks": n_marks,
+        "computed_at": now,
+    }
+    write_session = sessionmaker(bind=session.get_bind())()
+    try:
+        existing = write_session.get(ElementDeviationRankingShardSummaryCache, key)
+        if existing:
+            for k, v in row.items():
+                setattr(existing, k, v)
+        else:
+            write_session.add(ElementDeviationRankingShardSummaryCache(**row))
+        write_session.commit()
+    except Exception:
+        write_session.rollback()
+        raise
+    finally:
+        write_session.close()
+
+
+def _persist_shard_summaries_for_scope(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    params: dict,
+    rank_scope: dict[str, Any],
+    *,
+    floor_sigma: float,
+) -> None:
+    if not params:
+        return
+    ensure_element_ranking_cache_tables(session)
+    sigma_key = benchmark_sigma_cache_key(run_params)
+    for shard in iter_element_ranking_shards(analytics, **rank_scope):
+        marks = _load_shard_row(session, analytics, shard)
+        if marks is None:
+            marks = _load_marks_from_db(session, analytics, shard)
+        if marks.empty:
+            continue
+        if "judge_name" not in marks.columns:
+            marks = attach_judge_identities(marks, analytics)
+        work = annotate_normalized_marks(
+            compute_control_scores(marks.copy()), params, floor_sigma=floor_sigma
+        )
+        mergeable = compute_mergeable_judge_summary(work)
+        control = control_scores_by_element(marks)
+        _save_shard_summary_row(
+            session,
+            analytics,
+            shard,
+            sigma_key=sigma_key,
+            floor_sigma=floor_sigma,
+            mergeable_summary=mergeable,
+            control_by_element=control,
+            n_marks=len(marks),
+        )
+
+
+def _try_assemble_ranking_from_shard_summaries(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    params: dict,
+    rank_scope: dict[str, Any],
+    *,
+    floor_sigma: float,
+    min_bin_count: int,
+    include_judge_detail: bool | None,
+    sigma_reference_df: pd.DataFrame | None,
+) -> dict[str, Any] | None:
+    sigma_key = benchmark_sigma_cache_key(run_params)
+    shards = iter_element_ranking_shards(analytics, **rank_scope)
+    if not shards:
+        return None
+
+    mergeable_parts: list[pd.DataFrame] = []
+    control_parts: list[pd.DataFrame] = []
+    n_raw = 0
+    for shard in shards:
+        payload = _load_shard_summary_row(
+            session,
+            analytics,
+            shard,
+            sigma_key=sigma_key,
+            floor_sigma=floor_sigma,
+            validate_fingerprint=False,
+        )
+        if payload is None:
+            return None
+        mergeable = payload.get("mergeable_summary")
+        control = payload.get("control_by_element")
+        if not isinstance(mergeable, pd.DataFrame):
+            return None
+        mergeable_parts.append(mergeable)
+        if isinstance(control, pd.DataFrame) and not control.empty:
+            control_parts.append(control)
+        n_raw += int(mergeable["n_marks"].sum()) if not mergeable.empty else 0
+
+    judge_summary_all = merge_mergeable_judge_summaries(mergeable_parts)
+    if judge_summary_all.empty:
+        return _empty_ranking_error("No element score rows found for the selected filters.")
+
+    low_memory = (
+        include_judge_detail is False
+        if include_judge_detail is not None
+        else memory_efficient_mode()
+    )
+    disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
+    elem_map = {int(i): n for i, n in analytics.get_element_types()}
+    bins_df = sigma_reference_df if sigma_reference_df is not None else pd.DataFrame()
+    if bins_df.empty and not low_memory:
+        bins_df = pd.DataFrame()
+    sigma_bins = (
+        build_sigma_bins_dataframe(
+            bins_df if "control_score" in bins_df.columns else pd.DataFrame(),
+            params,
+            disc_map,
+            elem_map,
+            min_bin_count=min_bin_count,
+        )
+        if not bins_df.empty
+        else pd.DataFrame()
+    )
+    control_by_element = (
+        pd.concat(control_parts, ignore_index=True).drop_duplicates(subset=["element_id"])
+        if control_parts
+        else pd.DataFrame()
+    )
+    marking = build_ranking_display_table(judge_summary_all)
+    return {
+        "marking": marking,
+        "summary": marking_score_summary(judge_summary_all),
+        "sigma_bins": sigma_bins,
+        "judge_summary_all": judge_summary_all,
+        "judge_discipline_detail": pd.DataFrame(),
+        "judge_element_detail": pd.DataFrame(),
+        "judge_discipline_detail_all": pd.DataFrame(),
+        "judge_element_detail_all": pd.DataFrame(),
+        "control_by_element": control_by_element if low_memory else pd.DataFrame(),
+        "params": params,
+        "n_raw_marks": n_raw,
+        "n_sigma_buckets": len(params),
+        "error": None,
+        "low_memory": low_memory,
+        "benchmark_start_season_year": benchmark_season_bounds(run_params)[0],
+        "benchmark_end_season_year": benchmark_season_bounds(run_params)[1],
+        "benchmark_competition_scope": benchmark_competition_scope(run_params),
+        "_from_summary_cache": True,
+    }
 
 
 def run_element_deviation_ranking_pipeline(
@@ -293,9 +535,48 @@ def run_element_deviation_ranking_pipeline(
         benchmark_competition_scope_key,
     )
     session = analytics.session
+    if not cache_only:
+        ensure_element_ranking_cache_tables(session)
     rank_scope = ranking_scope_kwargs_from_run_params(run_params)
     bs, be = benchmark_season_bounds(run_params)
     bench_scope_key = benchmark_competition_scope(run_params)
+
+    separate = uses_separate_benchmark_pool(run_params)
+    cached_params: dict | None = None
+    sigma_ref: pd.DataFrame | None = None
+    if cache_only:
+        if separate:
+            sigma_out = get_or_fit_benchmark_sigma_params(
+                session,
+                analytics,
+                run_params,
+                cache_only=True,
+                persist_shards=False,
+                persist_sigma=False,
+            )
+            if sigma_out is None:
+                return _empty_ranking_error(
+                    "Missing or stale shard/σ̂ cache for benchmark pool."
+                )
+            cached_params, sigma_ref, _ = sigma_out
+        else:
+            cached_params = _load_sigma_cache_row(
+                session, analytics, run_params, validate_fingerprint=False
+            )
+        if cached_params:
+            summary_result = _try_assemble_ranking_from_shard_summaries(
+                session,
+                analytics,
+                run_params,
+                cached_params,
+                rank_scope,
+                floor_sigma=floor_sigma,
+                min_bin_count=min_bin_count,
+                include_judge_detail=include_judge_detail,
+                sigma_reference_df=sigma_ref,
+            )
+            if summary_result is not None:
+                return apply_min_marks_to_ranking_result(summary_result, int(min_marks))
 
     ranking_marks = collect_marks_for_run(
         analytics,
@@ -306,9 +587,7 @@ def run_element_deviation_ranking_pipeline(
     if ranking_marks is None:
         return _empty_ranking_error("Missing or stale shard cache for ranking scope.")
 
-    separate = uses_separate_benchmark_pool(run_params)
     params: dict | None
-    sigma_ref: pd.DataFrame | None = None
     if separate:
         sigma_out = get_or_fit_benchmark_sigma_params(
             session,
@@ -354,6 +633,18 @@ def run_element_deviation_ranking_pipeline(
         benchmark_end_season_year=be,
         benchmark_competition_scope_key=bench_scope_key,
     )
+    if persist_shards and params:
+        try:
+            _persist_shard_summaries_for_scope(
+                session,
+                analytics,
+                run_params,
+                params,
+                rank_scope,
+                floor_sigma=floor_sigma,
+            )
+        except Exception:
+            _log.exception("Failed to persist element ranking shard summaries")
     return apply_min_marks_to_ranking_result(result, int(min_marks))
 
 
@@ -433,22 +724,24 @@ def _load_marks_from_db(
 
 
 def _load_shard_row(
-    session: Session, analytics: JudgeAnalytics, shard: ElementRankingShard
+    session: Session,
+    analytics: JudgeAnalytics,
+    shard: ElementRankingShard,
+    *,
+    validate_fingerprint: bool = True,
 ) -> pd.DataFrame | None:
-    ensure_element_ranking_cache_tables(session.get_bind())
     row = session.get(ElementDeviationRankingShardCache, shard_cache_key(shard))
     if row is None:
         return None
-    expected = _shard_fingerprint(session, analytics, shard)
-    if row.data_fingerprint != expected:
-        session.delete(row)
-        session.commit()
-        return None
+    if validate_fingerprint:
+        expected = _shard_fingerprint(session, analytics, shard)
+        if row.data_fingerprint != expected:
+            session.expunge(row)
+            return None
     try:
         df = pickle.loads(row.marks_payload)
     except Exception:
-        session.delete(row)
-        session.commit()
+        session.expunge(row)
         return None
     if not isinstance(df, pd.DataFrame):
         return None
@@ -462,7 +755,6 @@ def _save_shard_row(
     marks: pd.DataFrame,
 ) -> None:
     _require_postgres(session.get_bind())
-    ensure_element_ranking_cache_tables(session.get_bind())
     key = shard_cache_key(shard)
     payload = pickle.dumps(marks, protocol=pickle.HIGHEST_PROTOCOL)
     fingerprint = _shard_fingerprint(session, analytics, shard)
@@ -514,6 +806,8 @@ def collect_marks_for_run(
     any required shard is missing or stale.
     """
     session = analytics.session
+    if persist_shards or not cache_only:
+        ensure_element_ranking_cache_tables(session)
     shards = iter_element_ranking_shards(
         analytics,
         start_season_year=start_season_year,
@@ -528,7 +822,9 @@ def collect_marks_for_run(
 
     parts: list[pd.DataFrame] = []
     for shard in shards:
-        marks = _load_shard_row(session, analytics, shard)
+        marks = _load_shard_row(
+            session, analytics, shard, validate_fingerprint=not cache_only
+        )
         if marks is None:
             if cache_only:
                 return None
@@ -547,23 +843,24 @@ def _load_legacy_full_cache(
     session: Session,
     analytics: JudgeAnalytics,
     run_params: tuple,
+    *,
+    validate_fingerprint: bool = True,
 ) -> dict[str, Any] | None:
     cache_key = run_params_cache_key(run_params)
     row = session.get(ElementDeviationRankingCache, cache_key)
     if row is None:
         return None
-    expected = compute_element_ranking_data_fingerprint(
-        session, analytics, **element_ranking_scope_kwargs(run_params)
-    )
-    if row.data_fingerprint != expected:
-        session.delete(row)
-        session.commit()
-        return None
+    if validate_fingerprint:
+        expected = compute_element_ranking_data_fingerprint(
+            session, analytics, **element_ranking_scope_kwargs(run_params)
+        )
+        if row.data_fingerprint != expected:
+            session.expunge(row)
+            return None
     try:
         main = pickle.loads(row.result_payload)
     except Exception:
-        session.delete(row)
-        session.commit()
+        session.expunge(row)
         return None
     if not isinstance(main, dict):
         return None
@@ -577,8 +874,9 @@ def load_cached_rankings(
     analytics: JudgeAnalytics,
     run_params: tuple,
 ) -> dict[str, Any] | None:
-    ensure_element_ranking_cache_tables(session.get_bind())
-    legacy = _load_legacy_full_cache(session, analytics, run_params)
+    legacy = _load_legacy_full_cache(
+        session, analytics, run_params, validate_fingerprint=False
+    )
     if legacy is not None:
         return apply_min_marks_to_ranking_result(legacy, int(run_params[6] or 0))
 
@@ -639,6 +937,19 @@ def save_cached_rankings(
             params,
             n_marks=len(bench_marks) if bench_marks is not None else 0,
         )
+    if isinstance(params, dict) and params:
+        try:
+            _persist_shard_summaries_for_scope(
+                session,
+                analytics,
+                run_params,
+                params,
+                rank_scope,
+                floor_sigma=float(run_params[7]),
+            )
+        except Exception:
+            _log.exception("Failed to persist element ranking shard summaries on save")
+
     n_rank_shards = len(
         list(
             iter_element_ranking_shards(
@@ -698,13 +1009,21 @@ def precompute_element_ranking_shards(
 def invalidate_element_ranking_cache_for_competition(
     session: Session, competition_id: int
 ) -> int:
-    ensure_element_ranking_cache_tables(session.get_bind())
+    ensure_element_ranking_cache_tables(session)
     year = session.execute(
         select(Competition.year).where(Competition.id == competition_id)
     ).scalar_one_or_none()
     if not year:
         return 0
     year_s = str(year)
+    shard_keys_subq = select(ElementDeviationRankingShardCache.shard_key).where(
+        ElementDeviationRankingShardCache.season_year == year_s
+    )
+    summary_del = session.execute(
+        delete(ElementDeviationRankingShardSummaryCache).where(
+            ElementDeviationRankingShardSummaryCache.shard_key.in_(shard_keys_subq)
+        )
+    )
     shard_del = session.execute(
         delete(ElementDeviationRankingShardCache).where(
             ElementDeviationRankingShardCache.season_year == year_s
@@ -747,9 +1066,45 @@ def invalidate_element_ranking_cache_for_competition(
     session.flush()
     return (
         int(shard_del.rowcount or 0)
+        + int(summary_del.rowcount or 0)
         + int(full_del.rowcount or 0)
         + int(sigma_del.rowcount or 0)
     )
+
+
+def precompute_element_ranking_shard_summaries(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    *,
+    rank_scope: dict[str, Any] | None = None,
+) -> int:
+    """Warm per-shard judge summary rows for a benchmark σ̂ fit. Returns rows written."""
+    sigma_out = get_or_fit_benchmark_sigma_params(
+        session,
+        analytics,
+        run_params,
+        cache_only=False,
+        persist_shards=True,
+        persist_sigma=True,
+    )
+    if sigma_out is None:
+        return 0
+    params, _, _ = sigma_out
+    if not params:
+        return 0
+    rp = unpack_element_ranking_run_params(run_params)
+    scope = rank_scope or ranking_scope_kwargs_from_run_params(run_params)
+    shards = iter_element_ranking_shards(analytics, **scope)
+    _persist_shard_summaries_for_scope(
+        session,
+        analytics,
+        run_params,
+        params,
+        scope,
+        floor_sigma=float(rp[7]),
+    )
+    return len(shards)
 
 
 def precompute_element_ranking_sigma(

@@ -476,6 +476,7 @@ def apply_analysis_filters_for_page(
                     st.session_state["pcs_quality_disciplines"] = ["Singles"]
                 elif disc_names:
                     st.session_state["pcs_quality_disciplines"] = [disc_names[0]]
+        apply_bool_param("us_officials_only", "pcs_quality_us_officials_only")
 
     elif page == "Element Deviation Ranking Analysis":
         apply_choice_param(
@@ -521,6 +522,7 @@ def apply_analysis_filters_for_page(
                 st.session_state["element_ranking_min_marks"] = int(min_m)
             except ValueError:
                 pass
+        apply_bool_param("us_officials_only", "element_ranking_us_officials_only")
 
     elif page == "Cross-Judge Benchmarking":
         apply_choice_param("view", "cross_judge_view", _CROSS_JUDGE_VIEWS)
@@ -541,6 +543,7 @@ def apply_analysis_filters_for_page(
             import streamlit as st
 
             st.session_state["cross_judge_use_event_dates"] = True
+        apply_bool_param("us_officials_only", "cross_judge_us_officials_only")
 
     elif page == "Temporal Trend Analysis":
         apply_choice_param(
@@ -629,6 +632,8 @@ def sync_analysis_app_query_params(page: str) -> None:
             params["min_pcs_marks"] = int(min_pcs)
         disc = st.session_state.get("pcs_quality_disciplines")
         params["disciplines"] = disc if disc else None
+        if st.session_state.get("pcs_quality_us_officials_only"):
+            params["us_officials_only"] = "1"
 
     elif page == "Element Deviation Ranking Analysis":
         scope_ss = st.session_state.get("element_ranking_competition_scope")
@@ -652,6 +657,8 @@ def sync_analysis_app_query_params(page: str) -> None:
         min_m = st.session_state.get("element_ranking_min_marks")
         if min_m and int(min_m) > 0:
             params["min_marks"] = int(min_m)
+        if st.session_state.get("element_ranking_us_officials_only"):
+            params["us_officials_only"] = "1"
 
     elif page == "Cross-Judge Benchmarking":
         for qp_name, ss_key in (
@@ -672,6 +679,8 @@ def sync_analysis_app_query_params(page: str) -> None:
                 params["start_date"] = start.isoformat()
             if end is not None:
                 params["end_date"] = end.isoformat()
+        if st.session_state.get("cross_judge_us_officials_only"):
+            params["us_officials_only"] = "1"
 
     elif page == "Temporal Trend Analysis":
         for qp_name, ss_key in (

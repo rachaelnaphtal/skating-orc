@@ -12,6 +12,7 @@ Example::
     python scripts/precompute_element_ranking_cache.py --all-scopes
     python scripts/precompute_element_ranking_cache.py --scope qualifying --season 2425
     python scripts/precompute_element_ranking_cache.py --all-scopes --sigma-benchmark
+    python scripts/precompute_element_ranking_cache.py --all-scopes --sigma-benchmark --summaries
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from element_deviation_ranking import (
     memory_efficient_mode,
 )
 from element_ranking_cache import (
+    precompute_element_ranking_shard_summaries,
     precompute_element_ranking_shards,
     precompute_element_ranking_sigma,
 )
@@ -60,8 +62,9 @@ def _precompute_scope(
     competition_scope: str,
     years: list[str],
     sigma_benchmark: bool,
-) -> tuple[int, str | None]:
-    """Warm shards (and optional σ̂ row) for one competition scope."""
+    warm_summaries: bool,
+) -> tuple[int, str | None, int]:
+    """Warm shards (and optional σ̂ / summary rows) for one competition scope."""
     print(f"\n=== scope={competition_scope} ({len(years)} season(s)) ===")
     n = precompute_element_ranking_shards(
         session,
@@ -70,6 +73,7 @@ def _precompute_scope(
         season_years=years,
     )
     sigma_key = None
+    n_summaries = 0
     if sigma_benchmark:
         run_params = (
             None,
@@ -90,7 +94,12 @@ def _precompute_scope(
             print(f"  σ̂ benchmark cache: {sigma_key}")
         else:
             print("  σ̂ benchmark cache: skipped (no marks)", file=sys.stderr)
-    return n, sigma_key
+        if warm_summaries and sigma_key:
+            n_summaries = precompute_element_ranking_shard_summaries(
+                session, analytics, run_params
+            )
+            print(f"  summary shard rows written: {n_summaries}")
+    return n, sigma_key, n_summaries
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +132,14 @@ def main(argv: list[str] | None = None) -> int:
             "Also warm σ̂ cache per scope (all seasons, same scope as benchmark pool)."
         ),
     )
+    parser.add_argument(
+        "--summaries",
+        action="store_true",
+        help=(
+            "With --sigma-benchmark, also warm per-shard mergeable judge summaries "
+            "(faster cache-only ranking loads)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     scopes = list(ALL_COMPETITION_SCOPES) if args.all_scopes else [args.scope]
@@ -142,17 +159,24 @@ def main(argv: list[str] | None = None) -> int:
             print(exc, file=sys.stderr)
             return 1
 
+        if args.summaries and not args.sigma_benchmark:
+            print("--summaries requires --sigma-benchmark", file=sys.stderr)
+            return 1
+
         total_shards = 0
+        total_summaries = 0
         sigma_keys: list[str] = []
         for scope in scopes:
-            n, sigma_key = _precompute_scope(
+            n, sigma_key, n_summaries = _precompute_scope(
                 session,
                 analytics,
                 competition_scope=scope,
                 years=years,
                 sigma_benchmark=args.sigma_benchmark,
+                warm_summaries=args.summaries,
             )
             total_shards += n
+            total_summaries += n_summaries
             if sigma_key:
                 sigma_keys.append(sigma_key)
 
@@ -162,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if sigma_keys:
             print(f"σ̂ keys: {', '.join(sigma_keys)}")
+        if total_summaries:
+            print(f"Summary rows written: {total_summaries}")
         return 0
     finally:
         session.close()

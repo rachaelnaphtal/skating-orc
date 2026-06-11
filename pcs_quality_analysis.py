@@ -10,14 +10,18 @@ Each measure has its own ranking table — they are not combined into one score.
 from __future__ import annotations
 
 import gc
+import hashlib
+import logging
 import os
+from dataclasses import dataclass
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata, spearmanr
 from sqlalchemy import and_, func, select
+from sqlalchemy.orm import Session
 from analytics import JudgeAnalytics
 from models import (
     Competition,
@@ -30,6 +34,19 @@ from models import (
 from officials_competition_types import COMPETITION_SCOPE_ALL
 
 MIN_PCS_ANALYSIS_EVENT_DATE = date(2022, 7, 1)
+MIN_PCS_QUALITY_SEASON_YEAR = "2223"
+PCS_SHARD_MARK_COLUMNS = (
+    "judge_id",
+    "skater_segment_id",
+    "pcs_type_id",
+    "segment_id",
+    "discipline_type_id",
+    "judge_score",
+    "panel_median",
+    "pcs_type_name",
+    "discipline_name",
+    "component",
+)
 MIN_SKATERS_PER_SEGMENT_RANKING = 3
 RANKING_CORRELATION_FLOOR = 0.7
 RANKING_CORRELATION_SPAN = 0.3
@@ -203,31 +220,281 @@ def differentiation_score(judge_scores: np.ndarray, panel_scores: np.ndarray) ->
     return _clamp01(1.0 - abs(float(np.log(ratio))))
 
 
-def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
-    """Metrics for one judge × discipline × PCS component mark set."""
+MERGEABLE_COMPONENT_COLUMNS = (
+    "n_marks",
+    "n_segments_ranked",
+    "sum_ranking_subscore",
+    "sum_spearman_rho",
+    "n_spearman_segments",
+    "sum_bias",
+    "sum_judge",
+    "sum_judge_sq",
+    "sum_panel",
+    "sum_panel_sq",
+)
+
+
+def compute_mergeable_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
+    """Sufficient statistics for one judge × discipline × component (merge across shards)."""
     judge_scores = marks_df["judge_score"].to_numpy(dtype=float)
     panel_scores = marks_df["panel_median"].to_numpy(dtype=float)
-    rk, mean_rho, n_segments, _n_seg_skipped = ranking_correlation_score_from_segment_events(
-        marks_df
-    )
-    bs = bias_score(judge_scores, panel_scores)
-    ds = differentiation_score(judge_scores, panel_scores)
-    biases = judge_scores - panel_scores if len(judge_scores) else np.array([])
-    vr = variance_ratio(judge_scores, panel_scores)
+    sum_ranking_subscore = 0.0
+    sum_spearman_rho = 0.0
+    n_spearman_segments = 0
+    n_segments_ranked = 0
+    if not marks_df.empty and "segment_id" in marks_df.columns:
+        for _seg_id, seg_df in marks_df.groupby("segment_id", sort=False):
+            seg_lines = seg_df.drop_duplicates(subset=["skater_segment_id"])
+            if len(seg_lines) < MIN_SKATERS_PER_SEGMENT_RANKING:
+                continue
+            js = seg_lines["judge_score"].to_numpy(dtype=float)
+            ps = seg_lines["panel_median"].to_numpy(dtype=float)
+            rho = spearman_rho_vs_panel(js, ps)
+            if rho is None:
+                continue
+            n_segments_ranked += 1
+            sum_ranking_subscore += _ranking_subscore_from_rho(rho)
+            sum_spearman_rho += float(rho)
+            n_spearman_segments += 1
+
+    n_marks = int(len(judge_scores))
+    biases = judge_scores - panel_scores if n_marks else np.array([])
     return {
-        "spearman_rho": mean_rho if mean_rho is not None else float("nan"),
-        "ranking_score": rk,
+        "n_marks": float(n_marks),
+        "n_segments_ranked": float(n_segments_ranked),
+        "sum_ranking_subscore": float(sum_ranking_subscore),
+        "sum_spearman_rho": float(sum_spearman_rho),
+        "n_spearman_segments": float(n_spearman_segments),
+        "sum_bias": float(np.sum(biases)) if n_marks else 0.0,
+        "sum_judge": float(np.sum(judge_scores)) if n_marks else 0.0,
+        "sum_judge_sq": float(np.sum(judge_scores**2)) if n_marks else 0.0,
+        "sum_panel": float(np.sum(panel_scores)) if n_marks else 0.0,
+        "sum_panel_sq": float(np.sum(panel_scores**2)) if n_marks else 0.0,
+    }
+
+
+def finalize_mergeable_component_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    """Derive display metrics from merged sufficient statistics."""
+    n_marks = int(row.get("n_marks") or 0)
+    n_segments_ranked = int(row.get("n_segments_ranked") or 0)
+    n_spearman = int(row.get("n_spearman_segments") or 0)
+
+    ranking_score = (
+        float(row["sum_ranking_subscore"]) / n_segments_ranked
+        if n_segments_ranked
+        else 0.0
+    )
+    spearman_rho = (
+        float(row["sum_spearman_rho"]) / n_spearman if n_spearman else float("nan")
+    )
+    mean_bias = float(row["sum_bias"]) / n_marks if n_marks else 0.0
+    bs = _clamp01(1.0 - (abs(mean_bias) / 0.5))
+
+    vr = float("nan")
+    if n_marks >= 2:
+        n = float(n_marks)
+        var_j = (float(row["sum_judge_sq"]) - float(row["sum_judge"]) ** 2 / n) / (
+            n - 1.0
+        )
+        var_p = (float(row["sum_panel_sq"]) - float(row["sum_panel"]) ** 2 / n) / (
+            n - 1.0
+        )
+        if var_j > 0 and var_p > 0:
+            vr = float(var_j / var_p)
+    ds = 0.0
+    if np.isfinite(vr) and vr > 0:
+        ds = _clamp01(1.0 - abs(float(np.log(vr))))
+
+    return {
+        "spearman_rho": spearman_rho,
+        "ranking_score": ranking_score,
         "bias_score": bs,
         "diff_score": ds,
-        "mean_bias": float(np.mean(biases)) if len(biases) else 0.0,
-        "bias_tendency": bias_tendency_label(
-            float(np.mean(biases)) if len(biases) else float("nan")
-        ),
+        "mean_bias": mean_bias,
+        "bias_tendency": bias_tendency_label(mean_bias),
         "variance_ratio": vr,
         "spread_tendency": spread_tendency_label(vr),
-        "n_marks": int(len(marks_df)),
-        "n_segments_ranked": int(n_segments),
+        "n_marks": n_marks,
+        "n_segments_ranked": n_segments_ranked,
     }
+
+
+def compute_component_metrics(marks_df: pd.DataFrame) -> dict[str, float]:
+    """Metrics for one judge × discipline × PCS component mark set."""
+    merged = finalize_mergeable_component_metrics(
+        compute_mergeable_component_metrics(marks_df)
+    )
+    return {k: merged[k] for k in (
+        "spearman_rho",
+        "ranking_score",
+        "bias_score",
+        "diff_score",
+        "mean_bias",
+        "bias_tendency",
+        "variance_ratio",
+        "spread_tendency",
+        "n_marks",
+        "n_segments_ranked",
+    )}
+
+
+@dataclass(frozen=True)
+class PcsQualityShard:
+    """One season × one discipline slice of PCS marks."""
+
+    season_year: str
+    discipline_type_id: int
+    competition_scope: str
+    event_start_iso: str | None = None
+    event_end_iso: str | None = None
+
+
+def filter_pcs_quality_season_years(years: Iterable[str]) -> list[str]:
+    """Season codes from ``MIN_PCS_QUALITY_SEASON_YEAR`` onward (newest first)."""
+    return sorted(
+        {
+            str(y).strip()
+            for y in years
+            if y and str(y).strip() >= MIN_PCS_QUALITY_SEASON_YEAR
+        },
+        reverse=True,
+    )
+
+
+def season_years_in_pcs_run_range(
+    start_season_year: Optional[str],
+    end_season_year: Optional[str],
+    available_years: list[str],
+) -> list[str]:
+    ys = filter_pcs_quality_season_years(available_years)
+    if not start_season_year and not end_season_year:
+        return ys
+    out: list[str] = []
+    for y in ys:
+        if start_season_year and y < str(start_season_year):
+            continue
+        if end_season_year and y > str(end_season_year):
+            continue
+        out.append(y)
+    return out
+
+
+def pcs_quality_discipline_types(
+    analytics: JudgeAnalytics, competition_scope: str
+) -> list[tuple[int, str]]:
+    if competition_scope != COMPETITION_SCOPE_ALL:
+        return analytics.qualifying_event_segment_discipline_types()
+    return analytics.get_discipline_types()
+
+
+def discipline_ids_for_pcs_quality(
+    analytics: JudgeAnalytics,
+    discipline_type_ids: Optional[list[int]],
+    competition_scope: str,
+) -> list[int]:
+    allowed = {dt_id for dt_id, _ in pcs_quality_discipline_types(analytics, competition_scope)}
+    if discipline_type_ids:
+        return [int(d) for d in discipline_type_ids if int(d) in allowed]
+    return sorted(allowed)
+
+
+def iter_pcs_quality_shards(
+    analytics: JudgeAnalytics,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    discipline_type_ids: Optional[list[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+) -> list[PcsQualityShard]:
+    years = season_years_in_pcs_run_range(
+        start_season_year,
+        end_season_year,
+        [str(y) for y in analytics.get_years()],
+    )
+    disc_ids = discipline_ids_for_pcs_quality(
+        analytics, discipline_type_ids, competition_scope
+    )
+    event_start_iso = event_start_date.isoformat() if event_start_date else None
+    event_end_iso = event_end_date.isoformat() if event_end_date else None
+    return [
+        PcsQualityShard(
+            season_year=sy,
+            discipline_type_id=dt_id,
+            competition_scope=competition_scope,
+            event_start_iso=event_start_iso,
+            event_end_iso=event_end_iso,
+        )
+        for sy in years
+        for dt_id in disc_ids
+    ]
+
+
+def compute_pcs_quality_data_fingerprint(
+    session: Session,
+    analytics: JudgeAnalytics,
+    *,
+    start_season_year: Optional[str] = None,
+    end_season_year: Optional[str] = None,
+    event_start_date: date | None = None,
+    event_end_date: date | None = None,
+    discipline_type_ids: Optional[list[int]] = None,
+    competition_scope: str = COMPETITION_SCOPE_ALL,
+) -> str:
+    """Checksum for PCS marks in scope (invalidates shard cache when data changes)."""
+    seg_discipline_ids = _pcs_quality_segment_discipline_ids(
+        analytics,
+        discipline_type_ids=discipline_type_ids,
+        competition_scope=competition_scope,
+    )
+    effective_start = _pcs_quality_effective_start(event_start_date)
+    stmt = (
+        select(
+            func.count(PcsScorePerJudge.id),
+            func.coalesce(func.max(PcsScorePerJudge.id), 0),
+            func.count(func.distinct(Segment.competition_id)),
+        )
+        .select_from(PcsScorePerJudge)
+        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+        .join(Segment, SkaterSegment.segment_id == Segment.id)
+        .join(Competition, Segment.competition_id == Competition.id)
+    )
+    stmt = _apply_pcs_quality_scope_filters(
+        stmt,
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
+    )
+    mark_count, max_mark_id, comp_count = session.execute(stmt).one()
+    payload = f"{int(mark_count or 0)}:{int(max_mark_id or 0)}:{int(comp_count or 0)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def normalize_pcs_shard_marks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=list(PCS_SHARD_MARK_COLUMNS))
+    out = df.copy()
+    out["judge_id"] = pd.to_numeric(out["judge_id"], downcast="integer")
+    out["skater_segment_id"] = pd.to_numeric(
+        out["skater_segment_id"], downcast="integer"
+    )
+    out["pcs_type_id"] = pd.to_numeric(out["pcs_type_id"], downcast="integer")
+    out["segment_id"] = pd.to_numeric(out["segment_id"], downcast="integer")
+    out["discipline_type_id"] = pd.to_numeric(
+        out["discipline_type_id"], downcast="integer"
+    )
+    out["judge_score"] = out["judge_score"].astype(np.float32)
+    out["panel_median"] = out["panel_median"].astype(np.float32)
+    if "component" not in out.columns:
+        out["component"] = out["pcs_type_name"].map(pcs_component_label)
+    out["discipline_name"] = out["discipline_name"].fillna("Unknown")
+    out = out.dropna(subset=["component", "discipline_type_id"]).copy()
+    return out[list(PCS_SHARD_MARK_COLUMNS)]
 
 
 def _pcs_quality_effective_start(event_start_date: date | None) -> date:
@@ -306,6 +573,28 @@ def count_pcs_quality_marks(
     return int(analytics.session.execute(count_q).scalar() or 0)
 
 
+def load_pcs_quality_marks_for_shard(
+    analytics: JudgeAnalytics,
+    shard: PcsQualityShard,
+) -> pd.DataFrame:
+    """PCS marks for one season × discipline shard."""
+    event_start = (
+        date.fromisoformat(shard.event_start_iso) if shard.event_start_iso else None
+    )
+    event_end = date.fromisoformat(shard.event_end_iso) if shard.event_end_iso else None
+    return load_pcs_quality_marks(
+        analytics,
+        start_season_year=shard.season_year,
+        end_season_year=shard.season_year,
+        event_start_date=event_start,
+        event_end_date=event_end,
+        discipline_type_ids=[shard.discipline_type_id],
+        competition_scope=shard.competition_scope,
+        max_marks=None,
+        use_shard_cache=False,
+    )
+
+
 def load_pcs_quality_marks(
     analytics: JudgeAnalytics,
     *,
@@ -316,8 +605,34 @@ def load_pcs_quality_marks(
     discipline_type_ids: Optional[list[int]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
     max_marks: int | None = PCS_QUALITY_MAX_MARKS,
+    use_shard_cache: bool = True,
+    cache_only: bool = False,
+    persist_shards: bool = False,
 ) -> pd.DataFrame:
     """PCS marks with panel median per skater×component (post-2022-07-01 competitions)."""
+    if use_shard_cache:
+        from pcs_quality_cache import collect_pcs_marks_for_run
+
+        marks = collect_pcs_marks_for_run(
+            analytics,
+            start_season_year=start_season_year,
+            end_season_year=end_season_year,
+            event_start_date=event_start_date,
+            event_end_date=event_end_date,
+            discipline_type_ids=discipline_type_ids,
+            competition_scope=competition_scope,
+            cache_only=cache_only,
+            persist_shards=persist_shards,
+        )
+        if marks is None:
+            raise ValueError("Missing or stale PCS shard cache for the selected scope.")
+        if max_marks is not None and max_marks > 0 and len(marks) > max_marks:
+            raise ValueError(
+                f"PCS mark count ({len(marks):,}) exceeds limit ({max_marks:,}). "
+                "Narrow season years, enable event dates, or reduce disciplines."
+            )
+        return marks
+
     seg_discipline_ids = _pcs_quality_segment_discipline_ids(
         analytics,
         discipline_type_ids=discipline_type_ids,
@@ -407,24 +722,7 @@ def load_pcs_quality_marks(
     )
 
     df = pd.read_sql(marks_q, analytics.session.bind)
-    if df.empty:
-        return df
-
-    df["judge_id"] = pd.to_numeric(df["judge_id"], downcast="integer")
-    df["skater_segment_id"] = pd.to_numeric(
-        df["skater_segment_id"], downcast="integer"
-    )
-    df["pcs_type_id"] = pd.to_numeric(df["pcs_type_id"], downcast="integer")
-    df["segment_id"] = pd.to_numeric(df["segment_id"], downcast="integer")
-    df["discipline_type_id"] = pd.to_numeric(
-        df["discipline_type_id"], downcast="integer"
-    )
-    df["judge_score"] = df["judge_score"].astype(np.float32)
-    df["panel_median"] = df["panel_median"].astype(np.float32)
-    df["component"] = df["pcs_type_name"].map(pcs_component_label)
-    df["discipline_name"] = df["discipline_name"].fillna("Unknown")
-    df = df.dropna(subset=["component", "discipline_type_id"]).copy()
-    return df
+    return normalize_pcs_shard_marks(df)
 
 
 def components_by_discipline_in_period(marks: pd.DataFrame) -> dict[int, list[str]]:
@@ -498,50 +796,67 @@ PCS_METRIC_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def compute_judge_profiles(
+def compute_mergeable_component_detail_from_marks(
     marks: pd.DataFrame, judge_id_to_identity: dict[int, str]
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
-    """
-    Build judge profiles, per-judge×discipline×component detail, discipline summaries,
-    and one ranking table per metric.
-
-    Returns ``(profiles_df, component_detail_df, discipline_summary_df, metric_rankings)``.
-    """
-    empty_rankings = {
-        slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
-    }
+) -> pd.DataFrame:
+    """Per-judge×discipline×component mergeable stats for one mark pool."""
     if marks.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
-
-    work = marks
+        return pd.DataFrame()
+    work = marks.copy()
     if "identity" not in work.columns:
-        work = marks.copy()
         work["identity"] = work["judge_id"].map(judge_id_to_identity)
-    work = work.dropna(subset=["identity"])
+    work = work.dropna(subset=["identity", "component", "discipline_type_id"])
 
     period_by_discipline = components_by_discipline_in_period(work)
-
-    component_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for (identity, disc_id, comp), grp in work.groupby(
         ["identity", "discipline_type_id", "component"], sort=False
     ):
         period_components = period_by_discipline.get(int(disc_id), [])
         if comp not in period_components:
             continue
-        m = compute_component_metrics(grp)
-        component_rows.append(
+        rows.append(
             {
                 "identity": identity,
+                "discipline_type_id": int(disc_id),
                 "discipline": str(grp["discipline_name"].iloc[0]),
                 "component": comp,
-                **m,
+                **compute_mergeable_component_metrics(grp),
             }
         )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
-    if not component_rows:
+
+def merge_mergeable_component_details(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Combine shard-level component stats into one detail table."""
+    parts = [p for p in parts if p is not None and not p.empty]
+    if not parts:
+        return pd.DataFrame()
+    combined = pd.concat(parts, ignore_index=True)
+    group_cols = ["identity", "discipline_type_id", "discipline", "component"]
+    agg = (
+        combined.groupby(group_cols, sort=False)[list(MERGEABLE_COMPONENT_COLUMNS)]
+        .sum()
+        .reset_index()
+    )
+    rows: list[dict[str, Any]] = []
+    for row in agg.to_dict("records"):
+        rows.append({**row, **finalize_mergeable_component_metrics(row)})
+    return pd.DataFrame(rows)
+
+
+def build_profiles_from_component_detail(
+    detail: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Judge profiles and ranking tables from a component-detail table."""
+    empty_rankings = {
+        slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
+    }
+    if detail.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
 
-    detail = pd.DataFrame(component_rows)
     discipline_rows: list[dict[str, Any]] = []
     profile_rows: list[dict[str, Any]] = []
 
@@ -613,6 +928,48 @@ def compute_judge_profiles(
     return profiles, detail, discipline_summary, metric_rankings
 
 
+def compute_judge_profiles(
+    marks: pd.DataFrame, judge_id_to_identity: dict[int, str]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """
+    Build judge profiles, per-judge×discipline×component detail, discipline summaries,
+    and one ranking table per metric.
+
+    Returns ``(profiles_df, component_detail_df, discipline_summary_df, metric_rankings)``.
+    """
+    empty_rankings = {
+        slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
+    }
+    if marks.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
+
+    mergeable = compute_mergeable_component_detail_from_marks(
+        marks, judge_id_to_identity
+    )
+    if mergeable.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), empty_rankings
+    detail = merge_mergeable_component_details([mergeable])
+    return build_profiles_from_component_detail(detail)
+
+
+def pcs_quality_result_from_component_detail(
+    detail: pd.DataFrame, *, n_raw_marks: int
+) -> dict[str, Any]:
+    """Package profiles and tables for the PCS quality UI."""
+    profiles, _, discipline_summary, metric_rankings = (
+        build_profiles_from_component_detail(detail)
+    )
+    return {
+        "profiles": profiles,
+        "metric_rankings": metric_rankings,
+        "component_detail": detail,
+        "discipline_summary": discipline_summary,
+        "n_raw_marks": int(n_raw_marks),
+        "n_judges": len(profiles),
+        "error": None if not profiles.empty or n_raw_marks == 0 else "No PCS marks in scope.",
+    }
+
+
 def apply_min_pcs_marks_to_result(
     result: dict[str, Any], min_pcs_marks: int
 ) -> dict[str, Any]:
@@ -680,8 +1037,37 @@ def run_pcs_quality_analysis(
     event_end_date: date | None = None,
     discipline_type_ids: Optional[list[int]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
+    cache_only: bool = False,
+    persist_shards: bool = True,
 ) -> dict[str, Any]:
     """Load marks and return profiles, component detail, and mark counts."""
+    empty = {
+        "profiles": pd.DataFrame(),
+        "metric_rankings": {slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS},
+        "component_detail": pd.DataFrame(),
+        "discipline_summary": pd.DataFrame(),
+        "n_raw_marks": 0,
+        "n_judges": 0,
+        "error": None,
+    }
+
+    if cache_only:
+        from pcs_quality_cache import assemble_pcs_quality_from_summaries
+
+        result = assemble_pcs_quality_from_summaries(
+            analytics,
+            start_season_year=start_season_year,
+            end_season_year=end_season_year,
+            event_start_date=event_start_date,
+            event_end_date=event_end_date,
+            discipline_type_ids=discipline_type_ids,
+            competition_scope=competition_scope,
+        )
+        if result is None:
+            empty["error"] = "Missing or stale PCS summary cache for the selected scope."
+            return empty
+        return result
+
     try:
         marks = load_pcs_quality_marks(
             analytics,
@@ -691,19 +1077,13 @@ def run_pcs_quality_analysis(
             event_end_date=event_end_date,
             discipline_type_ids=discipline_type_ids,
             competition_scope=competition_scope,
+            cache_only=False,
+            persist_shards=persist_shards,
         )
     except ValueError as exc:
-        return {
-            "profiles": pd.DataFrame(),
-            "metric_rankings": {
-                slug: pd.DataFrame() for _, _, slug in PCS_METRIC_DEFINITIONS
-            },
-            "component_detail": pd.DataFrame(),
-            "discipline_summary": pd.DataFrame(),
-            "n_raw_marks": 0,
-            "n_judges": 0,
-            "error": str(exc),
-        }
+        empty["error"] = str(exc)
+        return empty
+
     id_map = analytics.get_judge_id_to_identity_label()
     profiles, detail, discipline_summary, metric_rankings = compute_judge_profiles(
         marks, id_map
@@ -711,6 +1091,25 @@ def run_pcs_quality_analysis(
     n_raw = len(marks)
     del marks
     gc.collect()
+
+    if persist_shards:
+        from pcs_quality_cache import persist_pcs_shard_summaries_for_scope
+
+        try:
+            persist_pcs_shard_summaries_for_scope(
+                analytics.session,
+                analytics,
+                id_map,
+                start_season_year=start_season_year,
+                end_season_year=end_season_year,
+                event_start_date=event_start_date,
+                event_end_date=event_end_date,
+                discipline_type_ids=discipline_type_ids,
+                competition_scope=competition_scope,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to persist PCS shard summaries")
+
     return {
         "profiles": profiles,
         "metric_rankings": metric_rankings,

@@ -863,7 +863,8 @@ def scrape(
     ``location``) avoids an extra index fetch when already known (e.g. from discover CSV).
     When ``rebuild_analytics_caches`` is false, skip judge-excess / element-ranking invalidation
     and cross-judge shard rebuild at the end (saves time and DB connections; run
-    ``scripts/precompute_cross_judge_cache.py`` separately).
+    ``scripts/precompute_cross_judge_cache.py``, ``scripts/precompute_element_ranking_cache.py``,
+    and ``scripts/precompute_pcs_quality_cache.py`` separately).
 
     When ``commit_per_segment`` is false, the DB commits once at the end of this scrape
   (``DatabaseLoader(defer_commits=True)``); apps leave the default true.
@@ -1223,11 +1224,15 @@ def scrape(
             from element_ranking_cache import (
                 invalidate_element_ranking_cache_for_competition,
             )
+            from pcs_quality_cache import invalidate_pcs_quality_cache_for_competition
 
             invalidate_judge_excess_cache_for_competition(
                 database_obj.session, competition_id
             )
             invalidate_element_ranking_cache_for_competition(
+                database_obj.session, competition_id
+            )
+            invalidate_pcs_quality_cache_for_competition(
                 database_obj.session, competition_id
             )
             from cross_judge_cache import build_cross_judge_shards_for_competition

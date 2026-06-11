@@ -470,6 +470,63 @@ def _partial_marking_score(series: pd.Series) -> float:
     return float(np.sqrt((series**2).mean()))
 
 
+def compute_mergeable_judge_summary(work: pd.DataFrame) -> pd.DataFrame:
+    """Per-judge sums that can be merged across shards before sqrt(mean(m²))."""
+    if work.empty:
+        return pd.DataFrame(
+            columns=[
+                "judge_name",
+                "n_marks",
+                "sum_m2",
+                "sum_error",
+                "sum_abs_error",
+                "sum_sigma",
+                "sum_abs_m",
+            ]
+        )
+    g = work.groupby("judge_name", sort=False)
+    return g.agg(
+        n_marks=("m_pj", "size"),
+        sum_m2=("m_pj", lambda s: float((s**2).sum())),
+        sum_error=("error", "sum"),
+        sum_abs_error=("error", lambda s: float(s.abs().sum())),
+        sum_sigma=("sigma_hat", "sum"),
+        sum_abs_m=("m_pj", lambda s: float(s.abs().sum())),
+    ).reset_index()
+
+
+def merge_mergeable_judge_summaries(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """Combine shard-level judge stats into one summary table."""
+    parts = [p for p in parts if p is not None and not p.empty]
+    if not parts:
+        return pd.DataFrame()
+    combined = pd.concat(parts, ignore_index=True)
+    g = combined.groupby("judge_name", sort=False)
+    agg = g.agg(
+        n_marks=("n_marks", "sum"),
+        sum_m2=("sum_m2", "sum"),
+        sum_error=("sum_error", "sum"),
+        sum_abs_error=("sum_abs_error", "sum"),
+        sum_sigma=("sum_sigma", "sum"),
+        sum_abs_m=("sum_abs_m", "sum"),
+    ).reset_index()
+    n = agg["n_marks"].astype(float)
+    out = pd.DataFrame(
+        {
+            "judge_name": agg["judge_name"],
+            "n_marks": agg["n_marks"].astype(int),
+            "marking_score": np.sqrt(agg["sum_m2"] / n),
+            "mean_error": agg["sum_error"] / n,
+            "mean_abs_error": agg["sum_abs_error"] / n,
+            "mean_sigma_hat": agg["sum_sigma"] / n,
+            "mean_abs_m": agg["sum_abs_m"] / n,
+        }
+    )
+    out = out.sort_values("marking_score").reset_index(drop=True)
+    out.insert(0, "rank", range(1, len(out) + 1))
+    return out
+
+
 def compute_judge_summaries(work: pd.DataFrame) -> pd.DataFrame:
     """Per-judge aggregates explaining the overall marking score."""
     g = work.groupby("judge_name", sort=False)

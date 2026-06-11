@@ -476,6 +476,24 @@ class JudgeAnalytics:
                 out[int(jid)] = label
         return out
 
+    def get_us_linked_identity_labels(self) -> frozenset[str]:
+        """
+        Identity labels for judges linked to a USFS directory official
+        (``judge_official_link.status = 'linked'``).
+        """
+        linked_judge_ids = {
+            int(jid)
+            for (jid,) in self.session.query(JudgeOfficialLink.judge_id)
+            .filter(JudgeOfficialLink.status == "linked")
+            .filter(JudgeOfficialLink.official_id.isnot(None))
+        }
+        if not linked_judge_ids:
+            return frozenset()
+        id_to_label = self.get_judge_id_to_identity_label()
+        return frozenset(
+            id_to_label[jid] for jid in linked_judge_ids if jid in id_to_label
+        )
+
     @staticmethod
     def _merge_per_judge_stat_dicts_by_identity(
         per_judge: dict[int, dict],

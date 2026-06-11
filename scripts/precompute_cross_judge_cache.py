@@ -70,8 +70,7 @@ def main() -> None:
     skip_cached = not args.force
 
     with get_db_session() as session:
-        bind = session.get_bind()
-        ensure_cross_judge_cache_tables(bind)
+        ensure_cross_judge_cache_tables(session)
 
         if args.competition_ids:
             targets = iter_competitions_for_precompute(

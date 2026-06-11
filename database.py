@@ -19,7 +19,8 @@ from urllib.parse import quote_plus, urlparse
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.schema import Table
 
 from models import Base
 
@@ -179,7 +180,7 @@ def _bind_engine(url: str, source: str) -> None:
     _active_source = source
     # Heroku/RDS hobby tiers often allow ~20 connections per role; keep the pool small.
     pool_size = int(os.getenv("SQLALCHEMY_POOL_SIZE", "2"))
-    max_overflow = int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "0"))
+    max_overflow = int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "2"))
     engine_kwargs: dict = {
         "echo": False,
         "pool_pre_ping": True,
@@ -215,6 +216,42 @@ def get_db_session():
     if _SessionLocal is None:
         ensure_database_for_streamlit()
     return _SessionLocal()
+
+
+_ensured_orm_tables: set[tuple[int, tuple[str, ...]]] = set()
+
+
+def ensure_orm_tables(session: Session, *tables: Table) -> None:
+    """
+    Create ORM tables once per engine using the session's existing connection.
+
+    ``Table.create(engine, ...)`` checks out an extra pool connection; on small
+    pools that can deadlock with the UI session plus cache loaders.
+    """
+    bind = session.get_bind()
+    names = tuple(sorted(t.name for t in tables))
+    cache_key = (id(bind), names)
+    if cache_key in _ensured_orm_tables:
+        return
+    conn = session.connection()
+    for table in tables:
+        table.create(conn, checkfirst=True)
+    _ensured_orm_tables.add(cache_key)
+
+
+def discard_orm_row(bind: Engine, model: type, primary_key: Any) -> None:
+    """Delete one ORM row on a throwaway session (safe while UI session is reading)."""
+    write_session = sessionmaker(bind=bind)()
+    try:
+        row = write_session.get(model, primary_key)
+        if row is not None:
+            write_session.delete(row)
+            write_session.commit()
+    except Exception:
+        write_session.rollback()
+        raise
+    finally:
+        write_session.close()
 
 
 @contextmanager

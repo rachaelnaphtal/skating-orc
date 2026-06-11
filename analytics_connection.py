@@ -2,6 +2,11 @@
 Shared Streamlit → JudgeAnalytics session helpers for Home (analysis_app) and Admin page.
 """
 
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, TypeVar
+
 import streamlit as st
 from sqlalchemy import text
 from sqlalchemy.exc import InvalidRequestError, PendingRollbackError
@@ -13,6 +18,8 @@ from database import (
     test_connection,
 )
 from analytics import JudgeAnalytics
+
+T = TypeVar("T")
 
 _SESSION_PROBE_ERRORS = (
     InvalidRequestError,
@@ -83,6 +90,52 @@ def get_analytics(_database_url: str, _database_source: str):
         st.error(f"Failed to initialize analytics: {e}")
         st.info("This might be a temporary issue. Please refresh the page.")
         st.stop()
+
+
+@contextmanager
+def isolated_analytics_session() -> Iterator[JudgeAnalytics]:
+    """
+    Short-lived ``JudgeAnalytics`` for ``@st.cache_data`` workers.
+
+    Streamlit may run cached functions concurrently; they must not share the UI
+    session in ``st.session_state.analytics``.
+    """
+    session = get_db_session()
+    try:
+        yield JudgeAnalytics(session)
+    finally:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_us_linked_identity_labels(database_url: str) -> frozenset[str]:
+    """USFS-linked identity labels (for display filters; uses an isolated session)."""
+    with isolated_analytics_session() as analytics:
+        return analytics.get_us_linked_identity_labels()
+
+
+def us_linked_identity_labels_for_ui() -> frozenset[str]:
+    ensure_database_for_streamlit()
+    db_url, _ = resolve_database_url()
+    return cached_us_linked_identity_labels(db_url)
+
+
+def run_with_isolated_analytics(
+    fn: Callable[..., T],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    """Run ``fn(analytics, *args, **kwargs)`` on a throwaway session (not the UI session)."""
+    with isolated_analytics_session() as analytics:
+        return fn(analytics, *args, **kwargs)
 
 
 def get_analytics_safe():

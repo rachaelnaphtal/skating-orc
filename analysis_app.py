@@ -19,7 +19,10 @@ from scipy import stats
 from analytics_connection import (
     get_analytics,
     get_analytics_safe,
+    isolated_analytics_session,
     release_analytics_db_connection,
+    run_with_isolated_analytics,
+    us_linked_identity_labels_for_ui,
 )
 from analytics import JudgeAnalytics
 from models import (
@@ -161,19 +164,19 @@ def _cached_pooled_cross_judge_metrics(
 ):
     from datetime import date as _date
 
-    analytics = get_analytics_safe()
-    event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
-    event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
-    return analytics.get_pooled_cross_judge_metrics(
-        score_type=score_type,
-        year_filter=year_filter,
-        competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
-        discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
-        competition_scope=competition_scope,
-        include_excess=include_excess,
-        event_start_date=event_start,
-        event_end_date=event_end,
-    )
+    with isolated_analytics_session() as analytics:
+        event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
+        event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
+        return analytics.get_pooled_cross_judge_metrics(
+            score_type=score_type,
+            year_filter=year_filter,
+            competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
+            discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
+            competition_scope=competition_scope,
+            include_excess=include_excess,
+            event_start_date=event_start,
+            event_end_date=event_end,
+        )
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -189,21 +192,21 @@ def _cached_cross_judge_heatmap_data(
 ):
     from datetime import date as _date
 
-    analytics = get_analytics_safe()
-    event_start = (
-        _date.fromisoformat(event_start_iso_key) if event_start_iso_key else None
-    )
-    event_end = _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
-    return analytics.get_judge_performance_heatmap_data(
-        metric=metric,
-        score_type=score_type,
-        year_filter=year_filter,
-        competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
-        discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
-        competition_scope=competition_scope_key,
-        event_start_date=event_start,
-        event_end_date=event_end,
-    )
+    with isolated_analytics_session() as analytics:
+        event_start = (
+            _date.fromisoformat(event_start_iso_key) if event_start_iso_key else None
+        )
+        event_end = _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
+        return analytics.get_judge_performance_heatmap_data(
+            metric=metric,
+            score_type=score_type,
+            year_filter=year_filter,
+            competition_ids=list(competition_ids_tuple) if competition_ids_tuple else None,
+            discipline_type_ids=list(discipline_ids_tuple) if discipline_ids_tuple else None,
+            competition_scope=competition_scope_key,
+            event_start_date=event_start,
+            event_end_date=event_end,
+        )
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -216,23 +219,24 @@ def _cached_cross_judge_competition_heatmap(
 ):
     from datetime import date as _date
 
-    analytics = get_analytics_safe()
-    event_start = (
-        _date.fromisoformat(event_start_iso_key) if event_start_iso_key else None
-    )
-    event_end = _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
-    return analytics.get_judge_competition_heatmap_data(
-        metric=metric,
-        score_type=score_type,
-        competition_scope=competition_scope_key,
-        event_start_date=event_start,
-        event_end_date=event_end,
-    )
+    with isolated_analytics_session() as analytics:
+        event_start = (
+            _date.fromisoformat(event_start_iso_key) if event_start_iso_key else None
+        )
+        event_end = _date.fromisoformat(event_end_iso_key) if event_end_iso_key else None
+        return analytics.get_judge_competition_heatmap_data(
+            metric=metric,
+            score_type=score_type,
+            competition_scope=competition_scope_key,
+            event_start_date=event_start,
+            event_end_date=event_end,
+        )
 
 
 @st.cache_data(ttl=300)
 def _cached_competition_segment_officials(competition_id: int):
-    return get_analytics_safe().get_competition_segment_officials_display(competition_id)
+    with isolated_analytics_session() as analytics:
+        return analytics.get_competition_segment_officials_display(competition_id)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -248,18 +252,18 @@ def _cached_pcs_quality_analysis(
 
     from pcs_quality_analysis import run_pcs_quality_analysis
 
-    analytics = get_analytics_safe()
-    event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
-    event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
-    return run_pcs_quality_analysis(
-        analytics,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        event_start_date=event_start,
-        event_end_date=event_end,
-        discipline_type_ids=list(discipline_ids_tuple),
-        competition_scope=competition_scope,
-    )
+    with isolated_analytics_session() as analytics:
+        event_start = _date.fromisoformat(event_start_iso) if event_start_iso else None
+        event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
+        return run_pcs_quality_analysis(
+            analytics,
+            start_season_year=start_season_year,
+            end_season_year=end_season_year,
+            event_start_date=event_start,
+            event_end_date=event_end,
+            discipline_type_ids=list(discipline_ids_tuple),
+            competition_scope=competition_scope,
+        )
 
 
 def _streamlit_safe_judge_pivot_display(grid: pd.DataFrame) -> pd.DataFrame:
@@ -716,6 +720,15 @@ def cross_judge_benchmarking_page():
         "rule_errors": "Total Rule Errors"
     }
 
+    us_officials_only = st.checkbox(
+        "US directory officials only",
+        key="cross_judge_us_officials_only",
+        help=(
+            "Charts and tables show only judges linked to a USFS official. "
+            "Pooled benchmarks still use the full judge pool."
+        ),
+    )
+
     if heatmap_type == "Judge Overview":
         # Filters for judge overview
         st.subheader("Filters")
@@ -794,6 +807,19 @@ def cross_judge_benchmarking_page():
             )
         _render_pooled_benchmark_block(pm, score_type)
 
+        if us_officials_only:
+            from judge_official_display_filter import filter_cross_judge_dataframe
+
+            n_before = len(heatmap_df)
+            heatmap_df = filter_cross_judge_dataframe(
+                heatmap_df, us_linked_identity_labels_for_ui()
+            )
+            if n_before and len(heatmap_df) < n_before:
+                st.caption(
+                    f"US officials display filter: **{len(heatmap_df)}** of {n_before} "
+                    "judges are linked to the USFS directory."
+                )
+
         if heatmap_df.empty:
             st.warning("No data found for selected filters")
             return
@@ -861,6 +887,26 @@ def cross_judge_benchmarking_page():
             )
         _render_pooled_benchmark_block(pm_jc, score_type)
 
+        if us_officials_only:
+            from judge_official_display_filter import filter_cross_judge_dataframe
+
+            analytics_jc = get_analytics_safe()
+            n_cells_before = len(heatmap_df)
+            n_judges_before = (
+                int(heatmap_df["judge_name"].nunique()) if not heatmap_df.empty else 0
+            )
+            heatmap_df = filter_cross_judge_dataframe(
+                heatmap_df, us_linked_identity_labels_for_ui()
+            )
+            n_judges_after = (
+                int(heatmap_df["judge_name"].nunique()) if not heatmap_df.empty else 0
+            )
+            if n_cells_before and n_judges_after < n_judges_before:
+                st.caption(
+                    f"US officials display filter: **{n_judges_after}** of {n_judges_before} "
+                    "judges are linked to the USFS directory."
+                )
+
         if heatmap_df.empty:
             st.warning("No data found for judge vs competition analysis")
             return
@@ -926,10 +972,17 @@ def _finalize_element_ranking_job() -> None:
         st.session_state.pop("element_ranking_error_msg", None)
         rp = st.session_state.get("element_ranking_run_params")
         if rp is not None:
-            analytics = get_analytics_safe()
-            ok, err = try_save_element_ranking_cache(
-                analytics.session,
-                analytics,
+
+            def _persist_ranking_cache(analytics, run_params, ranking_result):
+                return try_save_element_ranking_cache(
+                    analytics.session,
+                    analytics,
+                    run_params,
+                    ranking_result,
+                )
+
+            ok, err = run_with_isolated_analytics(
+                _persist_ranking_cache,
                 rp,
                 st.session_state.element_ranking_result,
             )
@@ -1009,8 +1062,8 @@ def _run_element_ranking_compute(run_params: tuple, *, package: bool = True) -> 
 def _cached_element_deviation_rankings(run_params: tuple):
     from element_deviation_ranking import compute_element_deviation_rankings_from_run_params
 
-    analytics = get_analytics_safe()
-    return compute_element_deviation_rankings_from_run_params(analytics, run_params)
+    with isolated_analytics_session() as analytics:
+        return compute_element_deviation_rankings_from_run_params(analytics, run_params)
 
 
 def _element_ranking_rankings_column_config() -> dict:
@@ -1159,10 +1212,8 @@ def _element_ranking_load_judge_breakdown(
     if not jd.empty or not je.empty:
         return jd, je
 
-    analytics = get_analytics_safe()
-    control_tbl = _element_ranking_control_table(result, analytics, run_params)
     params = load_ranking_params(result)
-    if control_tbl.empty or not params:
+    if not params:
         return pd.DataFrame(), pd.DataFrame()
 
     detail_key = (
@@ -1178,13 +1229,21 @@ def _element_ranking_load_judge_breakdown(
         ):
             return jd_c, je_c
 
-    with st.spinner(f"Loading breakdown for {pick_judge}…"):
-        detail = compute_judge_detail_for_identity(
+    def _compute_judge_breakdown(analytics, ranking_result, rp, judge_name):
+        control_tbl = _element_ranking_control_table(ranking_result, analytics, rp)
+        if control_tbl.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        return compute_judge_detail_for_identity(
             analytics,
-            pick_judge,
+            judge_name,
             control_tbl,
             params,
-            **element_ranking_filter_kwargs(run_params),
+            **element_ranking_filter_kwargs(rp),
+        )
+
+    with st.spinner(f"Loading breakdown for {pick_judge}…"):
+        detail = run_with_isolated_analytics(
+            _compute_judge_breakdown, result, run_params, pick_judge
         )
     if detail[0].empty and detail[1].empty:
         return detail
@@ -1654,7 +1713,9 @@ def pcs_quality_analysis_page():
         "are mark-weighted. Only competitions on or after "
         f"**{MIN_PCS_ANALYSIS_EVENT_DATE.isoformat()}** are included. "
         f"Large filters load up to **{PCS_QUALITY_MAX_MARKS:,}** PCS marks "
-        "(set ``PCS_QUALITY_MAX_MARKS`` on the server to raise the cap)."
+        "(set ``PCS_QUALITY_MAX_MARKS`` on the server to raise the cap). "
+        "Warm shards with ``scripts/precompute_pcs_quality_cache.py`` "
+        "(add ``--summaries`` for cache-only loads without loading all marks)."
     )
 
     with st.expander("How scores are calculated", expanded=False):
@@ -1797,6 +1858,17 @@ def pcs_quality_analysis_page():
     if not disciplines_ok:
         st.warning("Select at least one discipline type to run or view results.")
 
+    col_pcs_cache = st.columns([2, 1])[1]
+    with col_pcs_cache:
+        use_pcs_precomputed_cache = st.checkbox(
+            "Use precomputed cache",
+            value=True,
+            key="pcs_quality_use_cache",
+            help=(
+                "Load cached season×discipline PCS shards (missing shards are computed)."
+            ),
+        )
+
     if "pcs_quality_min_pcs_marks" not in st.session_state:
         st.session_state["pcs_quality_min_pcs_marks"] = 0
     min_pcs_marks = st.number_input(
@@ -1809,6 +1881,14 @@ def pcs_quality_analysis_page():
             "Changing only this re-filters the last run (no reload)."
         ),
     )
+    us_officials_only = st.checkbox(
+        "US directory officials only",
+        key="pcs_quality_us_officials_only",
+        help=(
+            "Show rankings only for judges linked to a USFS official. "
+            "PCS quality scores still use the full judge pool."
+        ),
+    )
 
     run_clicked = st.button("Run analysis", type="primary", key="pcs_quality_run_btn")
 
@@ -1816,6 +1896,50 @@ def pcs_quality_analysis_page():
         if not disciplines_ok:
             st.error("Select at least one discipline type before running.")
         else:
+            from datetime import date as _date
+
+            from pcs_quality_cache import load_cached_pcs_quality
+
+            event_start = (
+                _date.fromisoformat(event_start_iso) if event_start_iso else None
+            )
+            event_end = _date.fromisoformat(event_end_iso) if event_end_iso else None
+            if use_pcs_precomputed_cache:
+
+                def _load_pcs_cache(
+                    cache_analytics,
+                    *,
+                    start_sy,
+                    end_sy,
+                    ev_start,
+                    ev_end,
+                    disc_ids,
+                    scope,
+                ):
+                    return load_cached_pcs_quality(
+                        cache_analytics.session,
+                        cache_analytics,
+                        start_season_year=start_sy,
+                        end_season_year=end_sy,
+                        event_start_date=ev_start,
+                        event_end_date=ev_end,
+                        discipline_type_ids=disc_ids,
+                        competition_scope=scope,
+                    )
+
+                cached = run_with_isolated_analytics(
+                    _load_pcs_cache,
+                    start_sy=start_season_year,
+                    end_sy=end_season_year,
+                    ev_start=event_start,
+                    ev_end=event_end,
+                    disc_ids=discipline_ids,
+                    scope=scope_key,
+                )
+                if cached is not None:
+                    st.session_state.pcs_quality_result = cached
+                    st.success("Loaded precomputed PCS cache for this filter set.")
+                    st.rerun()
             with st.spinner("Loading PCS marks and computing judge profiles…"):
                 st.session_state.pcs_quality_result = _cached_pcs_quality_analysis(
                     start_season_year,
@@ -1841,6 +1965,21 @@ def pcs_quality_analysis_page():
         st.session_state.pcs_quality_result = base_result
 
     result = apply_min_pcs_marks_to_result(base_result, int(min_pcs_marks))
+    if us_officials_only:
+        from judge_official_display_filter import (
+            apply_us_officials_display_filter_to_pcs_result,
+        )
+
+        n_before_us = len(result.get("profiles", pd.DataFrame()))
+        result = apply_us_officials_display_filter_to_pcs_result(
+            result, us_linked_identity_labels_for_ui()
+        )
+        n_after_us = len(result.get("profiles", pd.DataFrame()))
+        if n_before_us and n_after_us < n_before_us:
+            st.caption(
+                f"US officials display filter: **{n_after_us}** of {n_before_us} ranked "
+                "identities are linked to the USFS directory."
+            )
 
     if result.get("error") and result["profiles"].empty:
         err = result["error"]
@@ -2215,6 +2354,15 @@ PCS scores are not part of this model.
             help="(discipline, element type, rounded control GOE) buckets with fewer marks are skipped.",
         )
 
+    us_officials_only = st.checkbox(
+        "US directory officials only",
+        key="element_ranking_us_officials_only",
+        help=(
+            "Show rankings only for judges linked to a USFS official "
+            "(Admin → Judge ↔ directory matcher). σ̂ and panel medians still use all judges."
+        ),
+    )
+
     disc_tuple = tuple(discipline_ids) if discipline_ids else None
     run_params = (
         start_season_year,
@@ -2277,8 +2425,11 @@ PCS scores are not part of this model.
             ):
                 del st.session_state[_k]
         if use_precomputed_cache:
-            cached = load_cached_rankings(
-                analytics.session, analytics, run_params
+            cached = run_with_isolated_analytics(
+                lambda cache_analytics, rp: load_cached_rankings(
+                    cache_analytics.session, cache_analytics, rp
+                ),
+                run_params,
             )
             if cached is not None:
                 st.session_state.element_ranking_result = cached
@@ -2304,9 +2455,13 @@ PCS scores are not part of this model.
                     run_params
                 )
             st.session_state.element_ranking_status = "done"
-            ok, err = try_save_element_ranking_cache(
-                analytics.session,
-                analytics,
+            ok, err = run_with_isolated_analytics(
+                lambda cache_analytics, rp, ranking_result: try_save_element_ranking_cache(
+                    cache_analytics.session,
+                    cache_analytics,
+                    rp,
+                    ranking_result,
+                ),
                 run_params,
                 st.session_state.element_ranking_result,
             )
@@ -2366,6 +2521,22 @@ PCS scores are not part of this model.
         st.caption(
             "Minimum marks filter updated — reusing the last σ̂ fit and panel medians."
         )
+
+    if us_officials_only:
+        from judge_official_display_filter import (
+            apply_us_officials_display_filter_to_ranking_result,
+        )
+
+        n_before_us = len(result.get("marking", pd.DataFrame()))
+        result = apply_us_officials_display_filter_to_ranking_result(
+            result, us_linked_identity_labels_for_ui()
+        )
+        n_after_us = len(result.get("marking", pd.DataFrame()))
+        if n_before_us and n_after_us < n_before_us:
+            st.caption(
+                f"US officials display filter: **{n_after_us}** of {n_before_us} ranked "
+                "identities are linked to the USFS directory."
+            )
 
     if result["error"]:
         st.warning(result["error"])
@@ -4592,8 +4763,9 @@ elif page == "Load Competition":
                         status_area.success(
                             f"Done! **{report_name.strip()}** has been imported into the database. "
                             "Analytics caches were not rebuilt during import; run "
-                            "`scripts/precompute_cross_judge_cache.py` if cross-judge data "
-                            "should include this competition."
+                            "`scripts/precompute_cross_judge_cache.py`, "
+                            "`scripts/precompute_element_ranking_cache.py`, and "
+                            "`scripts/precompute_pcs_quality_cache.py` as needed."
                         )
                         st.cache_data.clear()
                     except Exception as _exc:
@@ -4619,14 +4791,16 @@ render_query_help([
     "(ISO `YYYY-MM-DD`, with event-date filter enabled)",
     "",
     "**Cross-judge:** `?view=`, `?metric=`, `?score_type=`, `?year=`, `?disciplines=`, "
-    "`?start_date=` / `?end_date=` (ISO dates, with event-date filter enabled)",
+    "`?start_date=` / `?end_date=` (ISO dates, with event-date filter enabled), "
+    "`?us_officials_only=1`",
     "",
     "**Element deviation ranking:** `?competition_scope=`, `?start_season=`, "
-    "`?end_season=`, `?disciplines=`, `?start_date=` / `?end_date=`, `?min_marks=`",
+    "`?end_season=`, `?disciplines=`, `?start_date=` / `?end_date=`, `?min_marks=`, "
+    "`?us_officials_only=1`",
     "",
     "**PCS quality:** `?competition_scope=`, `?start_season=`, `?end_season=`, "
     "`?disciplines=` (required; comma-separated names, e.g. `Singles`), "
-    "`?start_date=` / `?end_date=`, `?min_pcs_marks=`",
+    "`?start_date=` / `?end_date=`, `?min_pcs_marks=`, `?us_officials_only=1`",
     "",
     "**Temporal:** `?analysis_type=`, `?metric=`, `?score_type=`, `?judge=`",
     "",

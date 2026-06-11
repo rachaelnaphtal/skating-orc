@@ -58,12 +58,14 @@ def _finalize_shard_row(bucket: dict[str, Any], *, computed_at: datetime) -> dic
     }
 
 
-def ensure_cross_judge_cache_tables(bind: Engine) -> None:
-    CrossJudgeCompetitionShard.__table__.create(bind, checkfirst=True)
+def ensure_cross_judge_cache_tables(session: Session) -> None:
+    from database import ensure_orm_tables
+
+    ensure_orm_tables(session, CrossJudgeCompetitionShard.__table__)
 
 
 def shard_cache_populated(session: Session) -> bool:
-    ensure_cross_judge_cache_tables(session.get_bind())
+    ensure_cross_judge_cache_tables(session)
     n = session.execute(
         select(func.count()).select_from(CrossJudgeCompetitionShard).limit(1)
     ).scalar()
@@ -72,7 +74,7 @@ def shard_cache_populated(session: Session) -> bool:
 
 def competition_has_shard_cache(session: Session, competition_id: int) -> bool:
     """True if at least one shard row exists for this competition."""
-    ensure_cross_judge_cache_tables(session.get_bind())
+    ensure_cross_judge_cache_tables(session)
     return (
         session.execute(
             select(CrossJudgeCompetitionShard.competition_id)
@@ -101,7 +103,7 @@ def iter_competitions_for_precompute(
 def invalidate_cross_judge_cache_for_competition(
     session: Session, competition_id: int
 ) -> int:
-    ensure_cross_judge_cache_tables(session.get_bind())
+    ensure_cross_judge_cache_tables(session)
     result = session.execute(
         delete(CrossJudgeCompetitionShard).where(
             CrossJudgeCompetitionShard.competition_id == competition_id
@@ -239,7 +241,7 @@ def build_cross_judge_shards_for_competition(
     session: Session, competition_id: int
 ) -> int:
     """Rebuild shard rows for one competition. Returns rows written."""
-    ensure_cross_judge_cache_tables(session.get_bind())
+    ensure_cross_judge_cache_tables(session)
     invalidate_cross_judge_cache_for_competition(session, competition_id)
 
     shard_map: dict[tuple[int, int, int], dict[str, Any]] = {}
