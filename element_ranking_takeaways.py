@@ -8,6 +8,31 @@ from typing import Any
 
 import pandas as pd
 
+_DETAIL_COLUMN_ALIASES: dict[str, str] = {
+    "judge_name": "Judge",
+    "discipline": "Discipline",
+    "element_type": "Element type",
+    "element_marks": "Element marks",
+    "partial_marking_score": "Partial marking score",
+    "mean_goe_bias": "Mean GOE bias",
+    "mean_abs_error": "Mean |error|",
+    "mean_sigma": "Mean σ̂",
+}
+
+
+def _normalize_detail_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Accept display or internal column names from drill-down tables."""
+    if df.empty:
+        return df
+    rename = {
+        src: dst
+        for src, dst in _DETAIL_COLUMN_ALIASES.items()
+        if src in df.columns and dst not in df.columns
+    }
+    if rename:
+        return df.rename(columns=rename)
+    return df
+
 
 def _slice_label(discipline: str, element_type: str | None = None) -> str:
     if element_type:
@@ -46,8 +71,12 @@ def build_element_ranking_judge_takeaways(
     ``compute_judge_discipline_breakdown`` (``Judge``, ``Partial marking score``, etc.).
     """
     lines: list[str] = []
-    jd = discipline_detail if isinstance(discipline_detail, pd.DataFrame) else pd.DataFrame()
-    je = element_detail if isinstance(element_detail, pd.DataFrame) else pd.DataFrame()
+    jd = _normalize_detail_columns(
+        discipline_detail if isinstance(discipline_detail, pd.DataFrame) else pd.DataFrame()
+    )
+    je = _normalize_detail_columns(
+        element_detail if isinstance(element_detail, pd.DataFrame) else pd.DataFrame()
+    )
 
     if "Judge" in jd.columns:
         jd = jd.loc[jd["Judge"] == judge_name]
@@ -75,7 +104,12 @@ def build_element_ranking_judge_takeaways(
                 "(√(mean(m²)); lower = closer to the control-score model)."
             )
 
-    if not jd.empty and "Partial marking score" in jd.columns:
+    if (
+        not jd.empty
+        and "Partial marking score" in jd.columns
+        and "Discipline" in jd.columns
+        and "Element marks" in jd.columns
+    ):
         jd_sorted = jd.sort_values("Partial marking score", ascending=False)
         reliable = jd_sorted.loc[jd_sorted["Element marks"] >= min_marks]
         pick = reliable if not reliable.empty else jd_sorted
@@ -119,7 +153,13 @@ def build_element_ranking_judge_takeaways(
                     f"({s_bias:+.3f} GOE vs median{_n_suffix(int(stingy['Element marks']), min_marks=min_marks)})."
                 )
 
-    if not je.empty and "Partial marking score" in je.columns:
+    if (
+        not je.empty
+        and "Partial marking score" in je.columns
+        and "Discipline" in je.columns
+        and "Element type" in je.columns
+        and "Element marks" in je.columns
+    ):
         je_sorted = je.sort_values("Partial marking score", ascending=False)
         reliable_elem = je_sorted.loc[je_sorted["Element marks"] >= min_marks]
         elem_pool = reliable_elem if not reliable_elem.empty else je_sorted

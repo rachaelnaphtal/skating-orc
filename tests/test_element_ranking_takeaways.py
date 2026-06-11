@@ -73,3 +73,22 @@ def test_takeaways_empty_tables():
         )
         == []
     )
+
+
+def test_takeaways_internal_column_names():
+    je = pd.DataFrame(
+        [
+            {
+                "judge_name": "Alex Example",
+                "discipline": "Women",
+                "element_type": "Triple Lutz",
+                "element_marks": 80,
+                "partial_marking_score": 0.62,
+                "mean_goe_bias": 0.10,
+            }
+        ]
+    )
+    lines = build_element_ranking_judge_takeaways(
+        "Alex Example", None, pd.DataFrame(), je, min_marks=30
+    )
+    assert any("Triple Lutz" in line for line in lines)
