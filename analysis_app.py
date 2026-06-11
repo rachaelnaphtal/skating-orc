@@ -63,6 +63,7 @@ from app_query_params import (
     sync_analysis_app_query_params,
 )
 from element_deviation_ranking import (
+    unpack_element_ranking_run_params,
     FLOOR_SIGMA as _ELEM_RANK_FLOOR_SIGMA,
     MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
     MIN_ELEMENT_MARKING_EVENT_DATE,
@@ -79,11 +80,13 @@ from element_deviation_ranking import (
     run_params_same_sigma_and_ranking_scope,
     uses_separate_benchmark_pool,
     validate_element_ranking_scope,
+    unpack_element_ranking_run_params,
 )
 from element_ranking_cache import (
     collect_marks_for_run,
     element_ranking_filter_kwargs,
     load_cached_rankings,
+    load_control_by_element_for_ranking_scope,
     try_save_element_ranking_cache,
 )
 from element_deviation_ranking_job import (
@@ -1176,6 +1179,13 @@ def _element_ranking_control_table(
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached
 
+    ctrl = load_control_by_element_for_ranking_scope(
+        analytics.session, analytics, run_params
+    )
+    if not ctrl.empty:
+        st.session_state[cache_key] = ctrl
+        return ctrl
+
     marks = collect_marks_for_run(
         analytics,
         **element_ranking_filter_kwargs(run_params),
@@ -1190,6 +1200,56 @@ def _element_ranking_control_table(
     if not ctrl.empty:
         st.session_state[cache_key] = ctrl
     return ctrl
+
+
+def _enrich_ranking_result_for_drilldown(
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    ranking_result: dict | None,
+) -> dict | None:
+    """Attach panel control scores when missing (Heroku / summary-cache runs)."""
+    if not ranking_result or ranking_result.get("error"):
+        return ranking_result
+    if not load_control_by_element(ranking_result).empty:
+        return ranking_result
+    ctrl = load_control_by_element_for_ranking_scope(
+        analytics.session, analytics, run_params
+    )
+    if ctrl.empty:
+        return ranking_result
+    enriched = dict(ranking_result)
+    enriched["control_by_element"] = ctrl
+    return enriched
+
+
+def _element_ranking_breakdown_failure_hint(
+    result: dict,
+    run_params: tuple,
+    pick_judge: str,
+) -> str:
+    if not load_ranking_params(result):
+        return (
+            "σ̂ parameters are missing from the saved run. "
+            "Click **Run analysis** to refresh results."
+        )
+    cache_key = ("element_ranking_control", run_params_compute_key(run_params))
+    ctrl = load_control_by_element(result)
+    cached_ctrl = st.session_state.get(cache_key)
+    if ctrl.empty and not (
+        isinstance(cached_ctrl, pd.DataFrame) and not cached_ctrl.empty
+    ):
+        return (
+            "Panel control scores could not be loaded for this filter set "
+            "(needed for per-judge drill-down). If you use **precomputed cache** on "
+            "Heroku, re-run "
+            "`precompute_element_ranking_cache.py --all-scopes --sigma-benchmark --summaries`, "
+            "then **Run analysis** again."
+        )
+    return (
+        f"No element marks found for **{pick_judge}** under the current filters, "
+        "or that identity could not be resolved. "
+        "Click **Run analysis** after changing season, scope, or model parameters."
+    )
 
 
 def _element_ranking_load_judge_breakdown(
@@ -1233,11 +1293,13 @@ def _element_ranking_load_judge_breakdown(
         control_tbl = _element_ranking_control_table(ranking_result, analytics, rp)
         if control_tbl.empty:
             return pd.DataFrame(), pd.DataFrame()
+        floor_sigma = float(unpack_element_ranking_run_params(rp)[7])
         return compute_judge_detail_for_identity(
             analytics,
             judge_name,
             control_tbl,
             params,
+            floor_sigma=floor_sigma,
             **element_ranking_filter_kwargs(rp),
         )
 
@@ -2432,6 +2494,11 @@ PCS scores are not part of this model.
                 run_params,
             )
             if cached is not None:
+                cached = run_with_isolated_analytics(
+                    _enrich_ranking_result_for_drilldown,
+                    run_params,
+                    cached,
+                )
                 st.session_state.element_ranking_result = cached
                 st.session_state.element_ranking_status = "done"
                 st.success("Loaded precomputed cache for this filter set.")
@@ -2511,6 +2578,16 @@ PCS scores are not part of this model.
             "Click **Run analysis** to refresh results."
         )
         return
+
+    if stored_params is not None and load_control_by_element(base_result).empty:
+        enriched = run_with_isolated_analytics(
+            _enrich_ranking_result_for_drilldown,
+            stored_params,
+            base_result,
+        )
+        if enriched is not base_result:
+            st.session_state.element_ranking_result = enriched
+            base_result = enriched
 
     result = apply_min_marks_to_ranking_result(base_result, int(min_marks))
     if (
@@ -2711,10 +2788,29 @@ PCS scores are not part of this model.
         )
         if jd.empty and je.empty:
             st.info(
-                "No discipline / element-type breakdown for this judge under the "
-                "current filters (no element marks, or identity not found). "
-                "Click **Run analysis** after changing season, scope, or model parameters."
+                _element_ranking_breakdown_failure_hint(
+                    result, run_params, pick_judge
+                )
             )
+        else:
+            from element_ranking_takeaways import build_element_ranking_judge_takeaways
+
+            judge_row_series = (
+                judge_row.iloc[0]
+                if not judge_row.empty
+                else None
+            )
+            takeaways = build_element_ranking_judge_takeaways(
+                pick_judge,
+                judge_row_series,
+                jd,
+                je,
+                min_marks=max(30, int(min_marks)),
+            )
+            if takeaways:
+                st.markdown("**Takeaways**")
+                for line in takeaways:
+                    st.markdown(f"- {line}")
         if not jd.empty:
             jd_one = jd.sort_values("Partial marking score")
             st.markdown("**By discipline** (partial score = √(mean(m²)) within that discipline)")

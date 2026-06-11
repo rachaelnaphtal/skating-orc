@@ -487,7 +487,7 @@ def _try_assemble_ranking_from_shard_summaries(
         "judge_element_detail": pd.DataFrame(),
         "judge_discipline_detail_all": pd.DataFrame(),
         "judge_element_detail_all": pd.DataFrame(),
-        "control_by_element": control_by_element if low_memory else pd.DataFrame(),
+        "control_by_element": control_by_element,
         "params": params,
         "n_raw_marks": n_raw,
         "n_sigma_buckets": len(params),
@@ -785,6 +785,57 @@ def _save_shard_row(
         raise
     finally:
         write_session.close()
+
+
+def load_control_by_element_for_ranking_scope(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+) -> pd.DataFrame:
+    """
+    Panel median GOE per element for the ranking scope, from shard caches.
+
+    Tries summary-cache ``control_by_element`` slices first, then mark shards, without
+    concatenating full mark DataFrames for every judge (needed for Heroku drill-down).
+    """
+    rank_scope = ranking_scope_kwargs_from_run_params(run_params)
+    rp = unpack_element_ranking_run_params(run_params)
+    floor_sigma = float(rp[7])
+    sigma_key = benchmark_sigma_cache_key(run_params)
+    control_parts: list[pd.DataFrame] = []
+
+    for shard in iter_element_ranking_shards(analytics, **rank_scope):
+        payload = _load_shard_summary_row(
+            session,
+            analytics,
+            shard,
+            sigma_key=sigma_key,
+            floor_sigma=floor_sigma,
+            validate_fingerprint=False,
+        )
+        if isinstance(payload, dict):
+            control = payload.get("control_by_element")
+            if isinstance(control, pd.DataFrame) and not control.empty:
+                control_parts.append(control)
+
+    if control_parts:
+        return pd.concat(control_parts, ignore_index=True).drop_duplicates(
+            subset=["element_id"]
+        )
+
+    mark_parts: list[pd.DataFrame] = []
+    for shard in iter_element_ranking_shards(analytics, **rank_scope):
+        marks = _load_shard_row(
+            session, analytics, shard, validate_fingerprint=False
+        )
+        if marks is None:
+            marks = _load_marks_from_db(session, analytics, shard)
+        if not marks.empty:
+            mark_parts.append(control_scores_by_element(marks))
+
+    if not mark_parts:
+        return pd.DataFrame()
+    return pd.concat(mark_parts, ignore_index=True).drop_duplicates(subset=["element_id"])
 
 
 def collect_marks_for_run(
