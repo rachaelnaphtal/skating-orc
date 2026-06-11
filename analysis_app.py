@@ -63,7 +63,6 @@ from app_query_params import (
     sync_analysis_app_query_params,
 )
 from element_deviation_ranking import (
-    unpack_element_ranking_run_params,
     FLOOR_SIGMA as _ELEM_RANK_FLOOR_SIGMA,
     MIN_BIN_COUNT as _ELEM_RANK_MIN_BIN_COUNT,
     MIN_ELEMENT_MARKING_EVENT_DATE,
@@ -80,7 +79,6 @@ from element_deviation_ranking import (
     run_params_same_sigma_and_ranking_scope,
     uses_separate_benchmark_pool,
     validate_element_ranking_scope,
-    unpack_element_ranking_run_params,
 )
 from element_ranking_cache import (
     collect_marks_for_run,
@@ -1293,13 +1291,11 @@ def _element_ranking_load_judge_breakdown(
         control_tbl = _element_ranking_control_table(ranking_result, analytics, rp)
         if control_tbl.empty:
             return pd.DataFrame(), pd.DataFrame()
-        floor_sigma = float(unpack_element_ranking_run_params(rp)[7])
         return compute_judge_detail_for_identity(
             analytics,
             judge_name,
             control_tbl,
             params,
-            floor_sigma=floor_sigma,
             **element_ranking_filter_kwargs(rp),
         )
 
