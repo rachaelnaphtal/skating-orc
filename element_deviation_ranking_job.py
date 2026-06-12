@@ -140,6 +140,31 @@ def package_element_ranking_result(result: dict, base_pickle_path: str) -> dict:
     return out
 
 
+def rehydrate_packaged_ranking_result(result: dict) -> dict:
+    """
+    Inline σ̂ params and panel control scores when a packaged result only
+    stores sidecar file paths (Heroku subprocess / low-memory packaging).
+    """
+    out = dict(result)
+    params = out.get("params")
+    if not params:
+        path = out.get("params_path")
+        if path and os.path.isfile(path):
+            with open(path, "rb") as f:
+                loaded = pickle.load(f)
+            if isinstance(loaded, dict):
+                out["params"] = loaded
+    ctrl = out.get("control_by_element")
+    if not isinstance(ctrl, pd.DataFrame) or ctrl.empty:
+        path = out.get("control_by_element_path")
+        if path and os.path.isfile(path):
+            with open(path, "rb") as f:
+                loaded = pickle.load(f)
+            if isinstance(loaded, pd.DataFrame):
+                out["control_by_element"] = loaded
+    return out
+
+
 def load_ranking_params(result: dict) -> dict:
     params = result.get("params")
     if params:
@@ -147,7 +172,9 @@ def load_ranking_params(result: dict) -> dict:
     path = result.get("params_path")
     if path and os.path.isfile(path):
         with open(path, "rb") as f:
-            return pickle.load(f)
+            loaded = pickle.load(f)
+        if isinstance(loaded, dict):
+            return loaded
     return {}
 
 
@@ -252,7 +279,10 @@ def cleanup_ranking_artifacts(
 
 def load_ranking_result(pickle_path: str) -> dict[str, Any]:
     with open(pickle_path, "rb") as f:
-        return pickle.load(f)
+        main = pickle.load(f)
+    if not isinstance(main, dict):
+        return main
+    return rehydrate_packaged_ranking_result(main)
 
 
 def read_ranking_error(pickle_path: str) -> str | None:

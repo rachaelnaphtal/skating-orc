@@ -91,6 +91,7 @@ from element_ranking_cache import (
     element_ranking_filter_kwargs,
     element_ranking_scope_kwargs,
     load_cached_rankings,
+    load_cached_sigma_params_for_run,
     load_control_by_element_for_ranking_scope,
     try_save_element_ranking_cache,
 )
@@ -100,6 +101,7 @@ from element_deviation_ranking_job import (
     load_control_by_element,
     load_ranking_params,
     load_ranking_result,
+    rehydrate_packaged_ranking_result,
     package_element_ranking_result,
     read_ranking_error,
     start_ranking_subprocess,
@@ -1266,6 +1268,29 @@ def _element_ranking_control_table(
     return ctrl
 
 
+def _element_ranking_sigma_params(
+    result: dict,
+    run_params: tuple | None,
+) -> dict:
+    """σ̂ bin lookup table for drill-down (inline, sidecar, or DB cache)."""
+    params = load_ranking_params(result)
+    if params:
+        return params
+    rehydrated = rehydrate_packaged_ranking_result(result)
+    params = load_ranking_params(rehydrated)
+    if params:
+        return params
+    if run_params is None:
+        return {}
+    cached = run_with_isolated_analytics(
+        lambda analytics, rp: load_cached_sigma_params_for_run(
+            analytics.session, analytics, rp
+        ),
+        run_params,
+    )
+    return cached if isinstance(cached, dict) else {}
+
+
 def _enrich_ranking_result_for_drilldown(
     analytics: JudgeAnalytics,
     run_params: tuple,
@@ -1291,7 +1316,7 @@ def _element_ranking_breakdown_failure_hint(
     run_params: tuple,
     pick_judge: str,
 ) -> str:
-    if not load_ranking_params(result):
+    if not _element_ranking_sigma_params(result, run_params):
         return (
             "σ̂ parameters are missing from the saved run. "
             "Click **Run analysis** to refresh results."
@@ -1324,9 +1349,14 @@ def _element_ranking_load_judge_breakdown(
     """On-demand per-judge tables (discipline, element type, control GOE bins)."""
     empty = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    params = load_ranking_params(result)
+    params = _element_ranking_sigma_params(result, run_params)
     if not params:
         return empty
+    if not result.get("params"):
+        patched = dict(result)
+        patched["params"] = params
+        st.session_state.element_ranking_result = patched
+        result = patched
 
     detail_key = (
         "element_ranking_judge_detail",
@@ -2767,7 +2797,9 @@ PCS scores are not part of this model.
             os.close(fd)
             st.session_state.element_ranking_pickle_path = pickle_path
             with st.spinner("Computing rankings…"):
-                computed = _run_element_ranking_compute(run_params)
+                computed = rehydrate_packaged_ranking_result(
+                    _run_element_ranking_compute(run_params)
+                )
             enriched = run_with_isolated_analytics(
                 _enrich_ranking_result_for_drilldown,
                 run_params,

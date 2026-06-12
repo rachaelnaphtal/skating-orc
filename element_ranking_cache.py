@@ -1045,6 +1045,17 @@ def _load_legacy_full_cache(
     )
 
 
+def load_cached_sigma_params_for_run(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+) -> dict | None:
+    """σ̂ bin parameters for ``run_params`` when present in the DB cache."""
+    return _load_sigma_cache_row(
+        session, analytics, run_params, validate_fingerprint=False
+    )
+
+
 def load_cached_rankings(
     session: Session,
     analytics: JudgeAnalytics,
