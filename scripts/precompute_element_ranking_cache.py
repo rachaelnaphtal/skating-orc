@@ -15,6 +15,8 @@ Example::
     python scripts/precompute_element_ranking_cache.py --all-scopes --sigma-benchmark --summaries
     python scripts/precompute_element_ranking_cache.py --all-scopes --all-segment-levels --sigma-benchmark --summaries
     python scripts/precompute_element_ranking_cache.py --segment-levels junior_senior novice_junior_senior
+    python scripts/precompute_element_ranking_cache.py --scope international --segment-levels junior_senior --skip-unchanged
+    python scripts/precompute_element_ranking_cache.py --scope international --segment-levels junior_senior --summaries-only --sigma-benchmark
 """
 
 from __future__ import annotations
@@ -86,7 +88,9 @@ def _precompute_scope(
     segment_level_preset: str | None,
     sigma_benchmark: bool,
     warm_summaries: bool,
-) -> tuple[int, str | None, int]:
+    skip_unchanged: bool,
+    summaries_only: bool,
+) -> tuple[int, int, str | None, int]:
     """Warm shards (and optional σ̂ / summary rows) for one competition scope."""
     level_label = ELEMENT_RANKING_LEVEL_FILTER_LABELS.get(
         segment_level_preset or ELEMENT_RANKING_LEVEL_FILTER_ALL,
@@ -96,13 +100,21 @@ def _precompute_scope(
         f"\n=== scope={competition_scope}, levels={level_label} "
         f"({len(years)} season(s)) ==="
     )
-    n = precompute_element_ranking_shards(
-        session,
-        analytics,
-        competition_scope=competition_scope,
-        season_years=years,
-        segment_level_preset=segment_level_preset,
-    )
+    written = 0
+    skipped = 0
+    if not summaries_only:
+        written, skipped = precompute_element_ranking_shards(
+            session,
+            analytics,
+            competition_scope=competition_scope,
+            season_years=years,
+            segment_level_preset=segment_level_preset,
+            skip_unchanged=skip_unchanged,
+        )
+        if skipped:
+            print(f"  shards skipped (unchanged): {skipped}")
+    else:
+        print("  shard pass: skipped (--summaries-only)")
     sigma_key = None
     n_summaries = 0
     if sigma_benchmark:
@@ -110,17 +122,34 @@ def _precompute_scope(
             competition_scope,
             segment_level_preset=segment_level_preset,
         )
-        sigma_key = precompute_element_ranking_sigma(session, analytics, run_params)
-        if sigma_key:
-            print(f"  σ̂ benchmark cache: {sigma_key}")
+        if summaries_only:
+            if warm_summaries:
+                n_summaries = precompute_element_ranking_shard_summaries(
+                    session,
+                    analytics,
+                    run_params,
+                    summaries_only=True,
+                )
+                if n_summaries:
+                    sigma_key = "cached"
+                    print(f"  summary shard rows written: {n_summaries}")
+                else:
+                    print(
+                        "  summary rebuild: skipped (missing σ̂ or mark shards)",
+                        file=sys.stderr,
+                    )
         else:
-            print("  σ̂ benchmark cache: skipped (no marks)", file=sys.stderr)
-        if warm_summaries and sigma_key:
-            n_summaries = precompute_element_ranking_shard_summaries(
-                session, analytics, run_params
-            )
-            print(f"  summary shard rows written: {n_summaries}")
-    return n, sigma_key, n_summaries
+            sigma_key = precompute_element_ranking_sigma(session, analytics, run_params)
+            if sigma_key:
+                print(f"  σ̂ benchmark cache: {sigma_key}")
+            else:
+                print("  σ̂ benchmark cache: skipped (no marks)", file=sys.stderr)
+            if warm_summaries and sigma_key:
+                n_summaries = precompute_element_ranking_shard_summaries(
+                    session, analytics, run_params
+                )
+                print(f"  summary shard rows written: {n_summaries}")
+    return written, skipped, sigma_key, n_summaries
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,6 +209,23 @@ def main(argv: list[str] | None = None) -> int:
             "(faster cache-only ranking loads)."
         ),
     )
+    parser.add_argument(
+        "--skip-unchanged",
+        action="store_true",
+        help=(
+            "Skip shard DB reloads when the cached fingerprint still matches "
+            "(faster routine precompute)."
+        ),
+    )
+    parser.add_argument(
+        "--summaries-only",
+        action="store_true",
+        help=(
+            "Rebuild per-shard summary cache from existing mark shards only; "
+            "requires --sigma-benchmark (and usually --summaries). Does not "
+            "reload mark shards from the database."
+        ),
+    )
     args = parser.parse_args(argv)
 
     scopes = list(ALL_COMPETITION_SCOPES) if args.all_scopes else [args.scope]
@@ -211,28 +257,46 @@ def main(argv: list[str] | None = None) -> int:
         if args.summaries and not args.sigma_benchmark:
             print("--summaries requires --sigma-benchmark", file=sys.stderr)
             return 1
+        if args.summaries_only and not args.sigma_benchmark:
+            print("--summaries-only requires --sigma-benchmark", file=sys.stderr)
+            return 1
+        if args.summaries_only and not args.summaries:
+            print(
+                "Note: --summaries-only implies summary rebuild; "
+                "pass --summaries to silence this.",
+                file=sys.stderr,
+            )
+        if args.summaries_only and args.skip_unchanged:
+            print("Note: --skip-unchanged has no effect with --summaries-only.", file=sys.stderr)
 
         total_shards = 0
+        total_skipped = 0
         total_summaries = 0
         sigma_keys: list[str] = []
+        warm_summaries = args.summaries or args.summaries_only
         for scope in scopes:
             for preset in level_presets:
-                n, sigma_key, n_summaries = _precompute_scope(
+                written, skipped, sigma_key, n_summaries = _precompute_scope(
                     session,
                     analytics,
                     competition_scope=scope,
                     years=years,
                     segment_level_preset=_segment_level_preset_arg(preset),
                     sigma_benchmark=args.sigma_benchmark,
-                    warm_summaries=args.summaries,
+                    warm_summaries=warm_summaries,
+                    skip_unchanged=args.skip_unchanged,
+                    summaries_only=args.summaries_only,
                 )
-                total_shards += n
+                total_shards += written
+                total_skipped += skipped
                 total_summaries += n_summaries
                 if sigma_key:
                     sigma_keys.append(sigma_key)
 
         print(
-            f"\nDone. {total_shards} shard(s) across {len(scopes)} scope(s), "
+            f"\nDone. {total_shards} shard(s) written"
+            + (f", {total_skipped} skipped (unchanged)" if total_skipped else "")
+            + f" across {len(scopes)} scope(s), "
             f"{len(level_presets)} level preset(s). "
             f"memory_efficient={memory_efficient_mode()}"
         )

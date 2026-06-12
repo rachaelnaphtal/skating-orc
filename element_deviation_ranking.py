@@ -1204,7 +1204,7 @@ def finish_element_deviation_rankings_from_marks(
     )
 
     n_raw = len(df)
-    if "judge_name" not in df.columns:
+    if "judge_id" in df.columns:
         df = attach_judge_identities(df, analytics)
     control_by_element = control_scores_by_element(df)
     df = compute_control_scores(df)

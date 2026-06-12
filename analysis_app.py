@@ -1260,7 +1260,7 @@ def _element_ranking_control_table(
     )
     if marks.empty:
         return pd.DataFrame()
-    if "judge_name" not in marks.columns:
+    if "judge_id" in marks.columns:
         marks = attach_judge_identities(marks, analytics)
     ctrl = control_scores_by_element(marks)
     if not ctrl.empty:

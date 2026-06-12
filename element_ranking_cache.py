@@ -492,6 +492,7 @@ def _persist_shard_summaries_for_scope(
     rank_scope: dict[str, Any],
     *,
     floor_sigma: float,
+    cache_only_marks: bool = False,
 ) -> None:
     if not params:
         return
@@ -500,11 +501,11 @@ def _persist_shard_summaries_for_scope(
     for shard in iter_element_ranking_shards(analytics, **rank_scope):
         marks = _load_shard_row(session, analytics, shard)
         if marks is None:
+            if cache_only_marks:
+                continue
             marks = _load_marks_from_db(session, analytics, shard)
         if marks.empty:
             continue
-        if "judge_name" not in marks.columns:
-            marks = attach_judge_identities(marks, analytics)
         work = annotate_normalized_marks(
             compute_control_scores(marks.copy()), params, floor_sigma=floor_sigma
         )
@@ -815,15 +816,25 @@ def _normalize_shard_marks(
 ) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=list(SHARD_MARK_COLUMNS))
-    if "judge_name" not in df.columns:
-        df = attach_judge_identities(df, analytics)
+    if "judge_id" not in df.columns:
+        raise ValueError("Shard marks missing required column: judge_id")
+    # Always remap judge_name from judge_id so identity-link changes apply without
+    # rewriting mark shards.
+    df = attach_judge_identities(df, analytics)
     for col in SHARD_MARK_COLUMNS:
         if col not in df.columns:
-            if col == "judge_name":
-                df = attach_judge_identities(df, analytics)
-            else:
-                raise ValueError(f"Shard marks missing required column: {col}")
+            raise ValueError(f"Shard marks missing required column: {col}")
     return df[list(SHARD_MARK_COLUMNS)].copy()
+
+
+def _shard_cache_is_fresh(
+    session: Session, analytics: JudgeAnalytics, shard: ElementRankingShard
+) -> bool:
+    """True when a cached shard row exists and its fingerprint still matches."""
+    row = session.get(ElementDeviationRankingShardCache, shard_cache_key(shard))
+    if row is None:
+        return False
+    return row.data_fingerprint == _shard_fingerprint(session, analytics, shard)
 
 
 def _load_marks_from_db(
@@ -1172,15 +1183,21 @@ def precompute_element_ranking_shards(
     season_years: list[str] | None = None,
     discipline_type_ids: list[int] | None = None,
     segment_level_preset: str | None = None,
-) -> int:
-    """Warm shard cache for each season × discipline. Returns shards written."""
+    skip_unchanged: bool = False,
+) -> tuple[int, int]:
+    """Warm shard cache for each season × discipline.
+
+    Returns ``(written, skipped)``; when ``skip_unchanged`` is true, fresh shards
+    are left in place and counted in ``skipped``.
+    """
     years = season_years or season_years_in_run_range(
         None, None, [str(y) for y in analytics.get_years()]
     )
     disc_ids = discipline_ids_for_element_ranking(
         analytics, discipline_type_ids, competition_scope
     )
-    n = 0
+    written = 0
+    skipped = 0
     for sy in years:
         for dt_id in disc_ids:
             shard = ElementRankingShard(
@@ -1189,11 +1206,15 @@ def precompute_element_ranking_shards(
                 competition_scope=competition_scope,
                 segment_level_preset=segment_level_preset,
             )
+            if skip_unchanged and _shard_cache_is_fresh(session, analytics, shard):
+                skipped += 1
+                print(f"  shard {sy} discipline_id={dt_id}: skipped (unchanged)")
+                continue
             marks = _load_marks_from_db(session, analytics, shard)
             _save_shard_row(session, analytics, shard, marks)
-            n += 1
+            written += 1
             print(f"  shard {sy} discipline_id={dt_id}: {len(marks):,} marks")
-    return n
+    return written, skipped
 
 
 def build_precompute_element_ranking_run_params(
@@ -1292,15 +1313,16 @@ def precompute_element_ranking_shard_summaries(
     run_params: tuple,
     *,
     rank_scope: dict[str, Any] | None = None,
+    summaries_only: bool = False,
 ) -> int:
     """Warm per-shard judge summary rows for a benchmark σ̂ fit. Returns rows written."""
     sigma_out = get_or_fit_benchmark_sigma_params(
         session,
         analytics,
         run_params,
-        cache_only=False,
-        persist_shards=True,
-        persist_sigma=True,
+        cache_only=summaries_only,
+        persist_shards=not summaries_only,
+        persist_sigma=not summaries_only,
     )
     if sigma_out is None:
         return 0
@@ -1317,6 +1339,7 @@ def precompute_element_ranking_shard_summaries(
         params,
         scope,
         floor_sigma=float(rp[7]),
+        cache_only_marks=summaries_only,
     )
     return len(shards)
 
