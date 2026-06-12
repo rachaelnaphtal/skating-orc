@@ -17,7 +17,85 @@ _DETAIL_COLUMN_ALIASES: dict[str, str] = {
     "mean_goe_bias": "Mean GOE bias",
     "mean_abs_error": "Mean |error|",
     "mean_sigma": "Mean σ̂",
+    "control_int": "Control GOE",
 }
+
+
+def filter_judge_detail_tables(
+    discipline_detail: pd.DataFrame,
+    element_detail: pd.DataFrame,
+    control_goe_detail: pd.DataFrame,
+    *,
+    min_marks: int | None = None,
+    disciplines: list[str] | None = None,
+    element_types: list[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Subset drill-down rows by mark count, discipline, and/or element type."""
+    jd = _normalize_detail_columns(
+        discipline_detail if isinstance(discipline_detail, pd.DataFrame) else pd.DataFrame()
+    )
+    je = _normalize_detail_columns(
+        element_detail if isinstance(element_detail, pd.DataFrame) else pd.DataFrame()
+    )
+    jg = _normalize_detail_columns(
+        control_goe_detail
+        if isinstance(control_goe_detail, pd.DataFrame)
+        else pd.DataFrame()
+    )
+
+    if min_marks is not None and int(min_marks) > 0:
+        m = int(min_marks)
+        if not jd.empty and "Element marks" in jd.columns:
+            jd = jd.loc[jd["Element marks"] >= m]
+        if not je.empty and "Element marks" in je.columns:
+            je = je.loc[je["Element marks"] >= m]
+        if not jg.empty and "Element marks" in jg.columns:
+            jg = jg.loc[jg["Element marks"] >= m]
+
+    if disciplines:
+        disc_set = set(disciplines)
+        if not jd.empty and "Discipline" in jd.columns:
+            jd = jd.loc[jd["Discipline"].isin(disc_set)]
+        if not je.empty and "Discipline" in je.columns:
+            je = je.loc[je["Discipline"].isin(disc_set)]
+        if not jg.empty and "Discipline" in jg.columns:
+            jg = jg.loc[jg["Discipline"].isin(disc_set)]
+
+    if element_types:
+        et_set = set(element_types)
+        if not je.empty and "Element type" in je.columns:
+            je = je.loc[je["Element type"].isin(et_set)]
+        if not jg.empty and "Element type" in jg.columns:
+            jg = jg.loc[jg["Element type"].isin(et_set)]
+
+    return jd, je, jg
+
+
+def detail_filter_options(
+    discipline_detail: pd.DataFrame,
+    element_detail: pd.DataFrame,
+    control_goe_detail: pd.DataFrame,
+) -> tuple[list[str], list[str]]:
+    """Distinct discipline and element-type labels for drill-down filter widgets."""
+    jd = _normalize_detail_columns(
+        discipline_detail if isinstance(discipline_detail, pd.DataFrame) else pd.DataFrame()
+    )
+    je = _normalize_detail_columns(
+        element_detail if isinstance(element_detail, pd.DataFrame) else pd.DataFrame()
+    )
+    jg = _normalize_detail_columns(
+        control_goe_detail
+        if isinstance(control_goe_detail, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    disciplines: set[str] = set()
+    element_types: set[str] = set()
+    for frame in (jd, je, jg):
+        if not frame.empty and "Discipline" in frame.columns:
+            disciplines.update(frame["Discipline"].dropna().astype(str))
+        if not frame.empty and "Element type" in frame.columns:
+            element_types.update(frame["Element type"].dropna().astype(str))
+    return sorted(disciplines), sorted(element_types)
 
 
 def _normalize_detail_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -34,10 +112,16 @@ def _normalize_detail_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _slice_label(discipline: str, element_type: str | None = None) -> str:
-    if element_type:
-        return f"{discipline} — {element_type}"
-    return discipline
+def _slice_label(
+    discipline: str,
+    element_type: str | None = None,
+    *,
+    control_goe: int | float | None = None,
+) -> str:
+    base = f"{discipline} — {element_type}" if element_type else discipline
+    if control_goe is not None:
+        return f"{base} @ control GOE {int(control_goe):+d}"
+    return base
 
 
 def _bias_phrase(bias: float, *, neutral: float) -> str:
@@ -59,16 +143,18 @@ def build_element_ranking_judge_takeaways(
     marking_row: pd.Series | dict[str, Any] | None,
     discipline_detail: pd.DataFrame,
     element_detail: pd.DataFrame,
+    control_goe_detail: pd.DataFrame | None = None,
     *,
     min_marks: int = 30,
+    min_bin_marks: int = 15,
     top_n: int = 3,
     bias_neutral: float = 0.02,
 ) -> list[str]:
     """
-    Build bullet-point takeaways from per-judge discipline and element-type tables.
+    Build bullet-point takeaways from per-judge drill-down tables.
 
-    ``discipline_detail`` / ``element_detail`` use the display column names from
-    ``compute_judge_discipline_breakdown`` (``Judge``, ``Partial marking score``, etc.).
+    ``control_goe_detail`` rows are judge × discipline × element type × rounded
+    panel-median GOE (the σ̂ model bins).
     """
     lines: list[str] = []
     jd = _normalize_detail_columns(
@@ -77,11 +163,18 @@ def build_element_ranking_judge_takeaways(
     je = _normalize_detail_columns(
         element_detail if isinstance(element_detail, pd.DataFrame) else pd.DataFrame()
     )
+    jg = _normalize_detail_columns(
+        control_goe_detail
+        if isinstance(control_goe_detail, pd.DataFrame)
+        else pd.DataFrame()
+    )
 
     if "Judge" in jd.columns:
         jd = jd.loc[jd["Judge"] == judge_name]
     if "Judge" in je.columns:
         je = je.loc[je["Judge"] == judge_name]
+    if "Judge" in jg.columns:
+        jg = jg.loc[jg["Judge"] == judge_name]
 
     if marking_row is not None:
         row = (
@@ -118,7 +211,7 @@ def build_element_ranking_judge_takeaways(
         pscore = float(top["Partial marking score"])
         n = int(top["Element marks"])
         lines.append(
-            f"Largest discipline-level deviation: **{disc}** "
+            f"Largest discipline-level normalized deviation: **{disc}** "
             f"(partial score {pscore:.3f}{_n_suffix(n, min_marks=min_marks)})."
         )
         if len(pick) > 1:
@@ -173,7 +266,9 @@ def build_element_ranking_judge_takeaways(
             )
         if parts:
             lines.append(
-                "Largest deviations by element type: " + "; ".join(parts) + "."
+                "Largest normalized deviations by element type: "
+                + "; ".join(parts)
+                + "."
             )
 
         if "Mean GOE bias" in je.columns:
@@ -210,7 +305,85 @@ def build_element_ranking_judge_takeaways(
                 "prioritize slices with larger counts when interpreting."
             )
 
-    if not lines and jd.empty and je.empty:
+    if (
+        not jg.empty
+        and "Partial marking score" in jg.columns
+        and "Discipline" in jg.columns
+        and "Element type" in jg.columns
+        and "Control GOE" in jg.columns
+        and "Element marks" in jg.columns
+    ):
+        jg_sorted = jg.sort_values("Partial marking score", ascending=False)
+        reliable_bins = jg_sorted.loc[jg_sorted["Element marks"] >= min_bin_marks]
+        bin_pool = reliable_bins if not reliable_bins.empty else jg_sorted
+        top_bins = bin_pool.head(top_n)
+        parts: list[str] = []
+        for _, brow in top_bins.iterrows():
+            label = _slice_label(
+                str(brow["Discipline"]),
+                str(brow["Element type"]),
+                control_goe=int(brow["Control GOE"]),
+            )
+            parts.append(
+                f"**{label}** ({float(brow['Partial marking score']):.3f}, "
+                f"{int(brow['Element marks']):,} marks)"
+            )
+        if parts:
+            bin_threshold = (
+                f" (bins with ≥{min_bin_marks:,} marks only)"
+                if not reliable_bins.empty
+                else ""
+            )
+            lines.append(
+                "Largest normalized deviations by control GOE range"
+                + bin_threshold
+                + ": "
+                + "; ".join(parts)
+                + "."
+            )
+
+        if "Mean GOE bias" in jg.columns and not je.empty and "Element marks" in je.columns:
+            focus = je.sort_values("Element marks", ascending=False).head(1)
+            if not focus.empty:
+                frow = focus.iloc[0]
+                fdisc = str(frow["Discipline"])
+                ftype = str(frow["Element type"])
+                subset = jg.loc[
+                    (jg["Discipline"] == fdisc) & (jg["Element type"] == ftype)
+                ].copy()
+                subset = subset.loc[subset["Element marks"] >= min_bin_marks]
+                if len(subset) >= 2:
+                    high = subset.loc[subset["Partial marking score"].idxmax()]
+                    low = subset.loc[subset["Partial marking score"].idxmin()]
+                    if int(high["Control GOE"]) != int(low["Control GOE"]):
+                        lines.append(
+                            f"Within **{fdisc} — {ftype}**, normalized deviation "
+                            f"(√(mean(m²)) after σ̂ scaling) is highest at control GOE "
+                            f"**{int(high['Control GOE']):+d}** "
+                            f"(partial {float(high['Partial marking score']):.3f}, "
+                            f"{int(high['Element marks']):,} marks) vs lowest at "
+                            f"**{int(low['Control GOE']):+d}** "
+                            f"(partial {float(low['Partial marking score']):.3f}, "
+                            f"{int(low['Element marks']):,} marks), among GOE bins "
+                            f"with ≥{min_bin_marks:,} marks."
+                        )
+                    bias_high = subset.loc[subset["Mean GOE bias"].idxmax()]
+                    bias_low = subset.loc[subset["Mean GOE bias"].idxmin()]
+                    if (
+                        float(bias_high["Mean GOE bias"]) > bias_neutral
+                        and float(bias_low["Mean GOE bias"]) < -bias_neutral
+                        and int(bias_high["Control GOE"]) != int(bias_low["Control GOE"])
+                    ):
+                        lines.append(
+                            f"For **{fdisc} — {ftype}**, GOE bias swings from "
+                            f"**{float(bias_low['Mean GOE bias']):+.3f}** at control GOE "
+                            f"{int(bias_low['Control GOE']):+d} to "
+                            f"**{float(bias_high['Mean GOE bias']):+.3f}** at "
+                            f"{int(bias_high['Control GOE']):+d} "
+                            f"(among GOE bins with ≥{min_bin_marks:,} marks)."
+                        )
+
+    if not lines and jd.empty and je.empty and jg.empty:
         return []
 
     return lines

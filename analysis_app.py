@@ -70,12 +70,18 @@ from element_deviation_ranking import (
     attach_judge_identities,
     compute_judge_detail_for_identity,
     control_scores_by_element,
+    ELEMENT_RANKING_LEVEL_FILTER_ALL,
+    ELEMENT_RANKING_LEVEL_FILTER_LABELS,
     element_ranking_discipline_types,
+    element_ranking_discipline_names_for_scope,
     filter_element_ranking_season_years,
+    unpack_element_ranking_run_params,
     memory_efficient_mode,
     benchmark_competition_scope,
+    benchmark_segment_level_preset,
     benchmark_season_bounds,
     run_params_compute_key,
+    run_params_ranking_compute_key,
     run_params_same_sigma_and_ranking_scope,
     uses_separate_benchmark_pool,
     validate_element_ranking_scope,
@@ -83,6 +89,7 @@ from element_deviation_ranking import (
 from element_ranking_cache import (
     collect_marks_for_run,
     element_ranking_filter_kwargs,
+    element_ranking_scope_kwargs,
     load_cached_rankings,
     load_control_by_element_for_ranking_scope,
     try_save_element_ranking_cache,
@@ -362,9 +369,7 @@ page = st.sidebar.radio(
     key="primary_nav_page",
 )
 
-apply_analysis_filters_for_page(
-    page, get_analytics_safe(), from_url=_url_params_changed
-)
+apply_analysis_filters_for_page(page, from_url=_url_params_changed)
 
 
 def _individual_judge_protocol_competition_pairs(
@@ -968,10 +973,20 @@ def _finalize_element_ranking_job() -> None:
     st.session_state.element_ranking_proc = None
 
     if exitcode == 0 and pickle_path and os.path.isfile(pickle_path):
-        st.session_state.element_ranking_result = load_ranking_result(pickle_path)
+        loaded = load_ranking_result(pickle_path)
+        rp = st.session_state.get("element_ranking_run_params")
+        if rp is not None:
+            loaded = run_with_isolated_analytics(
+                _enrich_ranking_result_for_drilldown,
+                rp,
+                loaded,
+            )
+        st.session_state.element_ranking_result = loaded
+        _persist_element_ranking_judge_summary_pool(
+            loaded, run_params=rp
+        )
         st.session_state.element_ranking_status = "done"
         st.session_state.pop("element_ranking_error_msg", None)
-        rp = st.session_state.get("element_ranking_run_params")
         if rp is not None:
 
             def _persist_ranking_cache(analytics, run_params, ranking_result):
@@ -1018,6 +1033,57 @@ def _stop_element_ranking_process() -> None:
     cleanup_ranking_artifacts(pickle_path, params_path)
     st.session_state.element_ranking_proc = None
     st.session_state.element_ranking_pickle_path = None
+
+
+def _persist_element_ranking_judge_summary_pool(
+    result: dict | None,
+    *,
+    run_params: tuple | None = None,
+) -> None:
+    """Keep the unfiltered judge pool for minimum-marks re-filtering without a re-run."""
+    if not result:
+        return
+    judge_all = result.get("judge_summary_all")
+    if isinstance(judge_all, pd.DataFrame) and not judge_all.empty:
+        st.session_state["element_ranking_judge_summary_all"] = judge_all
+        if run_params is not None:
+            st.session_state["element_ranking_judge_summary_scope_key"] = (
+                run_params_ranking_compute_key(run_params)
+            )
+        return
+    marking = result.get("marking")
+    if isinstance(marking, pd.DataFrame) and not marking.empty:
+        from element_deviation_ranking import judge_summary_from_marking_display
+
+        rebuilt = judge_summary_from_marking_display(marking)
+        if rebuilt is not None and not rebuilt.empty:
+            st.session_state["element_ranking_judge_summary_all"] = rebuilt
+            if run_params is not None:
+                st.session_state["element_ranking_judge_summary_scope_key"] = (
+                    run_params_ranking_compute_key(run_params)
+                )
+
+
+def _element_ranking_scoped_judge_summary_pool(
+    base_result: dict,
+    run_params: tuple,
+) -> pd.DataFrame | None:
+    """
+    Session fallback pool for minimum-marks re-filtering.
+
+    Only used when the saved result lacks ``judge_summary_all`` and the pool was
+    recorded for the same ranking scope (segment levels, seasons, etc.).
+    """
+    existing = base_result.get("judge_summary_all")
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        return None
+    pool = st.session_state.get("element_ranking_judge_summary_all")
+    if not isinstance(pool, pd.DataFrame) or pool.empty:
+        return None
+    pool_scope = st.session_state.get("element_ranking_judge_summary_scope_key")
+    if pool_scope != run_params_ranking_compute_key(run_params):
+        return None
+    return pool
 
 
 def _cancel_element_ranking_job() -> None:
@@ -1186,7 +1252,7 @@ def _element_ranking_control_table(
 
     marks = collect_marks_for_run(
         analytics,
-        **element_ranking_filter_kwargs(run_params),
+        **element_ranking_scope_kwargs(run_params),
         cache_only=False,
         persist_shards=False,
     )
@@ -1254,25 +1320,13 @@ def _element_ranking_load_judge_breakdown(
     result: dict,
     run_params: tuple,
     pick_judge: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Embedded tables, on-demand load from sidecars, or compute for one judge."""
-    jd = result.get("judge_discipline_detail", pd.DataFrame())
-    je = result.get("judge_element_detail", pd.DataFrame())
-    if isinstance(jd, pd.DataFrame) and not jd.empty:
-        jd = jd.loc[jd["Judge"] == pick_judge]
-    else:
-        jd = pd.DataFrame()
-    if isinstance(je, pd.DataFrame) and not je.empty:
-        je = je.loc[je["Judge"] == pick_judge]
-    else:
-        je = pd.DataFrame()
-
-    if not jd.empty or not je.empty:
-        return jd, je
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """On-demand per-judge tables (discipline, element type, control GOE bins)."""
+    empty = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     params = load_ranking_params(result)
     if not params:
-        return pd.DataFrame(), pd.DataFrame()
+        return empty
 
     detail_key = (
         "element_ranking_judge_detail",
@@ -1280,17 +1334,24 @@ def _element_ranking_load_judge_breakdown(
         pick_judge,
     )
     cached = st.session_state.get(detail_key)
-    if isinstance(cached, tuple) and len(cached) == 2:
-        jd_c, je_c = cached
-        if (isinstance(jd_c, pd.DataFrame) and not jd_c.empty) or (
-            isinstance(je_c, pd.DataFrame) and not je_c.empty
-        ):
-            return jd_c, je_c
+    if isinstance(cached, tuple) and len(cached) >= 2:
+        jd_c = cached[0] if isinstance(cached[0], pd.DataFrame) else pd.DataFrame()
+        je_c = cached[1] if isinstance(cached[1], pd.DataFrame) else pd.DataFrame()
+        jg_c = (
+            cached[2]
+            if len(cached) >= 3 and isinstance(cached[2], pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if not jg_c.empty and (not jd_c.empty or not je_c.empty or not jg_c.empty):
+            return jd_c, je_c, jg_c
+        if not jd_c.empty or not je_c.empty:
+            if len(cached) >= 3:
+                return jd_c, je_c, jg_c
 
     def _compute_judge_breakdown(analytics, ranking_result, rp, judge_name):
         control_tbl = _element_ranking_control_table(ranking_result, analytics, rp)
         if control_tbl.empty:
-            return pd.DataFrame(), pd.DataFrame()
+            return empty
         return compute_judge_detail_for_identity(
             analytics,
             judge_name,
@@ -1303,10 +1364,122 @@ def _element_ranking_load_judge_breakdown(
         detail = run_with_isolated_analytics(
             _compute_judge_breakdown, result, run_params, pick_judge
         )
-    if detail[0].empty and detail[1].empty:
+    if len(detail) == 2:
+        detail = (*detail, pd.DataFrame())
+    if detail[0].empty and detail[1].empty and detail[2].empty:
         return detail
     st.session_state[detail_key] = detail
     return detail
+
+
+def _element_ranking_report_discipline_names(
+    analytics: JudgeAnalytics, run_params: tuple
+) -> list[str]:
+    """Discipline labels included in the current ranking report scope."""
+    rp = unpack_element_ranking_run_params(run_params)
+    disc_tuple = rp[2]
+    scope_key = rp[3]
+    if disc_tuple:
+        id_to_name = {
+            int(dt_id): name
+            for dt_id, name in element_ranking_discipline_types(analytics, scope_key)
+        }
+        return [
+            id_to_name[int(dt_id)]
+            for dt_id in disc_tuple
+            if int(dt_id) in id_to_name
+        ]
+    return element_ranking_discipline_names_for_scope(analytics, scope_key)
+
+
+def _control_goe_chart_series_label(discipline: str, element_type: str) -> str:
+    return f"{discipline} — {element_type}"
+
+
+def _control_goe_chart_series_options(element_detail: pd.DataFrame) -> list[str]:
+    """Ordered discipline × element-type labels for the control-GOE chart multiselect."""
+    if element_detail.empty or not {"Discipline", "Element type"}.issubset(
+        element_detail.columns
+    ):
+        return []
+    sort_col = (
+        "Partial marking score"
+        if "Partial marking score" in element_detail.columns
+        else "Element marks"
+    )
+    scored = element_detail.sort_values(sort_col, ascending=False)
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, row in scored.iterrows():
+        label = _control_goe_chart_series_label(
+            str(row["Discipline"]), str(row["Element type"])
+        )
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out
+
+
+def _element_ranking_control_goe_chart(
+    control_goe_detail: pd.DataFrame,
+    element_detail: pd.DataFrame,
+    *,
+    min_bin_marks: int = 10,
+    series_keys: list[str] | None = None,
+    max_types: int = 3,
+):
+    """Line chart: partial marking score vs control GOE for selected element-type series."""
+    if control_goe_detail.empty:
+        return None
+    if "Control GOE" not in control_goe_detail.columns:
+        return None
+
+    if series_keys:
+        plot_series = list(series_keys)
+    elif not element_detail.empty and {"Discipline", "Element type"}.issubset(
+        element_detail.columns
+    ):
+        plot_series = _control_goe_chart_series_options(element_detail)[:max_types]
+    else:
+        return None
+
+    if not plot_series:
+        return None
+
+    parts: list[pd.DataFrame] = []
+    for label in plot_series:
+        if " — " not in label:
+            continue
+        disc, etype = label.split(" — ", 1)
+        mask = (control_goe_detail["Discipline"] == disc) & (
+            control_goe_detail["Element type"] == etype
+        )
+        if min_bin_marks > 0:
+            mask = mask & (control_goe_detail["Element marks"] >= min_bin_marks)
+        subset = control_goe_detail.loc[mask].copy()
+        if subset.empty:
+            continue
+        subset["Series"] = label
+        parts.append(subset)
+
+    if not parts:
+        return None
+
+    plot_df = pd.concat(parts, ignore_index=True)
+    fig = px.line(
+        plot_df.sort_values(["Series", "Control GOE"]),
+        x="Control GOE",
+        y="Partial marking score",
+        color="Series",
+        markers=True,
+        title="Partial marking score by panel-median (control) GOE",
+        labels={
+            "Control GOE": "Rounded panel median GOE",
+            "Partial marking score": "Partial marking score √(mean(m²))",
+        },
+    )
+    fig.update_layout(hovermode="x unified")
+    return fig
 
 
 def _element_ranking_judge_detail_column_config() -> dict:
@@ -1338,6 +1511,11 @@ def _element_ranking_judge_detail_column_config() -> dict:
             "Mean σ̂",
             format="%.3f",
             help="Average σ̂ applied to marks in this discipline slice.",
+        ),
+        "Control GOE": st.column_config.NumberColumn(
+            "Control GOE",
+            format="%+d",
+            help="Panel median GOE for the element, rounded (σ̂ model bin).",
         ),
     }
 
@@ -2197,6 +2375,38 @@ Across disciplines: mark-weighted. Open **How scores are calculated** above for 
                 )
 
 
+def _mark_element_ranking_benchmark_customized() -> None:
+    st.session_state["element_ranking_benchmark_customized"] = True
+
+
+def _element_ranking_segment_level_session_value(preset: str | None) -> str:
+    return preset or ELEMENT_RANKING_LEVEL_FILTER_ALL
+
+
+def _sync_element_ranking_benchmark_pool(
+    start_season: str,
+    end_season: str,
+    scope_label: str,
+    segment_level_preset: str | None,
+) -> None:
+    """
+    Mirror ranking season years, competition scope, and segment levels into the
+    σ̂ benchmark pool until the user edits the benchmark widgets.
+    """
+    seg_session = _element_ranking_segment_level_session_value(segment_level_preset)
+    main_key = (start_season, end_season, scope_label, seg_session)
+    prev_main = st.session_state.get("element_ranking_ranking_filters_for_benchmark")
+    customized = st.session_state.get("element_ranking_benchmark_customized", False)
+
+    if prev_main != main_key and (prev_main is None or not customized):
+        st.session_state["element_ranking_benchmark_start_season"] = start_season
+        st.session_state["element_ranking_benchmark_end_season"] = end_season
+        st.session_state["element_ranking_benchmark_competition_scope"] = scope_label
+        st.session_state["element_ranking_benchmark_segment_levels"] = seg_session
+
+    st.session_state["element_ranking_ranking_filters_for_benchmark"] = main_key
+
+
 def element_deviation_ranking_page():
     """Element GOE marking scores vs panel-median control (sigma-normalized)."""
     st.header("Element Deviation Ranking Analysis")
@@ -2309,45 +2519,7 @@ PCS scores are not part of this model.
         event_start_iso = event_start.isoformat()
         event_end_iso = event_end.isoformat()
 
-    benchmark_start_season_year = None
-    benchmark_end_season_year = None
-    benchmark_scope_key = COMPETITION_SCOPE_ALL
-    with st.expander("σ̂ benchmark pool", expanded=False):
-        st.caption(
-            "Seasons and competition scope used only to fit intrinsic spread (σ̂). "
-            "Event dates above apply to rankings, not to this pool."
-        )
-        bc1, bc2 = st.columns(2)
-        with bc1:
-            bench_start_pick = st.selectbox(
-                "Season year from",
-                ["Any"] + years,
-                index=0,
-                key="element_ranking_benchmark_start_season",
-            )
-            benchmark_start_season_year = (
-                None if bench_start_pick == "Any" else bench_start_pick
-            )
-        with bc2:
-            bench_end_pick = st.selectbox(
-                "Season year to",
-                ["Any"] + years,
-                index=0,
-                key="element_ranking_benchmark_end_season",
-            )
-            benchmark_end_season_year = (
-                None if bench_end_pick == "Any" else bench_end_pick
-            )
-        bench_scope_label = st.selectbox(
-            "Competition scope",
-            list(_COMPETITION_SCOPE_LABELS),
-            index=0,
-            key="element_ranking_benchmark_competition_scope",
-            help="Officials competition-type filter for σ̂ fitting only.",
-        )
-        benchmark_scope_key = _competition_scope_key(bench_scope_label)
-
-    col_d, col_cache = st.columns([2, 1])
+    col_d, col_levels, col_cache = st.columns([2, 1, 1])
     with col_d:
         discipline_types = element_ranking_discipline_types(analytics, scope_key)
         discipline_names = [name for _id, name in discipline_types]
@@ -2359,7 +2531,21 @@ PCS scores are not part of this model.
         discipline_ids = [
             dt_id for dt_id, name in discipline_types if name in selected_disciplines
         ] if selected_disciplines else None
-        
+    with col_levels:
+        segment_level_preset = st.selectbox(
+            "Segment levels",
+            list(ELEMENT_RANKING_LEVEL_FILTER_LABELS),
+            format_func=lambda key: ELEMENT_RANKING_LEVEL_FILTER_LABELS[key],
+            key="element_ranking_segment_levels",
+            help=(
+                "Restrict element marks by ``segment.level``. Novice = Novice and "
+                "Advanced Novice only; Junior = Junior only; Senior = Senior only "
+                "(no Excel or International). Other levels are excluded unless you "
+                "choose All segment levels."
+            ),
+        )
+        if segment_level_preset == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+            segment_level_preset = None
     with col_cache:
         use_precomputed_cache = st.checkbox(
             "Use precomputed cache",
@@ -2369,6 +2555,66 @@ PCS scores are not part of this model.
                 "Load cached season×discipline shards and assemble (missing shards are computed)."
             ),
         )
+
+    _sync_element_ranking_benchmark_pool(
+        start_season, end_season, scope_label, segment_level_preset
+    )
+
+    benchmark_start_season_year = None
+    benchmark_end_season_year = None
+    benchmark_scope_key = COMPETITION_SCOPE_ALL
+    benchmark_segment_level_preset = None
+    with st.expander("σ̂ benchmark pool", expanded=False):
+        st.caption(
+            "Seasons, competition scope, and segment levels used only to fit "
+            "intrinsic spread (σ̂). Defaults to the same values as the ranking "
+            "filters above; change these to use a custom σ̂ pool. Event dates "
+            "apply to rankings only, not to this pool."
+        )
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            bench_start_pick = st.selectbox(
+                "Season year from",
+                ["Any"] + years,
+                key="element_ranking_benchmark_start_season",
+                on_change=_mark_element_ranking_benchmark_customized,
+            )
+            benchmark_start_season_year = (
+                None if bench_start_pick == "Any" else bench_start_pick
+            )
+        with bc2:
+            bench_end_pick = st.selectbox(
+                "Season year to",
+                ["Any"] + years,
+                key="element_ranking_benchmark_end_season",
+                on_change=_mark_element_ranking_benchmark_customized,
+            )
+            benchmark_end_season_year = (
+                None if bench_end_pick == "Any" else bench_end_pick
+            )
+        bench_scope_label = st.selectbox(
+            "Competition scope",
+            list(_COMPETITION_SCOPE_LABELS),
+            key="element_ranking_benchmark_competition_scope",
+            help="Officials competition-type filter for σ̂ fitting only.",
+            on_change=_mark_element_ranking_benchmark_customized,
+        )
+        benchmark_scope_key = _competition_scope_key(bench_scope_label)
+        bench_segment_level_pick = st.selectbox(
+            "Segment levels",
+            list(ELEMENT_RANKING_LEVEL_FILTER_LABELS),
+            format_func=lambda key: ELEMENT_RANKING_LEVEL_FILTER_LABELS[key],
+            key="element_ranking_benchmark_segment_levels",
+            help=(
+                "Restrict element marks used for σ̂ fitting by ``segment.level``. "
+                "Same presets as the ranking filter above."
+            ),
+            on_change=_mark_element_ranking_benchmark_customized,
+        )
+        if bench_segment_level_pick == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+            benchmark_segment_level_preset = None
+        else:
+            benchmark_segment_level_preset = bench_segment_level_pick
 
     st.subheader("Model parameters")
     p1, p2, p3 = st.columns(3)
@@ -2435,6 +2681,8 @@ PCS scores are not part of this model.
         benchmark_start_season_year,
         benchmark_end_season_year,
         benchmark_scope_key,
+        segment_level_preset,
+        benchmark_segment_level_preset,
     )
     _finalize_element_ranking_job()
     job_status = st.session_state.get("element_ranking_status", "idle")
@@ -2476,6 +2724,8 @@ PCS scores are not part of this model.
         st.session_state.pop("element_ranking_error_msg", None)
         st.session_state.pop("element_ranking_cache_saved", None)
         st.session_state.pop("element_ranking_cache_error", None)
+        st.session_state.pop("element_ranking_judge_summary_all", None)
+        st.session_state.pop("element_ranking_judge_summary_scope_key", None)
         for _k in list(st.session_state.keys()):
             if isinstance(_k, tuple) and _k[:1] in (
                 "element_ranking_judge_detail",
@@ -2496,6 +2746,9 @@ PCS scores are not part of this model.
                     cached,
                 )
                 st.session_state.element_ranking_result = cached
+                _persist_element_ranking_judge_summary_pool(
+                    cached, run_params=run_params
+                )
                 st.session_state.element_ranking_status = "done"
                 st.success("Loaded precomputed cache for this filter set.")
                 st.rerun()
@@ -2514,9 +2767,16 @@ PCS scores are not part of this model.
             os.close(fd)
             st.session_state.element_ranking_pickle_path = pickle_path
             with st.spinner("Computing rankings…"):
-                st.session_state.element_ranking_result = _run_element_ranking_compute(
-                    run_params
-                )
+                computed = _run_element_ranking_compute(run_params)
+            enriched = run_with_isolated_analytics(
+                _enrich_ranking_result_for_drilldown,
+                run_params,
+                computed,
+            )
+            st.session_state.element_ranking_result = enriched
+            _persist_element_ranking_judge_summary_pool(
+                enriched, run_params=run_params
+            )
             st.session_state.element_ranking_status = "done"
             ok, err = run_with_isolated_analytics(
                 lambda cache_analytics, rp, ranking_result: try_save_element_ranking_cache(
@@ -2563,6 +2823,9 @@ PCS scores are not part of this model.
             "Rankings are not computed automatically so navigation stays responsive."
         )
         return
+    _persist_element_ranking_judge_summary_pool(
+        base_result, run_params=stored_params
+    )
 
     compute_match = (
         stored_params is not None
@@ -2585,14 +2848,26 @@ PCS scores are not part of this model.
             st.session_state.element_ranking_result = enriched
             base_result = enriched
 
-    result = apply_min_marks_to_ranking_result(base_result, int(min_marks))
-    if (
+    result = apply_min_marks_to_ranking_result(
+        base_result,
+        int(min_marks),
+        judge_summary_all=_element_ranking_scoped_judge_summary_pool(
+            base_result, run_params
+        ),
+    )
+    min_marks_changed = (
         stored_params is not None
         and run_params_same_sigma_and_ranking_scope(stored_params, run_params)
         and int(stored_params[6] or 0) != int(min_marks)
-    ):
+    )
+    if min_marks_changed:
         st.caption(
             "Minimum marks filter updated — reusing the last σ̂ fit and panel medians."
+        )
+    if int(min_marks) > 0 and not result.get("_min_marks_filter_applied", False):
+        st.warning(
+            "Could not apply the minimum element marks filter to the saved results. "
+            "Click **Run analysis** to refresh rankings."
         )
 
     if us_officials_only:
@@ -2652,15 +2927,21 @@ PCS scores are not part of this model.
     if uses_separate_benchmark_pool(run_params):
         bench_start, bench_end = benchmark_season_bounds(run_params)
         bench_scope = benchmark_competition_scope(run_params)
+        bench_levels = benchmark_segment_level_preset(run_params)
         rank_start, rank_end = start_season_year, end_season_year
         scope_labels = {v: k for k, v in _COMPETITION_SCOPE_LABEL_TO_KEY.items()}
         bench_scope_label = scope_labels.get(bench_scope, bench_scope)
         rank_scope_label = scope_labels.get(scope_key, scope_key)
+        def _level_label(preset: str | None) -> str:
+            return ELEMENT_RANKING_LEVEL_FILTER_LABELS.get(
+                preset or ELEMENT_RANKING_LEVEL_FILTER_ALL, "All"
+            )
+
         st.caption(
             f"σ̂ benchmark pool: seasons **{bench_start or 'Any'}**–**{bench_end or 'Any'}**, "
-            f"scope **{bench_scope_label}**. "
+            f"scope **{bench_scope_label}**, levels **{_level_label(bench_levels)}**. "
             f"Rankings: seasons **{rank_start or 'Any'}**–**{rank_end or 'Any'}**, "
-            f"scope **{rank_scope_label}**"
+            f"scope **{rank_scope_label}**, levels **{_level_label(segment_level_preset)}**"
             + (
                 f", events **{event_start_iso}**–**{event_end_iso}**"
                 if event_start_iso and event_end_iso
@@ -2779,55 +3060,167 @@ PCS scores are not part of this model.
                 f"({bias:+.3f} GOE vs panel median per element mark)."
             )
         _detail_col_config = _element_ranking_judge_detail_column_config()
-        jd, je = _element_ranking_load_judge_breakdown(
+        jd, je, jg = _element_ranking_load_judge_breakdown(
             result, run_params, pick_judge
         )
-        if jd.empty and je.empty:
+        if jd.empty and je.empty and jg.empty:
             st.info(
                 _element_ranking_breakdown_failure_hint(
                     result, run_params, pick_judge
                 )
             )
         else:
-            from element_ranking_takeaways import build_element_ranking_judge_takeaways
-
-            judge_row_series = (
-                judge_row.iloc[0]
-                if not judge_row.empty
-                else None
+            from element_ranking_takeaways import (
+                build_element_ranking_judge_takeaways,
+                detail_filter_options,
+                filter_judge_detail_tables,
             )
-            takeaways = build_element_ranking_judge_takeaways(
-                pick_judge,
-                judge_row_series,
+
+            disc_options, et_options = detail_filter_options(jd, je, jg)
+            report_disciplines = _element_ranking_report_discipline_names(
+                analytics, run_params
+            )
+            discipline_choices = sorted(set(report_disciplines) | set(disc_options))
+            default_disciplines = [
+                d for d in report_disciplines if d in discipline_choices
+            ]
+            judge_filter_key = pick_judge.replace(" ", "_")[:48]
+            with st.expander("Drill-down filters", expanded=False):
+                filt_c1, filt_c2, filt_c3 = st.columns(3)
+                with filt_c1:
+                    detail_min_marks = st.number_input(
+                        "Minimum marks per row",
+                        min_value=0,
+                        value=0,
+                        step=5,
+                        key=f"element_ranking_detail_min_marks_{judge_filter_key}",
+                        help="Hide breakdown rows with fewer element marks than this.",
+                    )
+                with filt_c2:
+                    detail_disciplines = st.multiselect(
+                        "Discipline",
+                        discipline_choices,
+                        default=default_disciplines,
+                        key=f"element_ranking_detail_disciplines_{judge_filter_key}",
+                        help=(
+                            "Defaults to all disciplines in the report scope. "
+                            "Clear all to include every discipline present in this breakdown."
+                        ),
+                    )
+                with filt_c3:
+                    detail_element_types = st.multiselect(
+                        "Element type",
+                        et_options,
+                        default=et_options,
+                        key=f"element_ranking_detail_element_types_{judge_filter_key}",
+                        help=(
+                            "Defaults to all element types for this judge. "
+                            "Clear all to include every element type in the breakdown."
+                        ),
+                    )
+
+            jd_f, je_f, jg_f = filter_judge_detail_tables(
                 jd,
                 je,
-                min_marks=max(30, int(min_marks)),
+                jg,
+                min_marks=int(detail_min_marks) if int(detail_min_marks) > 0 else None,
+                disciplines=detail_disciplines or None,
+                element_types=detail_element_types or None,
             )
-            if takeaways:
-                st.markdown("**Takeaways**")
-                for line in takeaways:
-                    st.markdown(f"- {line}")
-        if not jd.empty:
-            jd_one = jd.sort_values("Partial marking score")
-            st.markdown("**By discipline** (partial score = √(mean(m²)) within that discipline)")
-            st.dataframe(
-                jd_one,
-                width="stretch",
-                hide_index=True,
-                column_config=_detail_col_config,
-            )
-        if not je.empty:
-            je_one = je.sort_values("Partial marking score", ascending=False)
-            st.markdown(
-                "**By discipline and element type** "
-                "(largest partial scores first — where the judge diverged most)"
-            )
-            st.dataframe(
-                je_one,
-                width="stretch",
-                hide_index=True,
-                column_config=_detail_col_config,
-            )
+            if jd_f.empty and je_f.empty and jg_f.empty:
+                st.warning(
+                    "No breakdown rows match the drill-down filters. "
+                    "Lower the minimum marks or clear discipline / element-type filters."
+                )
+            else:
+                judge_row_series = (
+                    judge_row.iloc[0]
+                    if not judge_row.empty
+                    else None
+                )
+                takeaway_min = max(30, int(detail_min_marks or 0))
+                takeaways = build_element_ranking_judge_takeaways(
+                    pick_judge,
+                    judge_row_series,
+                    jd_f,
+                    je_f,
+                    jg_f,
+                    min_marks=takeaway_min,
+                    min_bin_marks=max(15, min(30, takeaway_min)),
+                )
+                if takeaways:
+                    st.markdown("**Takeaways**")
+                    for line in takeaways:
+                        st.markdown(f"- {line}")
+
+                if not jd_f.empty:
+                    jd_one = jd_f.sort_values("Partial marking score")
+                    st.markdown(
+                        "**By discipline** "
+                        "(partial score = √(mean(m²)) within that discipline; σ̂-scaled)"
+                    )
+                    st.dataframe(
+                        jd_one,
+                        width="stretch",
+                        hide_index=True,
+                        column_config=_detail_col_config,
+                    )
+                if not je_f.empty:
+                    je_one = je_f.sort_values("Partial marking score", ascending=False)
+                    st.markdown(
+                        "**By discipline and element type** "
+                        "(largest normalized partial scores first)"
+                    )
+                    st.dataframe(
+                        je_one,
+                        width="stretch",
+                        hide_index=True,
+                        column_config=_detail_col_config,
+                    )
+                if not jg_f.empty:
+                    jg_one = jg_f.sort_values("Partial marking score", ascending=False)
+                    st.markdown(
+                        "**By control GOE range** "
+                        "(discipline × element type × rounded panel median GOE)"
+                    )
+                    st.caption(
+                        "Each row is one σ̂ bin. Partial score is √(mean(m²)) using "
+                        "normalized marks m = (GOE − panel median) / σ̂."
+                    )
+                    chart_series_options = _control_goe_chart_series_options(
+                        je_f if not je_f.empty else jg_one
+                    )
+                    default_chart_series = chart_series_options[:3]
+                    chart_series = st.multiselect(
+                        "Chart series (discipline × element type)",
+                        chart_series_options,
+                        default=default_chart_series,
+                        key=f"element_ranking_chart_series_{judge_filter_key}",
+                        help=(
+                            "Each line is partial marking score vs rounded panel "
+                            "median GOE. Points match the drill-down filters above "
+                            "(minimum marks, discipline, element type)."
+                        ),
+                    )
+                    goe_fig = _element_ranking_control_goe_chart(
+                        jg_one,
+                        je_f if not je_f.empty else jg_one,
+                        min_bin_marks=0,
+                        series_keys=chart_series or None,
+                    )
+                    if goe_fig is not None:
+                        st.plotly_chart(goe_fig, width="stretch")
+                    elif chart_series:
+                        st.caption(
+                            "No chart: selected series have no rows under the "
+                            "current drill-down filters."
+                        )
+                    st.dataframe(
+                        jg_one,
+                        width="stretch",
+                        hide_index=True,
+                        column_config=_detail_col_config,
+                    )
 
 
 def temporal_trend_analysis():
@@ -4888,7 +5281,11 @@ render_query_help([
     "",
     "**Element deviation ranking:** `?competition_scope=`, `?start_season=`, "
     "`?end_season=`, `?disciplines=`, `?start_date=` / `?end_date=`, `?min_marks=`, "
-    "`?us_officials_only=1`",
+    "`?segment_levels=` (`all`, `novice-junior-senior`, `junior-senior`), "
+    "`?floor_sigma=`, `?min_bin_count=`, "
+    "`?bench_start_season=` / `?bench_end_season=` (`any` or season code), "
+    "`?bench_competition_scope=`, `?bench_segment_levels=` (same slugs as "
+    "`segment_levels`), `?us_officials_only=1`",
     "",
     "**PCS quality:** `?competition_scope=`, `?start_season=`, `?end_season=`, "
     "`?disciplines=` (required; comma-separated names, e.g. `Singles`), "

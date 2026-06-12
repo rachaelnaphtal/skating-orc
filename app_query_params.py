@@ -16,6 +16,11 @@ Example (activity tracker)::
     ?report=appointments&achieved_from=2024-01-01&achieved_to=2024-12-31&active_only=1
     ?report=availability&form=1&competition=3&appointment=judge&discipline=synchronized
         &level=any&show_available=1&show_no_reply=0&show_unavailable=0
+
+Example (element deviation ranking)::
+
+    ?page=element-deviation-ranking&competition_scope=qualifying&segment_levels=junior-senior
+        &floor_sigma=0.05&min_bin_count=30&bench_start_season=2223&bench_end_season=2526
 """
 
 from __future__ import annotations
@@ -174,6 +179,54 @@ def apply_int_select_param_aliases(
     return False
 
 
+def apply_float_param(
+    param_name: str,
+    session_key: str,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> bool:
+    text = qp_get(param_name)
+    if not text:
+        return False
+    try:
+        value = float(text)
+    except ValueError:
+        return False
+    if min_value is not None and value < min_value:
+        return False
+    if max_value is not None and value > max_value:
+        return False
+    import streamlit as st
+
+    st.session_state[session_key] = value
+    return True
+
+
+def apply_int_param(
+    param_name: str,
+    session_key: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> bool:
+    text = qp_get(param_name)
+    if not text:
+        return False
+    try:
+        value = int(text)
+    except ValueError:
+        return False
+    if min_value is not None and value < min_value:
+        return False
+    if max_value is not None and value > max_value:
+        return False
+    import streamlit as st
+
+    st.session_state[session_key] = value
+    return True
+
+
 def apply_bool_param(param_name: str, session_key: str) -> bool:
     raw = qp_get(param_name)
     if raw is None:
@@ -319,6 +372,18 @@ _CROSS_JUDGE_METRICS = (
 )
 _SCORE_TYPES = ("both", "pcs", "element")
 _CROSS_JUDGE_VIEWS = ("Judge Overview", "Judge vs Competition")
+_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET = {
+    "all": "all",
+    "novice-junior-senior": "novice_junior_senior",
+    "njs": "novice_junior_senior",
+    "junior-senior": "junior_senior",
+    "js": "junior_senior",
+}
+_ELEMENT_RANKING_SEGMENT_LEVEL_PRESET_TO_SLUG = {
+    "all": "all",
+    "novice_junior_senior": "novice-junior-senior",
+    "junior_senior": "junior-senior",
+}
 _TEMPORAL_ANALYSIS_TYPES = (
     "Individual Judge Trends",
     "Overall System Trends",
@@ -392,23 +457,22 @@ def _scope_session_key_for_page(page: str) -> str | None:
     }.get(page)
 
 
-def apply_analysis_filters_for_page(
-    page: str, analytics, *, from_url: bool = True
-) -> None:
-    """Seed widget session state from URL when the query string changes."""
+_ANALYTICS_URL_FILTER_PAGES = frozenset(
+    {
+        "Individual Judge Analysis",
+        "PCS Quality Analysis",
+        "Element Deviation Ranking Analysis",
+        "Cross-Judge Benchmarking",
+        "Temporal Trend Analysis",
+        "Rule Errors Analysis",
+        "Competition Analysis",
+    }
+)
+
+
+def _apply_analysis_page_url_filters(page: str, analytics) -> None:
+    """Page-specific URL → session state (requires a DB session)."""
     import streamlit as st
-
-    if not from_url:
-        return
-
-    scope_key = _scope_session_key_for_page(page)
-    if scope_key:
-        apply_choice_param(
-            "competition_scope",
-            scope_key,
-            COMPETITION_SCOPE_SLUG_TO_LABEL.values(),
-            slug_map=COMPETITION_SCOPE_SLUG_TO_LABEL,
-        )
 
     if page == "Individual Judge Analysis":
         ig_labels, _ = _identity_group_options(analytics)
@@ -523,6 +587,56 @@ def apply_analysis_filters_for_page(
             except ValueError:
                 pass
         apply_bool_param("us_officials_only", "element_ranking_us_officials_only")
+        apply_choice_param(
+            "segment_levels",
+            "element_ranking_segment_levels",
+            tuple(_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET.values()),
+            slug_map=_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET,
+        )
+        apply_float_param(
+            "floor_sigma",
+            "element_ranking_floor_sigma",
+            min_value=0.01,
+            max_value=1.0,
+        )
+        apply_int_param(
+            "min_bin_count",
+            "element_ranking_min_bin_count",
+            min_value=5,
+            max_value=200,
+        )
+        bench_start = qp_get("bench_start_season")
+        bench_end = qp_get("bench_end_season")
+        if bench_start or bench_end:
+            import streamlit as st
+
+            if bench_start:
+                st.session_state["element_ranking_benchmark_start_season"] = (
+                    "Any" if bench_start.lower() == "any" else bench_start
+                )
+            if bench_end:
+                st.session_state["element_ranking_benchmark_end_season"] = (
+                    "Any" if bench_end.lower() == "any" else bench_end
+                )
+            st.session_state["element_ranking_benchmark_customized"] = True
+        if apply_choice_param(
+            "bench_competition_scope",
+            "element_ranking_benchmark_competition_scope",
+            COMPETITION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=COMPETITION_SCOPE_SLUG_TO_LABEL,
+        ):
+            import streamlit as st
+
+            st.session_state["element_ranking_benchmark_customized"] = True
+        if apply_choice_param(
+            "bench_segment_levels",
+            "element_ranking_benchmark_segment_levels",
+            tuple(_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET.values()),
+            slug_map=_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET,
+        ):
+            import streamlit as st
+
+            st.session_state["element_ranking_benchmark_customized"] = True
 
     elif page == "Cross-Judge Benchmarking":
         apply_choice_param("view", "cross_judge_view", _CROSS_JUDGE_VIEWS)
@@ -573,6 +687,31 @@ def apply_analysis_filters_for_page(
                         f"{name} ({year})"
                     )
                     break
+
+
+def apply_analysis_filters_for_page(
+    page: str, *, from_url: bool = True
+) -> None:
+    """Seed widget session state from URL when the query string changes."""
+    if not from_url:
+        return
+
+    scope_key = _scope_session_key_for_page(page)
+    if scope_key:
+        apply_choice_param(
+            "competition_scope",
+            scope_key,
+            COMPETITION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=COMPETITION_SCOPE_SLUG_TO_LABEL,
+        )
+
+    if page not in _ANALYTICS_URL_FILTER_PAGES:
+        return
+
+    from analytics_connection import isolated_analytics_session
+
+    with isolated_analytics_session() as analytics:
+        _apply_analysis_page_url_filters(page, analytics)
 
 
 def _identity_group_options(analytics):
@@ -636,6 +775,8 @@ def sync_analysis_app_query_params(page: str) -> None:
             params["us_officials_only"] = "1"
 
     elif page == "Element Deviation Ranking Analysis":
+        from element_deviation_ranking import FLOOR_SIGMA, MIN_BIN_COUNT
+
         scope_ss = st.session_state.get("element_ranking_competition_scope")
         if scope_ss:
             params["competition_scope"] = COMPETITION_SCOPE_LABEL_TO_SLUG.get(scope_ss)
@@ -659,6 +800,47 @@ def sync_analysis_app_query_params(page: str) -> None:
             params["min_marks"] = int(min_m)
         if st.session_state.get("element_ranking_us_officials_only"):
             params["us_officials_only"] = "1"
+        seg = st.session_state.get(
+            "element_ranking_segment_levels", "all"
+        )
+        seg_slug = _ELEMENT_RANKING_SEGMENT_LEVEL_PRESET_TO_SLUG.get(seg, "all")
+        if seg_slug != "all":
+            params["segment_levels"] = seg_slug
+        floor_sigma = st.session_state.get("element_ranking_floor_sigma")
+        if floor_sigma is not None and float(floor_sigma) != float(FLOOR_SIGMA):
+            params["floor_sigma"] = f"{float(floor_sigma):.2f}"
+        min_bin = st.session_state.get("element_ranking_min_bin_count")
+        if min_bin is not None and int(min_bin) != int(MIN_BIN_COUNT):
+            params["min_bin_count"] = int(min_bin)
+        if st.session_state.get("element_ranking_benchmark_customized"):
+            bench_start = st.session_state.get("element_ranking_benchmark_start_season")
+            if bench_start:
+                params["bench_start_season"] = (
+                    "any" if bench_start == "Any" else str(bench_start)
+                )
+            bench_end = st.session_state.get("element_ranking_benchmark_end_season")
+            if bench_end:
+                params["bench_end_season"] = (
+                    "any" if bench_end == "Any" else str(bench_end)
+                )
+            bench_scope = st.session_state.get(
+                "element_ranking_benchmark_competition_scope"
+            )
+            rank_scope = st.session_state.get("element_ranking_competition_scope")
+            if bench_scope and bench_scope != rank_scope:
+                bench_slug = COMPETITION_SCOPE_LABEL_TO_SLUG.get(bench_scope)
+                if bench_slug:
+                    params["bench_competition_scope"] = bench_slug
+            bench_seg = st.session_state.get(
+                "element_ranking_benchmark_segment_levels", "all"
+            )
+            rank_seg = st.session_state.get("element_ranking_segment_levels", "all")
+            if bench_seg != rank_seg:
+                bench_seg_slug = _ELEMENT_RANKING_SEGMENT_LEVEL_PRESET_TO_SLUG.get(
+                    bench_seg, "all"
+                )
+                if bench_seg_slug != "all":
+                    params["bench_segment_levels"] = bench_seg_slug
 
     elif page == "Cross-Judge Benchmarking":
         for qp_name, ss_key in (

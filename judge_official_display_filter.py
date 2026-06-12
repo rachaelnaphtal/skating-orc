@@ -21,6 +21,36 @@ from pcs_quality_analysis import (
 )
 
 
+def _marking_display_to_summary_df(marking: pd.DataFrame) -> pd.DataFrame:
+    return marking.rename(
+        columns={
+            "Judge": "judge_name",
+            "Marking score": "marking_score",
+            "Element marks": "n_marks",
+            "Mean GOE bias": "mean_error",
+            "Mean |error|": "mean_abs_error",
+            "Mean σ̂": "mean_sigma_hat",
+            "Mean |m|": "mean_abs_m",
+        }
+    )
+
+
+def _apply_us_officials_filter_to_ranking_details(
+    result: dict[str, Any],
+    kept_names: set[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    jd_all = result.get("judge_discipline_detail_all")
+    je_all = result.get("judge_element_detail_all")
+    if isinstance(jd_all, pd.DataFrame) and not jd_all.empty:
+        return _filter_judge_detail_by_names(jd_all, je_all, kept_names)
+    jd, je = result.get("judge_discipline_detail"), result.get("judge_element_detail")
+    return _filter_judge_detail_by_names(
+        jd if isinstance(jd, pd.DataFrame) else pd.DataFrame(),
+        je if isinstance(je, pd.DataFrame) else pd.DataFrame(),
+        kept_names,
+    )
+
+
 def apply_us_officials_display_filter_to_ranking_result(
     result: dict[str, Any],
     linked_labels: frozenset[str] | set[str],
@@ -28,29 +58,28 @@ def apply_us_officials_display_filter_to_ranking_result(
     """Keep only judge identities linked in ``judge_official_link``; re-rank for display."""
     if not linked_labels:
         return result
+
+    marking = result.get("marking")
+    if isinstance(marking, pd.DataFrame) and not marking.empty and "Judge" in marking.columns:
+        # Subset the current rankings table so display-only filters (e.g. minimum
+        # marks) already applied to ``marking`` are preserved.
+        kept_marking = marking.loc[marking["Judge"].isin(linked_labels)].copy()
+        kept_marking = kept_marking.sort_values("Marking score").reset_index(drop=True)
+        kept_marking["rank"] = range(1, len(kept_marking) + 1)
+        kept_names = set(kept_marking["Judge"])
+        out = dict(result)
+        out["marking"] = kept_marking
+        out["summary"] = marking_score_summary(_marking_display_to_summary_df(kept_marking))
+        out["n_judges_ranked_display"] = len(kept_marking)
+        out["n_judges_before_us_officials_filter"] = len(marking)
+        out["judge_discipline_detail"], out["judge_element_detail"] = (
+            _apply_us_officials_filter_to_ranking_details(result, kept_names)
+        )
+        out["_us_officials_display_filter"] = True
+        return out
+
     judge_all = result.get("judge_summary_all")
     if not isinstance(judge_all, pd.DataFrame) or judge_all.empty:
-        marking = result.get("marking")
-        if isinstance(marking, pd.DataFrame) and not marking.empty and "Judge" in marking.columns:
-            kept_marking = marking.loc[marking["Judge"].isin(linked_labels)].copy()
-            kept_marking = kept_marking.sort_values("Marking score").reset_index(drop=True)
-            kept_marking["rank"] = range(1, len(kept_marking) + 1)
-            out = dict(result)
-            out["marking"] = kept_marking
-            out["summary"] = marking_score_summary(
-                kept_marking.rename(
-                    columns={
-                        "Judge": "judge_name",
-                        "Marking score": "marking_score",
-                        "Element marks": "n_marks",
-                        "Mean GOE bias": "mean_error",
-                        "Mean |error|": "mean_abs_error",
-                        "Mean σ̂": "mean_sigma_hat",
-                        "Mean |m|": "mean_abs_m",
-                    }
-                )
-            )
-            return out
         return result
 
     kept = judge_all.loc[judge_all["judge_name"].isin(linked_labels)].copy()
@@ -62,22 +91,9 @@ def apply_us_officials_display_filter_to_ranking_result(
     out["summary"] = marking_score_summary(kept)
     out["n_judges_ranked_display"] = len(kept)
     out["n_judges_before_us_officials_filter"] = len(judge_all)
-
-    jd_all = result.get("judge_discipline_detail_all")
-    je_all = result.get("judge_element_detail_all")
-    if isinstance(jd_all, pd.DataFrame) and not jd_all.empty:
-        out["judge_discipline_detail"], out["judge_element_detail"] = (
-            _filter_judge_detail_by_names(jd_all, je_all, kept_names)
-        )
-    else:
-        jd, je = result.get("judge_discipline_detail"), result.get("judge_element_detail")
-        out["judge_discipline_detail"], out["judge_element_detail"] = (
-            _filter_judge_detail_by_names(
-                jd if isinstance(jd, pd.DataFrame) else pd.DataFrame(),
-                je if isinstance(je, pd.DataFrame) else pd.DataFrame(),
-                kept_names,
-            )
-        )
+    out["judge_discipline_detail"], out["judge_element_detail"] = (
+        _apply_us_officials_filter_to_ranking_details(result, kept_names)
+    )
     out["_us_officials_display_filter"] = True
     return out
 

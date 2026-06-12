@@ -30,13 +30,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from analytics import JudgeAnalytics
 from database import ensure_orm_tables
 from element_deviation_ranking import (
+    ELEMENT_RANKING_LEVEL_FILTER_ALL,
     ElementRankingShard,
+    FLOOR_SIGMA,
+    MIN_BIN_COUNT,
     SHARD_MARK_COLUMNS,
     annotate_normalized_marks,
     apply_min_marks_to_ranking_result,
     attach_judge_identities,
     benchmark_scope_kwargs_from_run_params,
     benchmark_competition_scope,
+    benchmark_segment_level_preset,
     benchmark_season_bounds,
     build_ranking_display_table,
     build_sigma_bins_dataframe,
@@ -71,6 +75,8 @@ from models import (
 
 _log = logging.getLogger(__name__)
 
+_BENCHMARK_SEGMENT_LEVEL_UNSET = object()
+
 
 
 def run_params_cache_key(run_params: tuple) -> str:
@@ -102,6 +108,7 @@ def shard_cache_key(shard: ElementRankingShard) -> str:
             "competition_scope": shard.competition_scope,
             "event_start_iso": shard.event_start_iso,
             "event_end_iso": shard.event_end_iso,
+            "segment_level_preset": shard.segment_level_preset or ELEMENT_RANKING_LEVEL_FILTER_ALL,
         },
         sort_keys=True,
     )
@@ -113,10 +120,28 @@ def element_ranking_scope_kwargs(run_params: tuple) -> dict[str, Any]:
     return ranking_scope_kwargs_from_run_params(run_params)
 
 
-def element_ranking_filter_kwargs(run_params: tuple) -> dict[str, Any]:
+def element_ranking_fingerprint_kwargs(run_params: tuple) -> dict[str, Any]:
+    """Scope kwargs for ``compute_element_ranking_data_fingerprint`` (SQL level filter)."""
+    from element_deviation_ranking import segment_levels_for_ranking_preset
+
+    scope = ranking_scope_kwargs_from_run_params(run_params)
+    preset = scope.pop("segment_level_preset", None)
     return {
-        **element_ranking_scope_kwargs(run_params),
-        "floor_sigma": run_params[7],
+        **scope,
+        "segment_levels": segment_levels_for_ranking_preset(preset),
+    }
+
+
+def element_ranking_mark_load_kwargs(run_params: tuple) -> dict[str, Any]:
+    """Scope kwargs for ``load_element_marking_data`` (includes level labels)."""
+    return element_ranking_fingerprint_kwargs(run_params)
+
+
+def element_ranking_filter_kwargs(run_params: tuple) -> dict[str, Any]:
+    rp = unpack_element_ranking_run_params(run_params)
+    return {
+        **element_ranking_mark_load_kwargs(run_params),
+        "floor_sigma": float(rp[7]),
     }
 
 
@@ -151,7 +176,16 @@ def _benchmark_pool_fingerprint(
     """Combined shard fingerprints for every season×discipline in the benchmark pool."""
     shards = iter_element_ranking_shards(analytics, **scope)
     if not shards:
-        return compute_element_ranking_data_fingerprint(session, analytics, **scope)
+        from element_deviation_ranking import segment_levels_for_ranking_preset
+
+        preset = scope.get("segment_level_preset")
+        fp_scope = {
+            k: v for k, v in scope.items() if k != "segment_level_preset"
+        }
+        fp_scope["segment_levels"] = segment_levels_for_ranking_preset(preset)
+        return compute_element_ranking_data_fingerprint(
+            session, analytics, **fp_scope
+        )
     parts = sorted(_shard_fingerprint(session, analytics, s) for s in shards)
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return digest[:64]
@@ -288,20 +322,15 @@ def get_or_fit_benchmark_sigma_params(
     return params, sigma_ref, False
 
 
-def _load_shard_summary_row(
+def _parse_shard_summary_row(
     session: Session,
     analytics: JudgeAnalytics,
     shard: ElementRankingShard,
+    row: ElementDeviationRankingShardSummaryCache,
     *,
-    sigma_key: str,
     floor_sigma: float,
-    validate_fingerprint: bool = True,
+    validate_fingerprint: bool,
 ) -> dict[str, Any] | None:
-    sk = shard_cache_key(shard)
-    key = shard_summary_cache_key(sk, sigma_key, floor_sigma)
-    row = session.get(ElementDeviationRankingShardSummaryCache, key)
-    if row is None:
-        return None
     if float(row.floor_sigma) != float(floor_sigma):
         session.expunge(row)
         return None
@@ -318,6 +347,92 @@ def _load_shard_summary_row(
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _load_shard_summary_row(
+    session: Session,
+    analytics: JudgeAnalytics,
+    shard: ElementRankingShard,
+    *,
+    sigma_key: str,
+    floor_sigma: float,
+    validate_fingerprint: bool = True,
+) -> dict[str, Any] | None:
+    sk = shard_cache_key(shard)
+    key = shard_summary_cache_key(sk, sigma_key, floor_sigma)
+    row = session.get(ElementDeviationRankingShardSummaryCache, key)
+    if row is None:
+        return None
+    return _parse_shard_summary_row(
+        session,
+        analytics,
+        shard,
+        row,
+        floor_sigma=floor_sigma,
+        validate_fingerprint=validate_fingerprint,
+    )
+
+
+def load_shard_summary_payloads_for_scope(
+    session: Session,
+    analytics: JudgeAnalytics,
+    run_params: tuple,
+    *,
+    validate_fingerprint: bool = False,
+    require_all: bool = True,
+) -> list[tuple[ElementRankingShard, dict[str, Any]]] | None:
+    """Batch-load shard summary payloads for a ranking scope (one query)."""
+    rank_scope = ranking_scope_kwargs_from_run_params(run_params)
+    rp = unpack_element_ranking_run_params(run_params)
+    floor_sigma = float(rp[7])
+    sigma_key = benchmark_sigma_cache_key(run_params)
+    shards = iter_element_ranking_shards(analytics, **rank_scope)
+    if not shards:
+        return [] if not require_all else None
+
+    shard_entries = [
+        (
+            shard,
+            shard_summary_cache_key(shard_cache_key(shard), sigma_key, floor_sigma),
+        )
+        for shard in shards
+    ]
+    cache_keys = [ck for _, ck in shard_entries]
+    rows = (
+        session.execute(
+            select(ElementDeviationRankingShardSummaryCache).where(
+                ElementDeviationRankingShardSummaryCache.cache_key.in_(cache_keys)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_cache_key = {row.cache_key: row for row in rows}
+
+    out: list[tuple[ElementRankingShard, dict[str, Any]]] = []
+    for shard, ck in shard_entries:
+        row = by_cache_key.get(ck)
+        if row is None:
+            if require_all:
+                return None
+            continue
+        payload = _parse_shard_summary_row(
+            session,
+            analytics,
+            shard,
+            row,
+            floor_sigma=floor_sigma,
+            validate_fingerprint=validate_fingerprint,
+        )
+        if payload is None:
+            if require_all:
+                return None
+            continue
+        out.append((shard, payload))
+
+    if require_all and len(out) != len(shard_entries):
+        return None
+    return out
 
 
 def _save_shard_summary_row(
@@ -419,25 +534,23 @@ def _try_assemble_ranking_from_shard_summaries(
     include_judge_detail: bool | None,
     sigma_reference_df: pd.DataFrame | None,
 ) -> dict[str, Any] | None:
-    sigma_key = benchmark_sigma_cache_key(run_params)
-    shards = iter_element_ranking_shards(analytics, **rank_scope)
-    if not shards:
+    if not iter_element_ranking_shards(analytics, **rank_scope):
+        return None
+
+    shard_payloads = load_shard_summary_payloads_for_scope(
+        session,
+        analytics,
+        run_params,
+        validate_fingerprint=False,
+        require_all=True,
+    )
+    if shard_payloads is None:
         return None
 
     mergeable_parts: list[pd.DataFrame] = []
     control_parts: list[pd.DataFrame] = []
     n_raw = 0
-    for shard in shards:
-        payload = _load_shard_summary_row(
-            session,
-            analytics,
-            shard,
-            sigma_key=sigma_key,
-            floor_sigma=floor_sigma,
-            validate_fingerprint=False,
-        )
-        if payload is None:
-            return None
+    for _shard, payload in shard_payloads:
         mergeable = payload.get("mergeable_summary")
         control = payload.get("control_by_element")
         if not isinstance(mergeable, pd.DataFrame):
@@ -516,10 +629,17 @@ def run_element_deviation_ranking_pipeline(
     benchmark_start_season_year: str | None = None,
     benchmark_end_season_year: str | None = None,
     benchmark_competition_scope_key: str | None = None,
+    segment_level_preset: str | None = None,
+    benchmark_segment_level_preset: str | None | object = _BENCHMARK_SEGMENT_LEVEL_UNSET,
     cache_only: bool = False,
     persist_shards: bool = True,
 ) -> dict[str, Any]:
     """Assemble ranking-scope marks; apply σ̂ from benchmark pool (cached when possible)."""
+    bench_levels = (
+        segment_level_preset
+        if benchmark_segment_level_preset is _BENCHMARK_SEGMENT_LEVEL_UNSET
+        else benchmark_segment_level_preset
+    )
     run_params = (
         start_season_year,
         end_season_year,
@@ -533,6 +653,8 @@ def run_element_deviation_ranking_pipeline(
         benchmark_start_season_year,
         benchmark_end_season_year,
         benchmark_competition_scope_key,
+        segment_level_preset,
+        bench_levels,
     )
     session = analytics.session
     if not cache_only:
@@ -673,6 +795,8 @@ def _shard_fingerprint(
         date.fromisoformat(shard.event_start_iso) if shard.event_start_iso else None
     )
     event_end = date.fromisoformat(shard.event_end_iso) if shard.event_end_iso else None
+    from element_deviation_ranking import segment_levels_for_ranking_preset
+
     return compute_element_ranking_data_fingerprint(
         session,
         analytics,
@@ -681,6 +805,7 @@ def _shard_fingerprint(
         event_start_date=event_start,
         event_end_date=event_end,
         discipline_type_ids=[shard.discipline_type_id],
+        segment_levels=segment_levels_for_ranking_preset(shard.segment_level_preset),
         competition_scope=shard.competition_scope,
     )
 
@@ -708,6 +833,8 @@ def _load_marks_from_db(
         date.fromisoformat(shard.event_start_iso) if shard.event_start_iso else None
     )
     event_end = date.fromisoformat(shard.event_end_iso) if shard.event_end_iso else None
+    from element_deviation_ranking import segment_levels_for_ranking_preset
+
     df = load_element_marking_data(
         session,
         analytics,
@@ -716,6 +843,7 @@ def _load_marks_from_db(
         event_start_date=event_start,
         event_end_date=event_end,
         discipline_type_ids=[shard.discipline_type_id],
+        segment_levels=segment_levels_for_ranking_preset(shard.segment_level_preset),
         competition_scope=shard.competition_scope,
     )
     if df.empty:
@@ -798,22 +926,16 @@ def load_control_by_element_for_ranking_scope(
     Tries summary-cache ``control_by_element`` slices first, then mark shards, without
     concatenating full mark DataFrames for every judge (needed for Heroku drill-down).
     """
-    rank_scope = ranking_scope_kwargs_from_run_params(run_params)
-    rp = unpack_element_ranking_run_params(run_params)
-    floor_sigma = float(rp[7])
-    sigma_key = benchmark_sigma_cache_key(run_params)
     control_parts: list[pd.DataFrame] = []
-
-    for shard in iter_element_ranking_shards(analytics, **rank_scope):
-        payload = _load_shard_summary_row(
-            session,
-            analytics,
-            shard,
-            sigma_key=sigma_key,
-            floor_sigma=floor_sigma,
-            validate_fingerprint=False,
-        )
-        if isinstance(payload, dict):
+    shard_payloads = load_shard_summary_payloads_for_scope(
+        session,
+        analytics,
+        run_params,
+        validate_fingerprint=False,
+        require_all=False,
+    )
+    if shard_payloads:
+        for _shard, payload in shard_payloads:
             control = payload.get("control_by_element")
             if isinstance(control, pd.DataFrame) and not control.empty:
                 control_parts.append(control)
@@ -823,6 +945,7 @@ def load_control_by_element_for_ranking_scope(
             subset=["element_id"]
         )
 
+    rank_scope = ranking_scope_kwargs_from_run_params(run_params)
     mark_parts: list[pd.DataFrame] = []
     for shard in iter_element_ranking_shards(analytics, **rank_scope):
         marks = _load_shard_row(
@@ -847,6 +970,7 @@ def collect_marks_for_run(
     event_end_date: date | None = None,
     discipline_type_ids: list[int] | None = None,
     competition_scope: str,
+    segment_level_preset: str | None = None,
     cache_only: bool = False,
     persist_shards: bool = False,
 ) -> pd.DataFrame:
@@ -867,6 +991,7 @@ def collect_marks_for_run(
         competition_scope=competition_scope,
         event_start_date=event_start_date,
         event_end_date=event_end_date,
+        segment_level_preset=segment_level_preset,
     )
     if not shards:
         return pd.DataFrame()
@@ -903,7 +1028,7 @@ def _load_legacy_full_cache(
         return None
     if validate_fingerprint:
         expected = compute_element_ranking_data_fingerprint(
-            session, analytics, **element_ranking_scope_kwargs(run_params)
+            session, analytics, **element_ranking_fingerprint_kwargs(run_params)
         )
         if row.data_fingerprint != expected:
             session.expunge(row)
@@ -926,7 +1051,7 @@ def load_cached_rankings(
     run_params: tuple,
 ) -> dict[str, Any] | None:
     legacy = _load_legacy_full_cache(
-        session, analytics, run_params, validate_fingerprint=False
+        session, analytics, run_params, validate_fingerprint=True
     )
     if legacy is not None:
         return apply_min_marks_to_ranking_result(legacy, int(run_params[6] or 0))
@@ -940,6 +1065,7 @@ def load_cached_rankings(
         benchmark_start_season_year=benchmark_season_bounds(run_params)[0],
         benchmark_end_season_year=benchmark_season_bounds(run_params)[1],
         benchmark_competition_scope_key=benchmark_competition_scope(run_params),
+        benchmark_segment_level_preset=benchmark_segment_level_preset(run_params),
         cache_only=True,
         persist_shards=False,
     )
@@ -1034,6 +1160,7 @@ def precompute_element_ranking_shards(
     competition_scope: str,
     season_years: list[str] | None = None,
     discipline_type_ids: list[int] | None = None,
+    segment_level_preset: str | None = None,
 ) -> int:
     """Warm shard cache for each season × discipline. Returns shards written."""
     years = season_years or season_years_in_run_range(
@@ -1049,12 +1176,37 @@ def precompute_element_ranking_shards(
                 season_year=sy,
                 discipline_type_id=dt_id,
                 competition_scope=competition_scope,
+                segment_level_preset=segment_level_preset,
             )
             marks = _load_marks_from_db(session, analytics, shard)
             _save_shard_row(session, analytics, shard, marks)
             n += 1
             print(f"  shard {sy} discipline_id={dt_id}: {len(marks):,} marks")
     return n
+
+
+def build_precompute_element_ranking_run_params(
+    competition_scope: str,
+    *,
+    segment_level_preset: str | None = None,
+) -> tuple:
+    """Default run_params for σ̂ / summary precompute (full season window, all disciplines)."""
+    return (
+        None,
+        None,
+        None,
+        competition_scope,
+        None,
+        None,
+        0,
+        float(FLOOR_SIGMA),
+        int(MIN_BIN_COUNT),
+        None,
+        None,
+        competition_scope,
+        segment_level_preset,
+        segment_level_preset,
+    )
 
 
 def invalidate_element_ranking_cache_for_competition(

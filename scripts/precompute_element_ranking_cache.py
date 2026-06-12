@@ -13,6 +13,8 @@ Example::
     python scripts/precompute_element_ranking_cache.py --scope qualifying --season 2425
     python scripts/precompute_element_ranking_cache.py --all-scopes --sigma-benchmark
     python scripts/precompute_element_ranking_cache.py --all-scopes --sigma-benchmark --summaries
+    python scripts/precompute_element_ranking_cache.py --all-scopes --all-segment-levels --sigma-benchmark --summaries
+    python scripts/precompute_element_ranking_cache.py --segment-levels junior_senior novice_junior_senior
 """
 
 from __future__ import annotations
@@ -28,12 +30,14 @@ if str(_REPO) not in sys.path:
 from analytics import JudgeAnalytics
 from database import get_db_session
 from element_deviation_ranking import (
-    FLOOR_SIGMA,
-    MIN_BIN_COUNT,
+    ELEMENT_RANKING_LEVEL_FILTER_ALL,
+    ELEMENT_RANKING_LEVEL_FILTER_LABELS,
+    ELEMENT_RANKING_LEVEL_FILTER_PRESETS,
     filter_element_ranking_season_years,
     memory_efficient_mode,
 )
 from element_ranking_cache import (
+    build_precompute_element_ranking_run_params,
     precompute_element_ranking_shard_summaries,
     precompute_element_ranking_shards,
     precompute_element_ranking_sigma,
@@ -55,39 +59,56 @@ def _season_years_for_run(
     return years
 
 
+def _segment_level_preset_arg(preset: str) -> str | None:
+    if preset == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+        return None
+    return preset
+
+
+def _segment_level_presets_for_args(
+    *,
+    segment_levels: list[str] | None,
+    all_segment_levels: bool,
+) -> list[str]:
+    if all_segment_levels:
+        return list(ELEMENT_RANKING_LEVEL_FILTER_PRESETS)
+    if segment_levels:
+        return segment_levels
+    return [ELEMENT_RANKING_LEVEL_FILTER_ALL]
+
+
 def _precompute_scope(
     session,
     analytics: JudgeAnalytics,
     *,
     competition_scope: str,
     years: list[str],
+    segment_level_preset: str | None,
     sigma_benchmark: bool,
     warm_summaries: bool,
 ) -> tuple[int, str | None, int]:
     """Warm shards (and optional σ̂ / summary rows) for one competition scope."""
-    print(f"\n=== scope={competition_scope} ({len(years)} season(s)) ===")
+    level_label = ELEMENT_RANKING_LEVEL_FILTER_LABELS.get(
+        segment_level_preset or ELEMENT_RANKING_LEVEL_FILTER_ALL,
+        segment_level_preset or "all",
+    )
+    print(
+        f"\n=== scope={competition_scope}, levels={level_label} "
+        f"({len(years)} season(s)) ==="
+    )
     n = precompute_element_ranking_shards(
         session,
         analytics,
         competition_scope=competition_scope,
         season_years=years,
+        segment_level_preset=segment_level_preset,
     )
     sigma_key = None
     n_summaries = 0
     if sigma_benchmark:
-        run_params = (
-            None,
-            None,
-            None,
+        run_params = build_precompute_element_ranking_run_params(
             competition_scope,
-            None,
-            None,
-            0,
-            float(FLOOR_SIGMA),
-            int(MIN_BIN_COUNT),
-            None,
-            None,
-            competition_scope,
+            segment_level_preset=segment_level_preset,
         )
         sigma_key = precompute_element_ranking_sigma(session, analytics, run_params)
         if sigma_key:
@@ -126,6 +147,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Single season year (e.g. 2425). Default: all seasons from 1819 onward.",
     )
     parser.add_argument(
+        "--segment-levels",
+        nargs="+",
+        choices=list(ELEMENT_RANKING_LEVEL_FILTER_PRESETS),
+        metavar="PRESET",
+        help=(
+            "Segment level preset(s) to warm. Choices: "
+            + ", ".join(ELEMENT_RANKING_LEVEL_FILTER_PRESETS)
+            + f" (default: {ELEMENT_RANKING_LEVEL_FILTER_ALL} only)."
+        ),
+    )
+    parser.add_argument(
+        "--all-segment-levels",
+        action="store_true",
+        help=(
+            "Warm every segment level preset (all, novice_junior_senior, junior_senior). "
+            "Overrides --segment-levels."
+        ),
+    )
+    parser.add_argument(
         "--sigma-benchmark",
         action="store_true",
         help=(
@@ -150,6 +190,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.segment_levels and args.all_segment_levels:
+        print("Use --segment-levels or --all-segment-levels, not both.", file=sys.stderr)
+        return 1
+
+    level_presets = _segment_level_presets_for_args(
+        segment_levels=args.segment_levels,
+        all_segment_levels=args.all_segment_levels,
+    )
+
     session = get_db_session()
     try:
         analytics = JudgeAnalytics(session)
@@ -167,21 +216,24 @@ def main(argv: list[str] | None = None) -> int:
         total_summaries = 0
         sigma_keys: list[str] = []
         for scope in scopes:
-            n, sigma_key, n_summaries = _precompute_scope(
-                session,
-                analytics,
-                competition_scope=scope,
-                years=years,
-                sigma_benchmark=args.sigma_benchmark,
-                warm_summaries=args.summaries,
-            )
-            total_shards += n
-            total_summaries += n_summaries
-            if sigma_key:
-                sigma_keys.append(sigma_key)
+            for preset in level_presets:
+                n, sigma_key, n_summaries = _precompute_scope(
+                    session,
+                    analytics,
+                    competition_scope=scope,
+                    years=years,
+                    segment_level_preset=_segment_level_preset_arg(preset),
+                    sigma_benchmark=args.sigma_benchmark,
+                    warm_summaries=args.summaries,
+                )
+                total_shards += n
+                total_summaries += n_summaries
+                if sigma_key:
+                    sigma_keys.append(sigma_key)
 
         print(
-            f"\nDone. {total_shards} shard(s) across {len(scopes)} scope(s). "
+            f"\nDone. {total_shards} shard(s) across {len(scopes)} scope(s), "
+            f"{len(level_presets)} level preset(s). "
             f"memory_efficient={memory_efficient_mode()}"
         )
         if sigma_keys:

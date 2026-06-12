@@ -30,6 +30,45 @@ from models import (
 )
 from officials_competition_types import COMPETITION_SCOPE_ALL
 from rule_errors_policy import MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
+from segment_level import (
+    LEVEL_ADVANCED_NOVICE,
+    LEVEL_JUNIOR,
+    LEVEL_NOVICE,
+    LEVEL_SENIOR,
+)
+
+ELEMENT_RANKING_LEVEL_FILTER_ALL = "all"
+ELEMENT_RANKING_LEVEL_FILTER_NOVICE_JUNIOR_SENIOR = "novice_junior_senior"
+ELEMENT_RANKING_LEVEL_FILTER_JUNIOR_SENIOR = "junior_senior"
+
+ELEMENT_RANKING_LEVEL_FILTER_LABELS: dict[str, str] = {
+    ELEMENT_RANKING_LEVEL_FILTER_ALL: "All segment levels",
+    ELEMENT_RANKING_LEVEL_FILTER_NOVICE_JUNIOR_SENIOR: "Novice, Junior & Senior",
+    ELEMENT_RANKING_LEVEL_FILTER_JUNIOR_SENIOR: "Junior & Senior only",
+}
+
+ELEMENT_RANKING_LEVEL_FILTER_PRESETS: tuple[str, ...] = (
+    ELEMENT_RANKING_LEVEL_FILTER_ALL,
+    ELEMENT_RANKING_LEVEL_FILTER_NOVICE_JUNIOR_SENIOR,
+    ELEMENT_RANKING_LEVEL_FILTER_JUNIOR_SENIOR,
+)
+
+_NOVICE_SEGMENT_LEVELS = frozenset({LEVEL_NOVICE, LEVEL_ADVANCED_NOVICE})
+_JUNIOR_SEGMENT_LEVELS = frozenset({LEVEL_JUNIOR})
+_SENIOR_SEGMENT_LEVELS = frozenset({LEVEL_SENIOR})
+
+
+def segment_levels_for_ranking_preset(
+    preset: str | None,
+) -> frozenset[str] | None:
+    """Map UI preset to ``segment.level`` labels included in element marks."""
+    if not preset or preset == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+        return None
+    if preset == ELEMENT_RANKING_LEVEL_FILTER_NOVICE_JUNIOR_SENIOR:
+        return _NOVICE_SEGMENT_LEVELS | _JUNIOR_SEGMENT_LEVELS | _SENIOR_SEGMENT_LEVELS
+    if preset == ELEMENT_RANKING_LEVEL_FILTER_JUNIOR_SENIOR:
+        return _JUNIOR_SEGMENT_LEVELS | _SENIOR_SEGMENT_LEVELS
+    raise ValueError(f"Unknown element ranking segment level preset: {preset!r}")
 
 # Current IJS element GOE scale; exclude earlier competitions from this model.
 MIN_ELEMENT_MARKING_EVENT_DATE = MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
@@ -77,6 +116,7 @@ def build_element_mark_filters(
     start_season_year: Optional[str] = None,
     end_season_year: Optional[str] = None,
     discipline_type_ids: Optional[Iterable[int]] = None,
+    segment_levels: Optional[Iterable[str]] = None,
 ):
     conditions = []
 
@@ -87,6 +127,9 @@ def build_element_mark_filters(
 
     if discipline_type_ids:
         conditions.append(Segment.discipline_type_id.in_(list(discipline_type_ids)))
+
+    if segment_levels:
+        conditions.append(Segment.level.in_(list(segment_levels)))
 
     if not conditions:
         return None
@@ -102,6 +145,7 @@ def load_element_marking_data(
     event_start_date: date | None = None,
     event_end_date: date | None = None,
     discipline_type_ids: Optional[Iterable[int]] = None,
+    segment_levels: Optional[Iterable[str]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
     judge_ids: Optional[Iterable[int]] = None,
 ) -> pd.DataFrame:
@@ -109,7 +153,10 @@ def load_element_marking_data(
     element_id, judge_id, judge_score, discipline_type_id, element_type_id, competition_year.
     """
     where_clause = build_element_mark_filters(
-        start_season_year, end_season_year, discipline_type_ids
+        start_season_year,
+        end_season_year,
+        discipline_type_ids,
+        segment_levels,
     )
 
     stmt = (
@@ -161,6 +208,7 @@ def compute_element_ranking_data_fingerprint(
     event_start_date: date | None = None,
     event_end_date: date | None = None,
     discipline_type_ids: Optional[Iterable[int]] = None,
+    segment_levels: Optional[Iterable[str]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
 ) -> str:
     """
@@ -168,7 +216,10 @@ def compute_element_ranking_data_fingerprint(
     in the filtered competition set (used to invalidate DB ranking caches).
     """
     where_clause = build_element_mark_filters(
-        start_season_year, end_season_year, discipline_type_ids
+        start_season_year,
+        end_season_year,
+        discipline_type_ids,
+        segment_levels,
     )
     # Count competitions via ``Segment.competition_id`` (not ``Competition.id``) so
     # SQLAlchemy does not add a second ``competition`` FROM entry for the aggregate.
@@ -607,6 +658,50 @@ def compute_judge_discipline_breakdown(
     )
 
 
+def compute_judge_control_goe_breakdown(
+    work: pd.DataFrame,
+    discipline_id_to_name: dict[int, str],
+    element_type_id_to_name: dict[int, str],
+) -> pd.DataFrame:
+    """Per judge × discipline × element type × rounded panel-median (control) GOE."""
+    w = work.copy()
+    if "control_int" not in w.columns:
+        w["control_int"] = w["control_score"].round().astype(int)
+    w["discipline"] = w["discipline_type_id"].map(discipline_id_to_name)
+    w["element_type"] = w["element_type_id"].map(element_type_id_to_name)
+
+    base = w.dropna(subset=["discipline", "element_type", "control_int"])
+    if base.empty:
+        return pd.DataFrame()
+
+    out = (
+        base.groupby(
+            ["judge_name", "discipline", "element_type", "control_int"], sort=False
+        )
+        .agg(
+            element_marks=("m_pj", "size"),
+            partial_marking_score=("m_pj", _partial_marking_score),
+            mean_goe_bias=("error", "mean"),
+            mean_abs_error=("error", lambda s: float(s.abs().mean())),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "judge_name": "Judge",
+                "element_type": "Element type",
+                "control_int": "Control GOE",
+                "element_marks": "Element marks",
+                "partial_marking_score": "Partial marking score",
+                "mean_goe_bias": "Mean GOE bias",
+                "mean_abs_error": "Mean |error|",
+            }
+        )
+    )
+    return out.sort_values(
+        ["Judge", "Partial marking score"], ascending=[True, False]
+    )
+
+
 def build_sigma_bins_dataframe(
     df: pd.DataFrame,
     params: dict,
@@ -699,20 +794,68 @@ def compute_marking_scores(
 
 def apply_min_marks_filter(marking: pd.DataFrame, min_marks: int) -> pd.DataFrame:
     if min_marks <= 0:
-        return marking
-    kept = marking.loc[marking["n_marks"] >= min_marks].copy()
+        out = marking.copy()
+        if "rank" not in out.columns:
+            out = out.reset_index(drop=True)
+            out.insert(0, "rank", range(1, len(out) + 1))
+        return out
+    work = marking.copy()
+    work["n_marks"] = (
+        pd.to_numeric(work["n_marks"], errors="coerce").fillna(0).astype(int)
+    )
+    kept = work.loc[work["n_marks"] >= int(min_marks)].copy()
     kept["rank"] = range(1, len(kept) + 1)
     return kept
 
 
+def _enforce_min_marks_on_marking_display(
+    marking: pd.DataFrame, min_marks: int
+) -> pd.DataFrame:
+    """Last-line guard so the rankings table never shows sub-threshold mark counts."""
+    if min_marks <= 0 or marking.empty or "Element marks" not in marking.columns:
+        return marking
+    counts = pd.to_numeric(marking["Element marks"], errors="coerce").fillna(0)
+    kept = marking.loc[counts >= int(min_marks)].copy()
+    if kept.empty:
+        return kept
+    kept = kept.sort_values("Marking score").reset_index(drop=True)
+    kept["rank"] = range(1, len(kept) + 1)
+    return kept
+
+
+def judge_summary_from_marking_display(marking: pd.DataFrame) -> pd.DataFrame | None:
+    """Rebuild internal judge summary columns from the rankings display table."""
+    if marking.empty or not {"Judge", "Element marks"}.issubset(marking.columns):
+        return None
+    rename = {
+        "Judge": "judge_name",
+        "Element marks": "n_marks",
+        "Marking score": "marking_score",
+        "Mean GOE bias": "mean_error",
+        "Mean |error|": "mean_abs_error",
+        "Mean σ̂": "mean_sigma_hat",
+        "Mean |m|": "mean_abs_m",
+    }
+    out = marking.rename(
+        columns={k: v for k, v in rename.items() if k in marking.columns}
+    )
+    if not {"judge_name", "n_marks", "marking_score"}.issubset(out.columns):
+        return None
+    return out
+
+
 def unpack_element_ranking_run_params(run_params: tuple) -> tuple:
-    """Normalize 9-, 11-, or 12-tuples to ``(…, bench_start, bench_end, bench_scope)``."""
+    """Normalize 9–14 element tuples to a 14-element run-params tuple."""
+    if len(run_params) >= 14:
+        return run_params[:14]
+    if len(run_params) >= 13:
+        return (*run_params[:13], run_params[12])
     if len(run_params) >= 12:
-        return run_params[:12]
+        return (*run_params[:12], None, None)
     if len(run_params) >= 11:
-        return (*run_params[:11], None)
+        return (*run_params[:11], None, None, None)
     base = run_params[:9] if len(run_params) >= 9 else run_params
-    return (*base, None, None, None)
+    return (*base, None, None, None, None, None)
 
 
 def benchmark_season_bounds(run_params: tuple) -> tuple[str | None, str | None]:
@@ -729,6 +872,12 @@ def benchmark_competition_scope(run_params: tuple) -> str:
     return COMPETITION_SCOPE_ALL
 
 
+def benchmark_segment_level_preset(run_params: tuple) -> str | None:
+    """Segment level preset for σ̂ fitting (defaults to ranking preset)."""
+    rp = unpack_element_ranking_run_params(run_params)
+    return rp[13]
+
+
 def _mark_scope_identity(scope: dict[str, Any]) -> tuple:
     disc = scope.get("discipline_type_ids")
     return (
@@ -736,6 +885,7 @@ def _mark_scope_identity(scope: dict[str, Any]) -> tuple:
         scope.get("end_season_year"),
         tuple(disc) if disc else None,
         scope.get("competition_scope"),
+        scope.get("segment_level_preset"),
     )
 
 
@@ -751,14 +901,22 @@ def uses_separate_benchmark_pool(run_params: tuple) -> bool:
 def run_params_ranking_compute_key(run_params: tuple) -> tuple:
     """Ranking mark scope (excludes minimum marks and benchmark seasons)."""
     rp = unpack_element_ranking_run_params(run_params)
-    return (rp[0], rp[1], rp[2], rp[3], rp[4], rp[5], rp[7], rp[8])
+    return (rp[0], rp[1], rp[2], rp[3], rp[4], rp[5], rp[7], rp[8], rp[12])
 
 
 def run_params_benchmark_compute_key(run_params: tuple) -> tuple:
     """σ̂ benchmark pool scope (no event dates; excludes minimum marks)."""
     bs, be = benchmark_season_bounds(run_params)
     rp = unpack_element_ranking_run_params(run_params)
-    return (bs, be, rp[2], benchmark_competition_scope(run_params), rp[7], rp[8])
+    return (
+        bs,
+        be,
+        rp[2],
+        benchmark_competition_scope(run_params),
+        rp[7],
+        rp[8],
+        benchmark_segment_level_preset(run_params),
+    )
 
 
 def run_params_compute_key(run_params: tuple) -> tuple:
@@ -783,6 +941,7 @@ def widest_benchmark_season_window(years: list[str]) -> tuple[str | None, str | 
 
 def ranking_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:
     rp = unpack_element_ranking_run_params(run_params)
+    preset = rp[12]
     return {
         "start_season_year": rp[0],
         "end_season_year": rp[1],
@@ -790,6 +949,7 @@ def ranking_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:
         "event_end_date": date.fromisoformat(rp[5]) if rp[5] else None,
         "discipline_type_ids": list(rp[2]) if rp[2] else None,
         "competition_scope": rp[3],
+        "segment_level_preset": preset,
     }
 
 
@@ -803,6 +963,7 @@ def benchmark_scope_kwargs_from_run_params(run_params: tuple) -> dict[str, Any]:
         "event_end_date": None,
         "discipline_type_ids": list(rp[2]) if rp[2] else None,
         "competition_scope": benchmark_competition_scope(run_params),
+        "segment_level_preset": benchmark_segment_level_preset(run_params),
     }
 
 
@@ -832,23 +993,43 @@ def _filter_judge_detail_by_names(
 
 
 def apply_min_marks_to_ranking_result(
-    result: dict[str, Any], min_marks: int
+    result: dict[str, Any],
+    min_marks: int,
+    *,
+    judge_summary_all: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """
     Re-apply the per-judge minimum marks threshold without recomputing σ̂ or panel medians.
 
-    Requires ``judge_summary_all`` from a prior run (or legacy unfiltered tables).
+    Uses ``judge_summary_all`` from ``result`` when present (ranking-scope counts,
+    after segment-level and other filters). The optional ``judge_summary_all``
+    argument is only a fallback when the saved result lacks that pool.
     """
     judge_all = result.get("judge_summary_all")
     if not isinstance(judge_all, pd.DataFrame) or judge_all.empty:
-        return result
+        judge_all = judge_summary_all
+    if not isinstance(judge_all, pd.DataFrame) or judge_all.empty:
+        marking = result.get("marking")
+        if isinstance(marking, pd.DataFrame):
+            judge_all = judge_summary_from_marking_display(marking)
+    if not isinstance(judge_all, pd.DataFrame) or judge_all.empty:
+        out = dict(result)
+        out["_min_marks_filter_applied"] = False
+        return out
 
     min_marks = int(min_marks or 0)
     judge_summary = apply_min_marks_filter(judge_all.copy(), min_marks)
     kept_names = set(judge_summary["judge_name"])
     out = dict(result)
-    out["marking"] = build_ranking_display_table(judge_summary)
-    out["summary"] = marking_score_summary(judge_summary)
+    out["judge_summary_all"] = judge_all
+    out["marking"] = _enforce_min_marks_on_marking_display(
+        build_ranking_display_table(judge_summary), min_marks
+    )
+    summary_source = judge_summary_from_marking_display(out["marking"])
+    if summary_source is None:
+        summary_source = judge_summary
+    out["summary"] = marking_score_summary(summary_source)
+    out["_min_marks_filter_applied"] = True
 
     jd_all = result.get("judge_discipline_detail_all")
     je_all = result.get("judge_element_detail_all")
@@ -889,6 +1070,7 @@ class ElementRankingShard:
     competition_scope: str
     event_start_iso: str | None = None
     event_end_iso: str | None = None
+    segment_level_preset: str | None = None
 
 
 def season_years_in_run_range(
@@ -956,6 +1138,7 @@ def iter_element_ranking_shards(
     competition_scope: str = COMPETITION_SCOPE_ALL,
     event_start_date: date | None = None,
     event_end_date: date | None = None,
+    segment_level_preset: str | None = None,
 ) -> list[ElementRankingShard]:
     years = season_years_in_run_range(
         start_season_year,
@@ -974,6 +1157,7 @@ def iter_element_ranking_shards(
             competition_scope=competition_scope,
             event_start_iso=event_start_iso,
             event_end_iso=event_end_iso,
+            segment_level_preset=segment_level_preset,
         )
         for sy in years
         for dt_id in disc_ids
@@ -1093,13 +1277,14 @@ def compute_judge_detail_for_identity(
     event_start_date: date | None = None,
     event_end_date: date | None = None,
     discipline_type_ids: Optional[list[int]] = None,
+    segment_levels: Optional[Iterable[str]] = None,
     competition_scope: str = COMPETITION_SCOPE_ALL,
     floor_sigma: float = FLOOR_SIGMA,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load one identity's marks and build drill-down tables (uses precomputed panel medians)."""
     judge_ids = judge_ids_for_identity_label(analytics, judge_name)
     if not judge_ids or control_by_element.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     session = analytics.session
     disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
@@ -1113,16 +1298,19 @@ def compute_judge_detail_for_identity(
         event_start_date=event_start_date,
         event_end_date=event_end_date,
         discipline_type_ids=discipline_type_ids,
+        segment_levels=segment_levels,
         competition_scope=competition_scope,
         judge_ids=judge_ids,
     )
     if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     df = apply_control_scores_from_table(df, control_by_element)
     df["judge_name"] = judge_name
     work = annotate_normalized_marks(df, params, floor_sigma=floor_sigma)
-    return compute_judge_discipline_breakdown(work, disc_map, elem_map)
+    disc, elem = compute_judge_discipline_breakdown(work, disc_map, elem_map)
+    goe = compute_judge_control_goe_breakdown(work, disc_map, elem_map)
+    return disc, elem, goe
 
 
 def compute_element_deviation_rankings(
@@ -1185,7 +1373,7 @@ def compute_element_deviation_rankings_from_run_params(
     cache_only: bool = False,
     persist_shards: bool = True,
 ) -> dict:
-    """Full pipeline from a 9-, 11-, or 12-element ``run_params`` tuple."""
+    """Full pipeline from a 9–14 element ``run_params`` tuple."""
     rp = unpack_element_ranking_run_params(run_params)
     bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
     rank_scope = ranking_scope_kwargs_from_run_params(run_params)
@@ -1206,6 +1394,8 @@ def compute_element_deviation_rankings_from_run_params(
         benchmark_start_season_year=bench_scope["start_season_year"],
         benchmark_end_season_year=bench_scope["end_season_year"],
         benchmark_competition_scope_key=bench_scope["competition_scope"],
+        segment_level_preset=rank_scope["segment_level_preset"],
+        benchmark_segment_level_preset=benchmark_segment_level_preset(run_params),
         cache_only=cache_only,
         persist_shards=persist_shards,
     )
