@@ -21,12 +21,14 @@ from activityAnalysis.international_listing_seasons import (
     format_usfs_season_code,
     histogram_counts_by_current_age_bins,
     histogram_counts_by_year_bins,
+    isu_season_codes_preceding_july1,
     listing_calendar_year,
     listing_calendar_year_from_season_code,
     listing_reference_july1,
     listing_season_code_from_calendar_year,
     listing_season_codes_for_projection,
     season_codes_preceding_listing,
+    usfs_season_code_ending_in_calendar_year,
     usfs_season_code_for_date,
 )
 
@@ -36,6 +38,19 @@ def test_season_codes_preceding_listing():
     assert season_codes_preceding_listing(2728, 3) == [2425, 2526, 2627]
     assert season_codes_preceding_listing(2627, 4) == [2223, 2324, 2425, 2526]
     assert season_codes_preceding_listing(2627, 2) == [2425, 2526]
+    assert 2627 not in season_codes_preceding_listing(2627, 4)
+
+
+def test_isu_season_codes_preceding_july1():
+    assert isu_season_codes_preceding_july1(2026, 3) == [2324, 2425, 2526]
+    assert isu_season_codes_preceding_july1(2026, 4) == [2223, 2324, 2425, 2526]
+    assert isu_season_codes_preceding_july1(2026, 2) == [2425, 2526]
+    assert 2627 not in isu_season_codes_preceding_july1(2026, 4)
+
+
+def test_usfs_season_code_ending_in_calendar_year():
+    assert usfs_season_code_ending_in_calendar_year(2026) == 2526
+    assert usfs_season_code_ending_in_calendar_year(2027) == 2627
 
 
 def test_listing_reference_july1():

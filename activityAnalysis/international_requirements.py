@@ -2,14 +2,15 @@
 Evaluate ISU Rules 411–417 service requirements (maintain / promote) against
 ``segment_official`` panel activity.
 
-Season windows use the N USFS seasons immediately before the report listing season
-(e.g. listing season 2627, n=3 → 2324, 2425, 2526).
+Season windows use the N USFS seasons completed before the report listing season
+begins (e.g. listing season 2627, n=3 → 2324, 2425, 2526; n=2 → 2425, 2526).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import functools
 import json
 import re
 from typing import Any, Literal
@@ -33,6 +34,7 @@ try:
     from activityAnalysis.international_listing_seasons import (
         competition_year_matches_seasons,
         format_usfs_season_code,
+        isu_season_codes_preceding_july1,
         season_codes_as_bind_strings,
         season_codes_preceding_listing,
         season_year_sql_predicate,
@@ -66,6 +68,7 @@ except ModuleNotFoundError:
     from international_listing_seasons import (
         competition_year_matches_seasons,
         format_usfs_season_code,
+        isu_season_codes_preceding_july1,
         season_codes_as_bind_strings,
         season_codes_preceding_listing,
         season_year_sql_predicate,
@@ -303,18 +306,115 @@ class RequirementEvaluation:
     not_applicable_reason: str = ""
 
 
+@dataclass
+class RequirementSummaryContext:
+    """Batched reads and per-run caches for summary requirement columns."""
+
+    listing_season_code: int
+    rules_df: pd.DataFrame
+    maintain_rules: pd.DataFrame
+    promote_rules: pd.DataFrame
+    appointment_rows_by_official: dict[int, list[dict[str, Any]]]
+    appointment_contexts: dict[tuple[int, int, int | None], dict[str, Any]]
+    isu_listing_keys: set[tuple[int, int, int | None]]
+    international_level_id: int
+    isu_level_id: int
+    panel: pd.DataFrame | None = None
+    panel_by_official: dict[int, pd.DataFrame] | None = None
+    seminars: pd.DataFrame = field(default_factory=pd.DataFrame)
+    seminars_by_key: dict[tuple[int, int, int | None], pd.DataFrame] = field(
+        default_factory=dict
+    )
+    season_codes_by_window: dict[int, list[int]] = field(default_factory=dict)
+    panel_filter_cache: dict[tuple[Any, ...], pd.DataFrame] = field(default_factory=dict)
+
+    def season_codes_for_window(self, season_window: int) -> list[int]:
+        window = int(season_window)
+        cached = self.season_codes_by_window.get(window)
+        if cached is None:
+            cached = season_codes_preceding_listing(self.listing_season_code, window)
+            self.season_codes_by_window[window] = cached
+        return cached
+
+
+def build_requirement_summary_context(
+    summary: pd.DataFrame,
+    *,
+    listing_season_code: int,
+    panel_bulk: pd.DataFrame | None = None,
+    seminars_bulk: pd.DataFrame | None = None,
+    load_panel: bool = False,
+    load_seminars: bool = False,
+    rules_df: pd.DataFrame | None = None,
+) -> RequirementSummaryContext:
+    """One batched load of shared data for promote-first and requirement summary columns."""
+    listing_season_code = int(listing_season_code)
+    official_ids = summary["official_id"].astype(int).unique().tolist()
+    rules = rules_df if rules_df is not None else _load_rule_sets()
+    maintain_rules = (
+        rules.loc[rules["purpose"] == "maintain"] if not rules.empty else rules
+    )
+    promote_rules = (
+        rules.loc[rules["purpose"] == "promote"] if not rules.empty else rules
+    )
+
+    panel: pd.DataFrame | None = None
+    panel_by_official: dict[int, pd.DataFrame] | None = None
+    if load_panel:
+        panel = (
+            panel_bulk
+            if panel_bulk is not None
+            else load_international_panel_segments_bulk(official_ids)
+        )
+        if panel is not None and not panel.empty:
+            panel_by_official = {
+                int(oid): group for oid, group in panel.groupby("official_id", sort=False)
+            }
+
+    seminars = pd.DataFrame()
+    seminars_by_key: dict[tuple[int, int, int | None], pd.DataFrame] = {}
+    if load_seminars:
+        seminars = (
+            seminars_bulk
+            if seminars_bulk is not None
+            else load_official_seminars_bulk(official_ids)
+        )
+        seminars_by_key = batch_seminars_for_appointment_keys(
+            seminars,
+            _summary_appointment_keys(summary),
+        )
+
+    with Session(engine) as session:
+        international_level_id = int(_international_level_id(session))
+        isu_level_id = int(_isu_level_id(session))
+
+    return RequirementSummaryContext(
+        listing_season_code=listing_season_code,
+        rules_df=rules,
+        maintain_rules=maintain_rules,
+        promote_rules=promote_rules,
+        appointment_rows_by_official=load_official_international_appointment_rows(
+            official_ids
+        ),
+        appointment_contexts=_batch_appointment_contexts(official_ids),
+        isu_listing_keys=_batch_isu_listing_keys(official_ids),
+        international_level_id=international_level_id,
+        isu_level_id=isu_level_id,
+        panel=panel,
+        panel_by_official=panel_by_official,
+        seminars=seminars,
+        seminars_by_key=seminars_by_key,
+    )
+
+
 try:
     from activityAnalysis.international_listing_seasons import (
         REPORT_LISTING_SEASON_DEFAULT,
-        listing_calendar_year,
-        listing_calendar_year_from_season_code,
         season_codes_preceding_listing,
     )
 except ModuleNotFoundError:
     from international_listing_seasons import (
         REPORT_LISTING_SEASON_DEFAULT,
-        listing_calendar_year,
-        listing_calendar_year_from_season_code,
         season_codes_preceding_listing,
     )
 
@@ -357,22 +457,6 @@ PROMOTE_YEARS_METRICS = frozenset(
         "years_tc_prerequisite",
     }
 )
-
-
-def isu_season_codes_preceding_july1(listing_calendar_year: int, n: int) -> list[int]:
-    """
-    USFS/ISU season codes for the ``n`` seasons preceding July 1 of ``listing_calendar_year``.
-
-    Example: listing year 2026 → ``[2324, 2425, 2526]`` for n=3.
-    """
-    if n <= 0:
-        return []
-    codes: list[int] = []
-    for i in range(n - 1, -1, -1):
-        end_year = listing_calendar_year - i
-        start_year = end_year - 1
-        codes.append(int(f"{start_year % 100:02d}{end_year % 100:02d}"))
-    return codes
 
 
 def _is_championship_or_olympic(competition_type_id: Any, competition_name: str) -> bool:
@@ -1435,6 +1519,60 @@ def _appointment_sport(directory_discipline_id: Any) -> Sport:
     return "synchronized" if disc == DIRECTORY_DISC_SYNCHRONIZED_ID else "figure"
 
 
+def _filter_rule_rows_for_appointment(
+    rules_df: pd.DataFrame,
+    *,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    listing_tier: str | None = None,
+) -> pd.DataFrame:
+    """Keep rule rows whose rule set applies to this directory appointment (static match)."""
+    if rules_df.empty:
+        return rules_df
+
+    atid = int(appointment_type_id)
+    appt_disc = _nullable_int_for_sql(directory_discipline_id)
+    appt_sport = _appointment_sport(directory_discipline_id)
+
+    mask = rules_df["appointment_type_id"].astype(int) == atid
+    mask &= rules_df["sport"].fillna("figure") == appt_sport
+
+    rs_disc = rules_df["discipline_id"]
+    disc_na = rs_disc.isna()
+    if appt_disc is None:
+        mask &= disc_na
+    else:
+        mask &= disc_na | (pd.to_numeric(rs_disc, errors="coerce").astype("Int64") == appt_disc)
+
+    if listing_tier is not None:
+        mask &= rules_df["listing_tier"].fillna("international") == listing_tier
+
+    return rules_df.loc[mask]
+
+
+def _rule_set_static_match(
+    rule_set: pd.Series,
+    *,
+    appointment_type_id: int,
+    directory_discipline_id: Any,
+    listing_tier: str | None = None,
+) -> bool:
+    """True when appointment type, sport, discipline, and optional listing tier match."""
+    if int(rule_set["appointment_type_id"]) != int(appointment_type_id):
+        return False
+    if str(rule_set.get("sport") or "figure") != _appointment_sport(directory_discipline_id):
+        return False
+    rs_disc = rule_set.get("discipline_id")
+    if pd.notna(rs_disc):
+        appt_disc = _nullable_int_for_sql(directory_discipline_id)
+        if appt_disc is None or int(rs_disc) != appt_disc:
+            return False
+    if listing_tier is not None:
+        if str(rule_set.get("listing_tier") or "international") != listing_tier:
+            return False
+    return True
+
+
 def _official_is_isu_listed(
     session: Session,
     official_id: int,
@@ -1494,15 +1632,10 @@ def _discipline_name_for_id(session: Session, discipline_id: int) -> str:
     return (name or "").strip()
 
 
-def _load_rule_sets(purpose: Purpose | None = None) -> pd.DataFrame:
-    purpose_clause = ""
-    params: dict[str, Any] = {}
-    if purpose is not None:
-        purpose_clause = " AND rs.purpose = :purpose"
-        params["purpose"] = purpose
-
+@functools.lru_cache(maxsize=1)
+def _load_all_rule_sets() -> pd.DataFrame:
     stmt = text(
-        f"""
+        """
         SELECT
             rs.id AS rule_set_id,
             rs.isu_rule_ref,
@@ -1529,16 +1662,22 @@ def _load_rule_sets(purpose: Purpose | None = None) -> pd.DataFrame:
         INNER JOIN officials_analysis.international_requirement_rule r
             ON r.rule_set_id = rs.id
         WHERE rs.active
-        {purpose_clause}
         ORDER BY rs.sort_order, rs.id, r.sort_order, r.id
         """
     )
     try:
         with Session(engine) as session:
-            rows = session.execute(stmt, params).mappings().all()
+            rows = session.execute(stmt).mappings().all()
     except Exception:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+def _load_rule_sets(purpose: Purpose | None = None) -> pd.DataFrame:
+    df = _load_all_rule_sets()
+    if purpose is None or df.empty:
+        return df
+    return df.loc[df["purpose"] == purpose]
 
 
 def _appointment_context(
@@ -1832,10 +1971,13 @@ def _promote_year_rule_rows_for_appointment(
         return []
 
     out: list[pd.Series] = []
-    for rule_set_id, group in promote.groupby("rule_set_id", sort=False):
+    candidates = _filter_rule_rows_for_appointment(
+        promote,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+    )
+    for rule_set_id, group in candidates.groupby("rule_set_id", sort=False):
         head = group.iloc[0]
-        if int(head["appointment_type_id"]) != int(appointment_type_id):
-            continue
         applies, _ = _rule_set_applies(
             head,
             appointment_type_id=appointment_type_id,
@@ -1996,23 +2138,31 @@ def enrich_summary_with_promote_first_eligible(
     *,
     listing_season_code: int,
     rules_df: pd.DataFrame | None = None,
+    summary_ctx: RequirementSummaryContext | None = None,
 ) -> pd.DataFrame:
     """Add ``promote_first_eligible_listing`` (USFS season code int, e.g. 2627)."""
     if summary.empty or not activity_database_is_postgresql():
         return summary
 
     out = summary.copy()
-    official_ids = out["official_id"].astype(int).unique().tolist()
-    appointment_rows_by_official = load_official_international_appointment_rows(
-        official_ids
-    )
-    appointment_contexts = _batch_appointment_contexts(official_ids)
-    isu_listing_keys = _batch_isu_listing_keys(official_ids)
-    active_rules = rules_df if rules_df is not None else _load_rule_sets()
-
-    with Session(engine) as session:
-        international_level_id = _international_level_id(session)
-        isu_level_id = _isu_level_id(session)
+    if summary_ctx is not None:
+        appointment_rows_by_official = summary_ctx.appointment_rows_by_official
+        appointment_contexts = summary_ctx.appointment_contexts
+        isu_listing_keys = summary_ctx.isu_listing_keys
+        active_rules = rules_df if rules_df is not None else summary_ctx.rules_df
+        international_level_id = summary_ctx.international_level_id
+        isu_level_id = summary_ctx.isu_level_id
+    else:
+        official_ids = out["official_id"].astype(int).unique().tolist()
+        appointment_rows_by_official = load_official_international_appointment_rows(
+            official_ids
+        )
+        appointment_contexts = _batch_appointment_contexts(official_ids)
+        isu_listing_keys = _batch_isu_listing_keys(official_ids)
+        active_rules = rules_df if rules_df is not None else _load_rule_sets()
+        with Session(engine) as session:
+            international_level_id = _international_level_id(session)
+            isu_level_id = _isu_level_id(session)
 
     values: list[int | None] = []
     for _, row in out.iterrows():
@@ -2199,27 +2349,43 @@ def _panel_for_rule_evaluation(
     directory_discipline_id: Any,
     national_role_ids: tuple[int, ...] | None,
     panel_by_official: dict[int, pd.DataFrame] | None = None,
+    panel_filter_cache: dict[tuple[Any, ...], pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
+    disc_key = _nullable_int_for_sql(directory_discipline_id)
+    role_key: tuple[int, ...] | None
+    if national_role_ids:
+        role_key = tuple(int(x) for x in national_role_ids)
+    else:
+        role_key = None
+    cache_key = (int(official_id), int(intl_appointment_type_id), disc_key, role_key)
+    if panel_filter_cache is not None and cache_key in panel_filter_cache:
+        return panel_filter_cache[cache_key]
+
     if panel_bulk is not None:
         if panel_by_official is not None:
             sub = panel_by_official.get(int(official_id), panel_bulk.iloc[0:0])
         else:
             sub = panel_bulk.loc[panel_bulk["official_id"] == int(official_id)]
-        return filter_panel_for_appointment(
+        result = filter_panel_for_appointment(
             sub,
             official_id=official_id,
             intl_appointment_type_id=intl_appointment_type_id,
             directory_discipline_id=directory_discipline_id,
             national_role_ids=national_role_ids,
         )
-    full_panel = load_international_panel_segments_bulk([official_id])
-    return filter_panel_for_appointment(
-        full_panel,
-        official_id=official_id,
-        intl_appointment_type_id=intl_appointment_type_id,
-        directory_discipline_id=directory_discipline_id,
-        national_role_ids=national_role_ids,
-    )
+    else:
+        full_panel = load_international_panel_segments_bulk([official_id])
+        result = filter_panel_for_appointment(
+            full_panel,
+            official_id=official_id,
+            intl_appointment_type_id=intl_appointment_type_id,
+            directory_discipline_id=directory_discipline_id,
+            national_role_ids=national_role_ids,
+        )
+
+    if panel_filter_cache is not None:
+        panel_filter_cache[cache_key] = result
+    return result
 
 
 def _evaluate_rule(
@@ -2239,6 +2405,7 @@ def _evaluate_rule(
     seminars_bulk: pd.DataFrame | None = None,
     seminars_by_official: dict[int, pd.DataFrame] | None = None,
     seminars_for_appointment: pd.DataFrame | None = None,
+    panel_filter_cache: dict[tuple[Any, ...], pd.DataFrame] | None = None,
 ) -> RuleCheckResult:
     metric = str(rule_row["metric"])
     min_value = int(rule_row["min_value"])
@@ -2342,6 +2509,7 @@ def _evaluate_rule(
         directory_discipline_id=directory_discipline_id,
         national_role_ids=role_ids,
         panel_by_official=panel_by_official,
+        panel_filter_cache=panel_filter_cache,
     )
 
     if metric == "judge_promote_isu":
@@ -2443,19 +2611,18 @@ def _rule_set_applies(
     official_id: int,
     isu_listing_keys: set[tuple[int, int, int | None]] | None = None,
 ) -> tuple[bool, str]:
-    if int(rule_set["appointment_type_id"]) != int(appointment_type_id):
-        return False, "appointment type mismatch"
-
-    rs_sport = str(rule_set.get("sport") or "figure")
-    appt_sport = _appointment_sport(directory_discipline_id)
-    if rs_sport != appt_sport:
-        return False, f"sport mismatch ({rs_sport} vs {appt_sport})"
-
-    rs_disc = rule_set.get("discipline_id")
-    if pd.notna(rs_disc):
-        appt_disc = _nullable_int_for_sql(directory_discipline_id)
-        if appt_disc is None or int(rs_disc) != appt_disc:
-            return False, "discipline mismatch"
+    if not _rule_set_static_match(
+        rule_set,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+    ):
+        if int(rule_set["appointment_type_id"]) != int(appointment_type_id):
+            return False, "appointment type mismatch"
+        rs_sport = str(rule_set.get("sport") or "figure")
+        appt_sport = _appointment_sport(directory_discipline_id)
+        if rs_sport != appt_sport:
+            return False, f"sport mismatch ({rs_sport} vs {appt_sport})"
+        return False, "discipline mismatch"
 
     if purpose == "promote":
         req_level = rule_set.get("directory_level_id")
@@ -2525,8 +2692,10 @@ def evaluate_requirements_for_appointment(
     isu_listing_keys: set[tuple[int, int, int | None]] | None = None,
     international_level_id: int | None = None,
     isu_level_id: int | None = None,
+    summary_ctx: RequirementSummaryContext | None = None,
+    listing_tier: str | None = None,
 ) -> list[RequirementEvaluation]:
-    """Evaluate all active rule sets matching this appointment row and purpose."""
+    """Evaluate active rule sets matching this appointment row and purpose."""
     if not activity_database_is_postgresql():
         return []
 
@@ -2535,12 +2704,24 @@ def evaluate_requirements_for_appointment(
         if listing_season_code is not None
         else REPORT_LISTING_SEASON_DEFAULT
     )
+    panel_filter_cache = (
+        summary_ctx.panel_filter_cache if summary_ctx is not None else None
+    )
     if rules_df is None:
         active_rules = _load_rule_sets(purpose=purpose)
     elif "purpose" in rules_df.columns:
         active_rules = rules_df.loc[rules_df["purpose"] == purpose]
     else:
         active_rules = rules_df
+    if active_rules.empty:
+        return []
+
+    active_rules = _filter_rule_rows_for_appointment(
+        active_rules,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+        listing_tier=listing_tier,
+    )
     if active_rules.empty:
         return []
 
@@ -2584,7 +2765,12 @@ def evaluate_requirements_for_appointment(
             isu_listing_keys=isu_listing_keys,
         )
         season_window = int(head["season_window"])
-        season_codes = season_codes_preceding_listing(listing_season_code, season_window)
+        if summary_ctx is not None:
+            season_codes = summary_ctx.season_codes_for_window(season_window)
+        else:
+            season_codes = season_codes_preceding_listing(
+                listing_season_code, season_window
+            )
 
         if not applies:
             out.append(
@@ -2623,6 +2809,7 @@ def evaluate_requirements_for_appointment(
                     seminars_bulk=seminars_bulk,
                     seminars_by_official=seminars_by_official,
                     seminars_for_appointment=seminars_for_appointment,
+                    panel_filter_cache=panel_filter_cache,
                 )
             )
 
@@ -2691,10 +2878,14 @@ def _seminar_status_for_appointment(
         return ""
 
     appointment_level_id = appt_ctx.get("level_id")
-    for rule_set_id, group in purpose_rules.groupby("rule_set_id", sort=False):
+    candidates = _filter_rule_rows_for_appointment(
+        purpose_rules,
+        appointment_type_id=appointment_type_id,
+        directory_discipline_id=directory_discipline_id,
+        listing_tier=listing_tier,
+    )
+    for rule_set_id, group in candidates.groupby("rule_set_id", sort=False):
         head = group.iloc[0]
-        if str(head["listing_tier"]) != listing_tier:
-            continue
         applies, _ = _rule_set_applies(
             head,
             appointment_type_id=appointment_type_id,
@@ -2772,6 +2963,7 @@ def evaluate_requirements_summary_df(
     listing_season_code: int | None = None,
     include_maintain_promote: bool = True,
     include_seminar_columns: bool = True,
+    summary_ctx: RequirementSummaryContext | None = None,
 ) -> pd.DataFrame:
     """
     Add maintain / promote and/or seminar summary columns.
@@ -2786,54 +2978,54 @@ def evaluate_requirements_summary_df(
         if listing_season_code is not None
         else REPORT_LISTING_SEASON_DEFAULT
     )
-    rules_df = _load_rule_sets()
-    maintain_rules = (
-        rules_df.loc[rules_df["purpose"] == "maintain"]
-        if not rules_df.empty
-        else rules_df
-    )
-    promote_rules = (
-        rules_df.loc[rules_df["purpose"] == "promote"]
-        if not rules_df.empty
-        else rules_df
-    )
-
-    official_ids = summary["official_id"].astype(int).unique().tolist()
-    panel: pd.DataFrame | None = None
-    panel_by_official: dict[int, pd.DataFrame] | None = None
-    if include_maintain_promote:
-        panel = (
+    if summary_ctx is None:
+        summary_ctx = build_requirement_summary_context(
+            summary,
+            listing_season_code=listing_season_code,
+            panel_bulk=panel_bulk,
+            seminars_bulk=seminars_bulk,
+            load_panel=include_maintain_promote,
+            load_seminars=include_maintain_promote or include_seminar_columns,
+        )
+    elif include_maintain_promote and summary_ctx.panel is None:
+        official_ids = summary["official_id"].astype(int).unique().tolist()
+        summary_ctx.panel = (
             panel_bulk
             if panel_bulk is not None
             else load_international_panel_segments_bulk(official_ids)
         )
-        if panel is not None and not panel.empty:
-            panel_by_official = {
-                int(oid): group for oid, group in panel.groupby("official_id", sort=False)
+        if summary_ctx.panel is not None and not summary_ctx.panel.empty:
+            summary_ctx.panel_by_official = {
+                int(oid): group
+                for oid, group in summary_ctx.panel.groupby("official_id", sort=False)
             }
-
-    seminars = pd.DataFrame()
-    seminars_by_key: dict[tuple[int, int, int | None], pd.DataFrame] = {}
-    if include_seminar_columns or include_maintain_promote:
-        seminars = (
+    if (
+        (include_maintain_promote or include_seminar_columns)
+        and summary_ctx.seminars.empty
+        and not summary_ctx.seminars_by_key
+    ):
+        official_ids = summary["official_id"].astype(int).unique().tolist()
+        summary_ctx.seminars = (
             seminars_bulk
             if seminars_bulk is not None
             else load_official_seminars_bulk(official_ids)
         )
-        seminars_by_key = batch_seminars_for_appointment_keys(
-            seminars,
+        summary_ctx.seminars_by_key = batch_seminars_for_appointment_keys(
+            summary_ctx.seminars,
             _summary_appointment_keys(summary),
         )
 
-    appointment_contexts = _batch_appointment_contexts(official_ids)
-    appointment_rows_by_official = load_official_international_appointment_rows(
-        official_ids
-    )
-    isu_listing_keys = _batch_isu_listing_keys(official_ids)
-
-    with Session(engine) as session:
-        international_level_id = _international_level_id(session)
-        isu_level_id = _isu_level_id(session)
+    maintain_rules = summary_ctx.maintain_rules
+    promote_rules = summary_ctx.promote_rules
+    panel = summary_ctx.panel
+    panel_by_official = summary_ctx.panel_by_official
+    seminars = summary_ctx.seminars
+    seminars_by_key = summary_ctx.seminars_by_key
+    appointment_contexts = summary_ctx.appointment_contexts
+    appointment_rows_by_official = summary_ctx.appointment_rows_by_official
+    isu_listing_keys = summary_ctx.isu_listing_keys
+    international_level_id = summary_ctx.international_level_id
+    isu_level_id = summary_ctx.isu_level_id
 
     empty_seminars = seminars.iloc[0:0] if not seminars.empty else seminars
     maintain_notes: list[str] = []
@@ -2879,8 +3071,10 @@ def evaluate_requirements_summary_df(
                 isu_listing_keys=isu_listing_keys,
                 international_level_id=international_level_id,
                 isu_level_id=isu_level_id,
+                summary_ctx=summary_ctx,
+                listing_tier=listing_tier,
             )
-            tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
+            tier_rules = maintain_evals
             tier_applicable = [e for e in tier_rules if not e.not_applicable]
 
             if tier_applicable:
@@ -2952,6 +3146,8 @@ def evaluate_requirements_summary_df(
                     isu_listing_keys=isu_listing_keys,
                     international_level_id=international_level_id,
                     isu_level_id=isu_level_id,
+                    summary_ctx=summary_ctx,
+                    listing_tier=listing_tier,
                 )
                 promote_primary = _primary_requirement_evaluation(promote_evals)
                 if promote_primary is not None and not promote_primary.not_applicable:

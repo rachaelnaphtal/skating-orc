@@ -148,6 +148,56 @@ def test_rule_set_applies_tc_promote_pairs_discipline():
     )
     assert not applies_sp
     assert reason == "discipline mismatch"
+
+
+def test_filter_rule_rows_for_appointment_scopes_by_row():
+    rules = pd.DataFrame(
+        [
+            {
+                "rule_set_id": 1,
+                "appointment_type_id": 15,
+                "sport": "figure",
+                "discipline_id": 8,
+                "listing_tier": "international",
+            },
+            {
+                "rule_set_id": 2,
+                "appointment_type_id": 15,
+                "sport": "figure",
+                "discipline_id": 9,
+                "listing_tier": "international",
+            },
+            {
+                "rule_set_id": 3,
+                "appointment_type_id": 12,
+                "sport": "figure",
+                "discipline_id": pd.NA,
+                "listing_tier": "international",
+            },
+            {
+                "rule_set_id": 4,
+                "appointment_type_id": 15,
+                "sport": "figure",
+                "discipline_id": 8,
+                "listing_tier": "isu",
+            },
+        ]
+    )
+    filtered = ir._filter_rule_rows_for_appointment(
+        rules,
+        appointment_type_id=15,
+        directory_discipline_id=8,
+        listing_tier="international",
+    )
+    assert list(filtered["rule_set_id"]) == [1]
+
+    sync = ir._filter_rule_rows_for_appointment(
+        rules,
+        appointment_type_id=15,
+        directory_discipline_id=ir.DIRECTORY_DISC_SYNCHRONIZED_ID,
+    )
+    assert sync.empty
+
     assert ir._competition_matches_scope(15, False, (15, 16, 17), include_qualifying_national=False)
     assert not ir._competition_matches_scope(4, False, (15, 16, 17), include_qualifying_national=False)
     assert ir._competition_matches_scope(4, True, (15, 16, 17), include_qualifying_national=True)
@@ -1198,7 +1248,7 @@ def test_evaluate_seminar_count_and_alternatives():
         min_value=1,
     )
     assert met_any
-    assert detail_any == "2/1 seminar (25-26, 24-25)"
+    assert detail_any == "2/1 seminar (24-25, 25-26)"
     assert "seminar seminar" not in detail_any
 
     at_event_df = pd.DataFrame(

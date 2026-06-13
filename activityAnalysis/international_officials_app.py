@@ -105,6 +105,7 @@ from activityAnalysis.international_requirements import (
     DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
     enrich_summary_with_promote_first_eligible,
     evaluate_requirements_summary_df,
+    build_requirement_summary_context,
 )
 from activityAnalysis.load_activity_data import activity_database_is_postgresql, get_engine
 from activityAnalysis.officials_analysis_models import Appointments
@@ -235,17 +236,30 @@ def _load_summary(
         summary = enrich_summary_with_listing_demographics(
             summary, listing_season_code=listing_season_code
         )
-        summary = enrich_summary_with_promote_first_eligible(
-            summary, listing_season_code=listing_season_code
+        need_requirement_ctx = (
+            include_maintain_promote or include_seminar_columns
         )
-    if (include_maintain_promote or include_seminar_columns) and not summary.empty:
-        summary = evaluate_requirements_summary_df(
+        summary_ctx = build_requirement_summary_context(
             summary,
-            panel_bulk=panel if include_maintain_promote else None,
             listing_season_code=listing_season_code,
-            include_maintain_promote=include_maintain_promote,
-            include_seminar_columns=include_seminar_columns,
+            panel_bulk=panel,
+            load_panel=include_maintain_promote,
+            load_seminars=need_requirement_ctx,
         )
+        summary = enrich_summary_with_promote_first_eligible(
+            summary,
+            listing_season_code=listing_season_code,
+            summary_ctx=summary_ctx,
+        )
+        if need_requirement_ctx:
+            summary = evaluate_requirements_summary_df(
+                summary,
+                panel_bulk=panel,
+                listing_season_code=listing_season_code,
+                include_maintain_promote=include_maintain_promote,
+                include_seminar_columns=include_seminar_columns,
+                summary_ctx=summary_ctx,
+            )
     return summary, report_season_codes
 
 
@@ -402,6 +416,7 @@ def _major_events_query_params(
         "scope_counts": None,
         "sem_maintain": None,
         "sem_promote": None,
+        "maint_fail": None,
         "level": None,
     }
 
@@ -534,6 +549,8 @@ if _intl_url_changed:
         apply_bool_param("sem_maintain", "intl_show_seminar_maintain")
     if qp_get("sem_promote") is not None:
         apply_bool_param("sem_promote", "intl_show_seminar_promote")
+    if qp_get("maint_fail") is not None:
+        apply_bool_param("maint_fail", "intl_filter_maintain_no")
     level_qp = qp_get_int("level")
     if level_qp is not None:
         st.session_state["intl_level_pick"] = level_qp
@@ -570,6 +587,10 @@ if "intl_show_seminar_maintain" not in st.session_state:
 if "intl_show_seminar_promote" not in st.session_state:
     st.session_state["intl_show_seminar_promote"] = (
         qp_get("sem_promote") == "1" if qp_get("sem_promote") is not None else False
+    )
+if "intl_filter_maintain_no" not in st.session_state:
+    st.session_state["intl_filter_maintain_no"] = (
+        qp_get("maint_fail") == "1" if qp_get("maint_fail") is not None else False
     )
 if "intl_major_event_key" not in st.session_state:
     st.session_state["intl_major_event_key"] = MAJOR_ISU_EVENT_KEYS[0]
@@ -629,6 +650,18 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
         ),
     )
 
+    filter_maintain_no = st.sidebar.checkbox(
+        "Only failing maintain",
+        key="intl_filter_maintain_no",
+        disabled=_on_detail_page or not include_requirements,
+        help=(
+            "Show only appointment rows where Maintain is No. "
+            "Requires maintain / promote checks to be enabled."
+            if not _on_detail_page
+            else "Summary table filter only."
+        ),
+    )
+
     show_activity_detail = st.sidebar.checkbox(
         "Show activity detail",
         key="intl_show_activity_detail",
@@ -669,6 +702,7 @@ else:
     show_activity_detail = False
     show_seminar_maintain = False
     show_seminar_promote = False
+    filter_maintain_no = False
 
 if view_mode != INTL_VIEW_MAJOR_EVENTS:
     listing_season_code = st.sidebar.selectbox(
@@ -677,7 +711,8 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
         key="intl_listing_season",
         format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
         help=(
-            "ISU listing cycle anchor. Service seasons are the USFS seasons immediately before this one. "
+            "ISU listing cycle anchor. Activity and requirement windows count completed "
+            "USFS seasons before this anchor (e.g. listing 26-27 with 2 seasons → 25-26 and 24-25, not 26-27). "
             "Age and years in grade use the listing reference date "
             f"(e.g. {format_listing_reference_july1(2627)} for 26-27)."
         ),
@@ -687,7 +722,10 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
         "Seasons in report",
         options=list(REPORT_SEASON_WINDOW_OPTIONS),
         key="intl_report_season_window",
-        help="Filter competition/segment counts and detail to this many seasons before the listing season.",
+        help=(
+            "Filter competition/segment counts and detail to this many completed USFS seasons "
+            "before the listing anchor (e.g. 2 for listing 26-27 → 25-26 and 24-25)."
+        ),
     )
 
     report_season_codes = season_codes_preceding_listing(
@@ -711,6 +749,7 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
             activity_detail="1" if show_activity_detail else "0",
             sem_maintain="1" if show_seminar_maintain else "0",
             sem_promote="1" if show_seminar_promote else "0",
+            maint_fail="1" if filter_maintain_no and include_requirements else "0",
             oid=None,
             atid=None,
             event=None,
@@ -733,6 +772,7 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
             scope_counts=None,
             sem_maintain=None,
             sem_promote=None,
+            maint_fail=None,
             level=None,
             event=None,
             appt=None,
@@ -756,6 +796,7 @@ if view_mode == INTL_VIEW_DETAIL and not _on_detail_page:
         listing=None,
         seasons=None,
         req=None,
+        maint_fail=None,
         event=None,
         appt=None,
     )
@@ -1096,8 +1137,19 @@ with st.spinner("Loading activity..."):
         int(report_season_window),
     )
 
+if (
+    filter_maintain_no
+    and include_requirements
+    and not summary.empty
+    and "maintain" in summary.columns
+):
+    summary = summary.loc[summary["maintain"] == "No"].copy()
+
 if summary.empty:
-    st.info("No international appointments match the current filters.")
+    if filter_maintain_no and include_requirements:
+        st.info("No appointments with failing maintain requirements match the current filters.")
+    else:
+        st.info("No international appointments match the current filters.")
     st.stop()
 
 total_officials = summary["official_id"].nunique()
@@ -1135,6 +1187,7 @@ with dl_col:
         active_only,
         int(listing_season_code),
         int(report_season_window),
+        filter_maintain_no,
         total_appointments,
     )
     if st.session_state.get("intl_bulk_zip_key") != bulk_zip_key:

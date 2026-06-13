@@ -1,9 +1,9 @@
 """
 USFS / ISU listing season codes for the international officials report.
 
-The report anchor season (e.g. ``2627``) is the listing cycle being evaluated.
-Service windows use the ``n`` USFS season codes immediately before that anchor
-(excluding the anchor season itself).
+Season windows use the N USFS seasons completed before the listing anchor season
+begins on July 1 (excluding the anchor itself). For listing ``2627``, a window
+of 2 counts ``2526`` and ``2425``, not ``2627``.
 """
 
 from __future__ import annotations
@@ -248,22 +248,50 @@ def usfs_season_code_for_date(d: date) -> int:
     return int(f"{start_yy:02d}{end_yy:02d}")
 
 
+def usfs_season_code_ending_in_calendar_year(calendar_year: int) -> int:
+    """USFS season code whose June end falls in ``calendar_year`` (e.g. ``2026`` → ``2526``)."""
+    end_yy = int(calendar_year) % 100
+    start_yy = (end_yy - 1) % 100
+    return int(f"{start_yy:02d}{end_yy:02d}")
+
+
+def isu_season_codes_preceding_july1(listing_july1_year: int, n: int) -> list[int]:
+    """
+    USFS season codes for the ``n`` seasons completed before July 1 of ``listing_july1_year``.
+
+    ``listing_july1_year`` is the calendar year on the listing reference date
+    (``listing_reference_july1(2627).year`` → ``2026``), not the end year of the
+    anchor season code.
+
+    Example: ``2026``, n=2 → ``[2425, 2526]`` (``25-26`` and ``24-25``, not ``26-27``).
+    """
+    if n <= 0:
+        return []
+    codes: list[int] = []
+    end_year = int(listing_july1_year)
+    for _ in range(n):
+        codes.insert(0, usfs_season_code_ending_in_calendar_year(end_year))
+        end_year -= 1
+    return codes
+
+
 def season_codes_preceding_listing(anchor_season_code: int, n: int) -> list[int]:
     """
-    USFS season codes for the ``n`` seasons immediately before ``anchor_season_code``.
+    USFS season codes for the ``n`` completed seasons before the listing anchor.
 
-    Example: anchor ``2627``, n=3 → ``[2324, 2425, 2526]``.
+    The listing anchor season itself is never included. The newest season in the
+    window is always the one ending immediately before the anchor begins on July 1.
+
+    Example: anchor ``2627``, n=2 → ``[2425, 2526]`` (``25-26`` and ``24-25``).
+    Example: anchor ``2627``, n=4 → ``[2223, 2324, 2425, 2526]``.
     Example: anchor ``2728``, n=3 → ``[2425, 2526, 2627]``.
     """
     if n <= 0:
         return []
-    anchor = int(anchor_season_code)
-    codes: list[int] = []
-    code = anchor - 101
-    for _ in range(n):
-        codes.insert(0, code)
-        code -= 101
-    return codes
+    return isu_season_codes_preceding_july1(
+        listing_reference_july1(int(anchor_season_code)).year,
+        n,
+    )
 
 
 def competition_year_matches_seasons(

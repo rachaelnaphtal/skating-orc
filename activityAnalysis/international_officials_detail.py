@@ -329,6 +329,7 @@ def clear_intl_non_view_query_params() -> None:
         "scope_counts",
         "sem_maintain",
         "sem_promote",
+        "maint_fail",
         "level",
         "event",
         "appt",

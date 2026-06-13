@@ -234,6 +234,13 @@ def build_appointment_detail_context(
         isu_level_id = _isu_level_id(session)
         international_level_id = _international_level_id(session)
 
+    listing_tier = directory_listing_tier_for_level(
+        appointment_level,
+        level_id=appointment_level_id,
+        isu_level_id=isu_level_id,
+        international_level_id=international_level_id,
+    )
+
     isu_listing_keys = _batch_isu_listing_keys([official_id])
     show_promote = should_evaluate_promote_requirements(
         official_id,
@@ -262,15 +269,9 @@ def build_appointment_detail_context(
         seminars_by_official=seminars_by_official,
         isu_level_id=isu_level_id,
         isu_listing_keys=isu_listing_keys,
+        listing_tier=listing_tier,
     )
-    listing_tier = directory_listing_tier_for_level(
-        appointment_level,
-        level_id=appointment_level_id,
-        isu_level_id=isu_level_id,
-        international_level_id=international_level_id,
-    )
-    tier_rules = [e for e in maintain_evals if e.listing_tier == listing_tier]
-    maintain_primary = _primary_requirement_evaluation(tier_rules)
+    maintain_primary = _primary_requirement_evaluation(maintain_evals)
 
     promote_primary: RequirementEvaluation | None = None
     promote_note: str | None = None
@@ -290,9 +291,9 @@ def build_appointment_detail_context(
             seminars_by_official=seminars_by_official,
             isu_level_id=isu_level_id,
             isu_listing_keys=isu_listing_keys,
+            listing_tier=listing_tier,
         )
-        promote_applicable = [e for e in promote_evals if not e.not_applicable]
-        promote_primary = _primary_requirement_evaluation(promote_applicable)
+        promote_primary = _primary_requirement_evaluation(promote_evals)
 
     panel_detail = get_international_official_activity_detail(
         appointment_type_id=appointment_type_id,
