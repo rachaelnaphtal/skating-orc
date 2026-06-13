@@ -81,6 +81,7 @@ from activityAnalysis.international_officials_detail import (
     INTL_VIEW_MAJOR_EVENTS,
     INTL_VIEW_OPTIONS,
     INTL_VIEW_SUMMARY,
+    appointment_detail_query_params,
     appointment_detail_url,
     discipline_id_from_param,
     discipline_id_to_param,
@@ -700,21 +701,42 @@ if view_mode != INTL_VIEW_MAJOR_EVENTS:
         f"Age / years in grade reference: {format_listing_reference_july1(listing_season_code)}"
     )
 
-    _sync_intl_query_params(
-        view=intl_view_query_slug_for_mode(INTL_VIEW_SUMMARY),
-        listing=str(int(listing_season_code)),
-        seasons=str(int(report_season_window)),
-        req="1" if include_requirements else "0",
-        active="1" if active_only else "0",
-        activity_detail="1" if show_activity_detail else "0",
-        sem_maintain="1" if show_seminar_maintain else "0",
-        sem_promote="1" if show_seminar_promote else "0",
-        oid=None,
-        atid=None,
-        event=None,
-        appt=None,
-        did=None,
-    )
+    if view_mode == INTL_VIEW_SUMMARY:
+        _sync_intl_query_params(
+            view=intl_view_query_slug_for_mode(INTL_VIEW_SUMMARY),
+            listing=str(int(listing_season_code)),
+            seasons=str(int(report_season_window)),
+            req="1" if include_requirements else "0",
+            active="1" if active_only else "0",
+            activity_detail="1" if show_activity_detail else "0",
+            sem_maintain="1" if show_seminar_maintain else "0",
+            sem_promote="1" if show_seminar_promote else "0",
+            oid=None,
+            atid=None,
+            event=None,
+            appt=None,
+            did=None,
+        )
+    elif _on_detail_page and _detail_nav_params:
+        p = _detail_nav_params
+        _sync_intl_query_params(
+            **appointment_detail_query_params(
+                official_id=int(p["official_id"]),
+                appointment_type_id=int(p["appointment_type_id"]),
+                discipline_id=p["discipline_id"],
+                listing_season_code=int(listing_season_code),
+                report_season_window=int(report_season_window),
+                active_only=bool(active_only),
+            ),
+            req="1",
+            activity_detail=None,
+            scope_counts=None,
+            sem_maintain=None,
+            sem_promote=None,
+            level=None,
+            event=None,
+            appt=None,
+        )
 else:
     listing_season_code = int(st.session_state.get("intl_listing_season", REPORT_LISTING_SEASON_DEFAULT))
     report_season_window = int(
