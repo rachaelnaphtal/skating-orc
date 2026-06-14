@@ -69,6 +69,24 @@ def test_pdf_short_discipline_uses_sys_for_synchronized():
     assert _pdf_short_discipline("Synchronized Skating") == "SYS"
 
 
+def test_pdf_short_discipline_uses_segment_type_id():
+    assert _pdf_short_discipline("Men", segment_discipline_type_id=1) == "Singles"
+    assert _pdf_short_discipline("Women", segment_discipline_type_id=1) == "Singles"
+    assert _pdf_short_discipline("Pairs", segment_discipline_type_id=2) == "Pairs"
+    assert _pdf_short_discipline("Ice Dance", segment_discipline_type_id=3) == "Dance"
+    assert _pdf_short_discipline("Synchronized", segment_discipline_type_id=5) == "SYS"
+
+
+def test_pdf_short_discipline_blank_for_idvo_combined_label():
+    from activityAnalysis.international_officials_data import DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL
+
+    assert _pdf_short_discipline(DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL) == ""
+    assert _pdf_short_discipline(
+        DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL,
+        appointment_discipline=True,
+    ) == ""
+
+
 def test_pdf_text_replaces_unicode_for_latin1():
     assert _pdf_text("≥4 years in grade in this appointment (listing July 1)") == (
         ">=4 years in grade in this appointment (listing July 1)"
@@ -159,11 +177,11 @@ def test_build_appointment_detail_pdf_long_competition_name_and_panel_sections()
                     "competition_year": 2324,
                     "competition_name": "ISU World Synchronized Skating Championships",
                     "appointment_type": "International Judge",
-                    "discipline": "Synchronized",
                     "competition_type": "ISU",
                     "segment_name": "Free Skate",
                     "segment_level": "Senior",
                     "segment_discipline": "Synchronized",
+                    "segment_discipline_type_id": 5,
                 }
             ]
         ),

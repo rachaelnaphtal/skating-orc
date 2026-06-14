@@ -29,6 +29,7 @@ try:
         load_official_international_appointment_rows,
     )
     from activityAnalysis.international_officials_data import (
+        DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL,
         _nullable_int_for_sql,
         get_international_official_activity_detail,
         get_international_official_activity_other_appointments,
@@ -70,6 +71,7 @@ except ModuleNotFoundError:
         load_official_international_appointment_rows,
     )
     from international_officials_data import (
+        DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL,
         _nullable_int_for_sql,
         get_international_official_activity_detail,
         get_international_official_activity_other_appointments,
@@ -449,19 +451,58 @@ _PDF_TABLE_FONT_SIZE = 7
 _PDF_TABLE_HEADER_FONT_SIZE = 8
 
 
-def _pdf_short_discipline(value: Any) -> str:
+_PDF_SEGMENT_DISCIPLINE_TYPE_LABELS: dict[int, str] = {
+    1: "Singles",
+    2: "Pairs",
+    3: "Dance",
+    5: "SYS",
+}
+
+
+def _is_combined_idvo_discipline_label(text: str) -> bool:
+    return text.strip().casefold() == DATA_OPERATOR_COMBINED_DISCIPLINE_LABEL.casefold()
+
+
+def _pdf_short_discipline(
+    value: Any,
+    *,
+    segment_discipline_type_id: Any = None,
+    appointment_discipline: bool = False,
+) -> str:
+    if segment_discipline_type_id is not None and not pd.isna(segment_discipline_type_id):
+        try:
+            label = _PDF_SEGMENT_DISCIPLINE_TYPE_LABELS.get(int(segment_discipline_type_id))
+            if label:
+                return label
+        except (TypeError, ValueError):
+            pass
+
     text = "" if value is None or pd.isna(value) else str(value).strip()
     if not text or text == "-":
         return ""
+    if _is_combined_idvo_discipline_label(text):
+        return ""
+
     lower = text.lower()
-    if "synch" in lower:
-        return "SYS"
+    if appointment_discipline:
+        if "single" in lower:
+            return "Singles"
+        if "pair" in lower:
+            return "Pairs"
+        if "dance" in lower:
+            return "Dance"
+        if "synch" in lower:
+            return "SYS"
+        return text if len(text) <= 14 else text[:12] + "..."
+
     if "single" in lower:
         return "Singles"
     if "pair" in lower:
         return "Pairs"
     if "dance" in lower:
         return "Dance"
+    if "synch" in lower:
+        return "SYS"
     return text if len(text) <= 14 else text[:12] + "..."
 
 
@@ -481,8 +522,13 @@ def _pdf_table_cell_text(row: pd.Series, src: str) -> str:
     val = row.get(src)
     if src == "competition_year" and pd.notna(val):
         return format_usfs_season_code(int(val))
-    if src in ("segment_discipline", "discipline"):
-        return _pdf_short_discipline(val)
+    if src == "segment_discipline":
+        return _pdf_short_discipline(
+            val,
+            segment_discipline_type_id=row.get("segment_discipline_type_id"),
+        )
+    if src == "discipline":
+        return _pdf_short_discipline(val, appointment_discipline=True)
     if src == "appointment_type":
         return _pdf_short_appointment_type(val)
     return "" if pd.isna(val) else str(val)
@@ -634,10 +680,11 @@ def _pdf_write_qualifying_table(pdf: _ReportPDF, activity: pd.DataFrame | None) 
 
 
 _PDF_PANEL_THIS_INTL_COLUMNS = [
-    ("competition_year", "Season", 0.09),
-    ("competition_name", "Competition", 0.44),
-    ("competition_type", "Type", 0.11),
-    ("segment_name", "Segment", 0.22),
+    ("competition_year", "Season", 0.08),
+    ("competition_name", "Competition", 0.36),
+    ("competition_type", "Type", 0.10),
+    ("segment_discipline", "Disc.", 0.08),
+    ("segment_name", "Segment", 0.20),
     ("segment_level", "Level", 0.08),
 ]
 
@@ -645,10 +692,10 @@ _PDF_PANEL_THIS_NATIONAL_COLUMNS = list(_PDF_PANEL_THIS_INTL_COLUMNS)
 
 _PDF_PANEL_OTHER_INTL_COLUMNS = [
     ("competition_year", "Season", 0.08),
-    ("competition_name", "Competition", 0.34),
+    ("competition_name", "Competition", 0.32),
     ("appointment_type", "Appointment", 0.16),
-    ("discipline", "Discipline", 0.1),
-    ("competition_type", "Type", 0.1),
+    ("segment_discipline", "Disc.", 0.08),
+    ("competition_type", "Type", 0.10),
     ("segment_name", "Segment", 0.22),
 ]
 
