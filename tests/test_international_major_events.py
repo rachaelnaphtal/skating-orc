@@ -12,6 +12,7 @@ _mock_lad.engine = MagicMock()
 _mock_lad.SINGLES_DISCIPLINE_ID = 1
 _mock_lad.DISC_PAIRS_ID = 8
 _mock_lad.DISC_DANCE_ID = 4
+_mock_lad.DISC_SYNCHRO_ID = 2
 _mock_lad.DISC_SINGLES_PAIRS_ID = 9
 _mock_lad.segment_discipline_type_ids_for_directory.return_value = (1,)
 sys.modules["activityAnalysis.load_activity_data"] = _mock_lad
@@ -20,7 +21,10 @@ sys.modules["load_activity_data"] = _mock_lad
 import pandas as pd
 
 from activityAnalysis import international_major_events as ime
-from activityAnalysis.isu_major_event_classification import MAJOR_ISU_EVENT_WORLDS
+from activityAnalysis.isu_major_event_classification import (
+    MAJOR_ISU_EVENT_SYNCHRO_WORLDS,
+    MAJOR_ISU_EVENT_WORLDS,
+)
 
 
 def test_competition_calendar_year_prefers_start_date():
@@ -144,6 +148,34 @@ def test_all_roles_segment_discipline_filter_includes_synchronized():
         discipline_id=None,
     )
     assert params["spd_segment_discipline_type_ids"] == [1, 2, 3, 5]
+
+
+def test_synchro_event_segment_discipline_filter_synchronized_only():
+    sql, params = ime._segment_discipline_filter_sql(
+        appointment_type_id=None,
+        discipline_id=None,
+        event_key=MAJOR_ISU_EVENT_SYNCHRO_WORLDS,
+    )
+    assert "synchro_segment_discipline_type_ids" in sql
+    assert params["synchro_segment_discipline_type_ids"] == [5]
+
+
+def test_competition_calendar_year_from_synchro_results_url():
+    assert (
+        ime.competition_calendar_year(
+            start_date=None,
+            end_date=None,
+            competition_year="2425",
+            competition_name="ISU World Synchronized Championships 2025",
+            results_url="https://results.isu.org/results/season2425/wsysc2025/",
+        )
+        == 2025
+    )
+
+
+def test_major_event_assignment_label_synchronized():
+    assert ime.major_event_assignment_label(1, 5) == "J-SYS"
+    assert ime.major_event_assignment_label(11, 5) == "TC-SYS"
 
 
 def test_major_event_pre_appointment_mask():

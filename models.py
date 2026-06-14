@@ -337,6 +337,88 @@ class ElementDeviationRankingCache(Base):
     )
 
 
+class PcsDeviationRankingShardCache(Base):
+    """Per-season, per-discipline PCS marks for deviation ranking."""
+
+    __tablename__ = "pcs_deviation_ranking_shard_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint("shard_key", name="pcs_deviation_ranking_shard_cache_pkey"),
+        Index(
+            "idx_pcs_deviation_ranking_shard_season_disc",
+            "season_year",
+            "discipline_type_id",
+        ),
+    )
+
+    shard_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    season_year: Mapped[str] = mapped_column(String(8))
+    discipline_type_id: Mapped[int] = mapped_column(Integer)
+    competition_scope: Mapped[str] = mapped_column(String(32))
+    event_start_iso: Mapped[Optional[str]] = mapped_column(String(10))
+    event_end_iso: Mapped[Optional[str]] = mapped_column(String(10))
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    marks_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    n_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
+
+
+class PcsDeviationRankingSigmaCache(Base):
+    """Fitted σ̂ bin parameters for a PCS deviation benchmark mark pool."""
+
+    __tablename__ = "pcs_deviation_ranking_sigma_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint("sigma_key", name="pcs_deviation_ranking_sigma_cache_pkey"),
+        Index(
+            "idx_pcs_deviation_ranking_sigma_seasons",
+            "benchmark_start_season_year",
+            "benchmark_end_season_year",
+        ),
+    )
+
+    sigma_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    benchmark_start_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    benchmark_end_season_year: Mapped[Optional[str]] = mapped_column(String(8))
+    scope_json: Mapped[str] = mapped_column(Text)
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    params_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    floor_sigma: Mapped[Optional[float]] = mapped_column(Numeric(8, 4))
+    min_bin_count: Mapped[Optional[int]] = mapped_column(Integer)
+    n_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
+
+
+class PcsDeviationRankingShardSummaryCache(Base):
+    """Mergeable per-judge stats for one PCS deviation shard at a fixed σ̂ fit."""
+
+    __tablename__ = "pcs_deviation_ranking_shard_summary_cache"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "cache_key", name="pcs_deviation_ranking_shard_summary_cache_pkey"
+        ),
+        Index(
+            "idx_pcs_deviation_shard_summary_shard_sigma",
+            "shard_key",
+            "sigma_key",
+            unique=True,
+        ),
+    )
+
+    cache_key: Mapped[str] = mapped_column(String(24), primary_key=True)
+    shard_key: Mapped[str] = mapped_column(String(24))
+    sigma_key: Mapped[str] = mapped_column(String(24))
+    floor_sigma: Mapped[float] = mapped_column(Numeric(8, 4))
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    summary_payload: Mapped[bytes] = mapped_column(LargeBinary)
+    n_marks: Mapped[Optional[int]] = mapped_column(Integer)
+    computed_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=text("now()")
+    )
+
+
 t_officials = Table(
     'officials', Base.metadata,
     Column('mbr_number', BigInteger),

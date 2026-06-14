@@ -1225,6 +1225,9 @@ def scrape(
                 invalidate_element_ranking_cache_for_competition,
             )
             from pcs_quality_cache import invalidate_pcs_quality_cache_for_competition
+            from pcs_deviation_cache import (
+                invalidate_pcs_deviation_cache_for_competition,
+            )
 
             invalidate_judge_excess_cache_for_competition(
                 database_obj.session, competition_id
@@ -1233,6 +1236,9 @@ def scrape(
                 database_obj.session, competition_id
             )
             invalidate_pcs_quality_cache_for_competition(
+                database_obj.session, competition_id
+            )
+            invalidate_pcs_deviation_cache_for_competition(
                 database_obj.session, competition_id
             )
             from cross_judge_cache import build_cross_judge_shards_for_competition

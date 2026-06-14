@@ -339,6 +339,7 @@ _nav_pages = [
     "Individual Judge Analysis",
     "Cross-Judge Benchmarking",
     "PCS Quality Analysis",
+    "PCS Deviation Analysis",
     "Element Deviation Ranking Analysis",
     "Temporal Trend Analysis",
     "Panel size benchmarks",
@@ -1508,6 +1509,151 @@ def _element_ranking_control_goe_chart(
             "Partial marking score": "Partial marking score √(mean(m²))",
         },
     )
+    fig.update_layout(hovermode="x unified")
+    return fig
+
+
+def _pcs_deviation_chart_series_label(discipline: str, component: str) -> str:
+    return f"{discipline} — {component}"
+
+
+def _pcs_deviation_detail_discipline_col(detail: pd.DataFrame) -> str | None:
+    for col in ("Discipline", "discipline"):
+        if col in detail.columns:
+            return col
+    return None
+
+
+def _pcs_deviation_detail_component_col(detail: pd.DataFrame) -> str | None:
+    for col in ("Component", "component"):
+        if col in detail.columns:
+            return col
+    return None
+
+
+def _pcs_deviation_chart_series_options(detail: pd.DataFrame) -> list[str]:
+    """Ordered discipline × component labels for the PCS control-bin chart."""
+    disc_col = _pcs_deviation_detail_discipline_col(detail)
+    comp_col = _pcs_deviation_detail_component_col(detail)
+    if detail.empty or not disc_col or not comp_col:
+        return []
+    sort_col = (
+        "Partial marking score"
+        if "Partial marking score" in detail.columns
+        else "PCS marks"
+    )
+    scored = detail.sort_values(sort_col, ascending=False)
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, row in scored.iterrows():
+        label = _pcs_deviation_chart_series_label(
+            str(row[disc_col]), str(row[comp_col])
+        )
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out
+
+
+_PCS_DEVIATION_CHART_Y_PARTIAL = "partial_marking_score"
+_PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR = "mean_abs_error"
+_PCS_DEVIATION_CHART_Y_METRICS: dict[str, dict[str, str]] = {
+    _PCS_DEVIATION_CHART_Y_PARTIAL: {
+        "column": "Partial marking score",
+        "title": "Partial marking score by panel-median PCS range",
+        "ylabel": "Partial marking score √(mean(m²))",
+    },
+    _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR: {
+        "column": "Mean |error|",
+        "title": "Mean |error| by panel-median PCS range",
+        "ylabel": "Mean |error| (raw PCS units)",
+    },
+}
+
+
+def _pcs_deviation_control_bin_chart(
+    control_bin_detail: pd.DataFrame,
+    component_detail: pd.DataFrame,
+    *,
+    min_bin_marks: int = 0,
+    series_keys: list[str] | None = None,
+    y_metric: str = _PCS_DEVIATION_CHART_Y_PARTIAL,
+):
+    """Line chart vs panel-median range for PCS components (σ̂-scaled or raw |error|)."""
+    if control_bin_detail.empty or "Control bin" not in control_bin_detail.columns:
+        return None
+
+    metric = _PCS_DEVIATION_CHART_Y_METRICS.get(
+        y_metric, _PCS_DEVIATION_CHART_Y_METRICS[_PCS_DEVIATION_CHART_Y_PARTIAL]
+    )
+    y_col = metric["column"]
+    if y_col not in control_bin_detail.columns:
+        return None
+
+    disc_col = _pcs_deviation_detail_discipline_col(control_bin_detail)
+    comp_col = _pcs_deviation_detail_component_col(control_bin_detail)
+    if not disc_col or not comp_col:
+        return None
+
+    if series_keys:
+        plot_series = list(series_keys)
+    else:
+        source = (
+            component_detail
+            if not component_detail.empty
+            and _pcs_deviation_detail_discipline_col(component_detail)
+            and _pcs_deviation_detail_component_col(component_detail)
+            else control_bin_detail
+        )
+        plot_series = _pcs_deviation_chart_series_options(source)
+
+    if not plot_series:
+        return None
+
+    parts: list[pd.DataFrame] = []
+    for label in plot_series:
+        if " — " not in label:
+            continue
+        disc, component = label.split(" — ", 1)
+        mask = (control_bin_detail[disc_col] == disc) & (
+            control_bin_detail[comp_col] == component
+        )
+        if min_bin_marks > 0:
+            mask = mask & (control_bin_detail["PCS marks"] >= min_bin_marks)
+        subset = control_bin_detail.loc[mask].copy()
+        if subset.empty:
+            continue
+        subset["Series"] = label
+        parts.append(subset)
+
+    if not parts:
+        return None
+
+    plot_df = pd.concat(parts, ignore_index=True)
+    fig = px.line(
+        plot_df.sort_values(["Series", "Control bin"]),
+        x="Control bin",
+        y=y_col,
+        color="Series",
+        markers=True,
+        title=metric["title"],
+        labels={
+            "Control bin": "Panel median PCS bin",
+            y_col: metric["ylabel"],
+        },
+    )
+    bins_sorted = sorted(plot_df["Control bin"].unique())
+    if "Control median range" in plot_df.columns:
+        range_by_bin = (
+            plot_df.drop_duplicates("Control bin")
+            .set_index("Control bin")["Control median range"]
+            .to_dict()
+        )
+        fig.update_xaxes(
+            tickmode="array",
+            tickvals=bins_sorted,
+            ticktext=[range_by_bin.get(b, str(b)) for b in bins_sorted],
+        )
     fig.update_layout(hovermode="x unified")
     return fig
 
@@ -3255,6 +3401,791 @@ PCS scores are not part of this model.
                     )
 
 
+_PCS_DEVIATION_FLOOR_SIGMA = 0.05
+_PCS_DEVIATION_MIN_BIN_COUNT = 30
+
+
+def _pcs_deviation_rankings_column_config() -> dict:
+    return {
+        "rank": st.column_config.NumberColumn("Rank", format="%d"),
+        "Marking score": st.column_config.NumberColumn(
+            "Marking score",
+            format="%.4f",
+            help="√(mean(m²)) over PCS marks; lower = closer to the panel-median / σ̂ model.",
+        ),
+        "PCS marks": st.column_config.NumberColumn(
+            "PCS marks",
+            format="%d",
+            help="Number of PCS marks for this judge identity after filters.",
+        ),
+        "Mean PCS bias": st.column_config.NumberColumn(
+            "Mean PCS bias",
+            format="%+.3f",
+            help="Signed average PCS − panel median (+ above, − below).",
+        ),
+        "Mean |error|": st.column_config.NumberColumn(
+            "Mean |error|",
+            format="%.3f",
+            help="Average |PCS − panel median| in raw points.",
+        ),
+        "Mean σ̂": st.column_config.NumberColumn(
+            "Mean σ̂",
+            format="%.3f",
+            help="Average intrinsic spread σ̂ applied to this judge’s marks.",
+        ),
+        "Mean |m|": st.column_config.NumberColumn(
+            "Mean |m|",
+            format="%.3f",
+            help="Average |m| where m = (PCS − panel median) / σ̂.",
+        ),
+    }
+
+
+def _pcs_deviation_sigma_bins_column_config() -> dict:
+    return {
+        "Marks in bin": st.column_config.NumberColumn("Marks in bin", format="%d"),
+        "Error stdev (all marks)": st.column_config.NumberColumn(
+            "Error stdev (all marks)", format="%.4f"
+        ),
+        "σ̂ used in model": st.column_config.NumberColumn(
+            "σ̂ used in model", format="%.4f"
+        ),
+    }
+
+
+def _pcs_deviation_judge_detail_column_config() -> dict:
+    return {
+        "PCS marks": st.column_config.NumberColumn("PCS marks", format="%d"),
+        "Partial marking score": st.column_config.NumberColumn(
+            "Partial marking score",
+            format="%.4f",
+            help="√(mean(m²)) within the row’s slice.",
+        ),
+        "Mean PCS bias": st.column_config.NumberColumn(
+            "Mean PCS bias", format="%+.3f"
+        ),
+        "Mean |error|": st.column_config.NumberColumn("Mean |error|", format="%.3f"),
+        "Mean σ̂": st.column_config.NumberColumn("Mean σ̂", format="%.3f"),
+    }
+
+
+def _clear_pcs_deviation_judge_detail_cache() -> None:
+    for key in list(st.session_state.keys()):
+        if isinstance(key, tuple) and key and key[0] == "pcs_deviation_judge_detail":
+            del st.session_state[key]
+
+
+def _pcs_deviation_sigma_params(
+    result: dict,
+    run_params: tuple | None,
+) -> dict:
+    """σ̂ bin lookup for drill-down (inline result or DB cache)."""
+    params = result.get("params")
+    if isinstance(params, dict) and params:
+        return params
+    if run_params is None:
+        return {}
+    from pcs_deviation_cache import load_cached_sigma_params_for_run
+
+    cached = run_with_isolated_analytics(
+        lambda analytics, rp: load_cached_sigma_params_for_run(
+            analytics.session, analytics, rp
+        ),
+        run_params,
+    )
+    return cached if isinstance(cached, dict) else {}
+
+
+def _pcs_deviation_breakdown_failure_hint(
+    result: dict,
+    run_params: tuple,
+    pick_judge: str,
+) -> str:
+    if not _pcs_deviation_sigma_params(result, run_params):
+        return (
+            "σ̂ parameters are missing from the saved run. "
+            "Click **Run analysis** to refresh results."
+        )
+    return (
+        f"No PCS marks found for **{pick_judge}** under the current filters, "
+        "or that identity could not be resolved. "
+        "Click **Run analysis** after changing season, scope, or model parameters."
+    )
+
+
+def _pcs_deviation_load_judge_breakdown(
+    result: dict,
+    run_params: tuple,
+    pick_judge: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """On-demand per-judge tables (discipline, component, panel-median bins)."""
+    from pcs_deviation_analysis import (
+        compute_judge_detail_for_identity_pcs,
+        ranking_scope_kwargs_from_run_params,
+        run_params_ranking_compute_key,
+        unpack_pcs_deviation_run_params,
+    )
+
+    empty = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    params = _pcs_deviation_sigma_params(result, run_params)
+    if not params:
+        return empty
+    if not result.get("params"):
+        patched = dict(result)
+        patched["params"] = params
+        st.session_state.pcs_deviation_result = patched
+        result = patched
+
+    detail_key = (
+        "pcs_deviation_judge_detail",
+        run_params_ranking_compute_key(run_params),
+        pick_judge,
+    )
+    cached = st.session_state.get(detail_key)
+    if isinstance(cached, tuple) and len(cached) >= 3:
+        jd_c = cached[0] if isinstance(cached[0], pd.DataFrame) else pd.DataFrame()
+        jc_c = cached[1] if isinstance(cached[1], pd.DataFrame) else pd.DataFrame()
+        jb_c = cached[2] if isinstance(cached[2], pd.DataFrame) else pd.DataFrame()
+        if not jb_c.empty or not jd_c.empty or not jc_c.empty:
+            return jd_c, jc_c, jb_c
+
+    rp = unpack_pcs_deviation_run_params(run_params)
+    scope = ranking_scope_kwargs_from_run_params(run_params)
+
+    def _compute_judge_breakdown(analytics, judge_name, sigma_params, rank_scope):
+        return compute_judge_detail_for_identity_pcs(
+            analytics,
+            judge_name,
+            sigma_params,
+            floor_sigma=float(rp[7]),
+            **rank_scope,
+        )
+
+    with st.spinner(f"Loading breakdown for {pick_judge}…"):
+        detail = run_with_isolated_analytics(
+            _compute_judge_breakdown,
+            pick_judge,
+            params,
+            scope,
+        )
+    if detail[0].empty and detail[1].empty and detail[2].empty:
+        return detail
+    st.session_state[detail_key] = detail
+    return detail
+
+
+def _mark_pcs_deviation_benchmark_customized() -> None:
+    st.session_state["pcs_deviation_benchmark_customized"] = True
+
+
+def _pcs_deviation_segment_level_session_value(preset: str | None) -> str:
+    from pcs_deviation_analysis import ELEMENT_RANKING_LEVEL_FILTER_ALL
+
+    return preset or ELEMENT_RANKING_LEVEL_FILTER_ALL
+
+
+def _sync_pcs_deviation_benchmark_pool(
+    start_season: str,
+    end_season: str,
+    scope_label: str,
+    segment_level_preset: str | None,
+) -> None:
+    seg_session = _pcs_deviation_segment_level_session_value(segment_level_preset)
+    main_key = (start_season, end_season, scope_label, seg_session)
+    prev_main = st.session_state.get("pcs_deviation_ranking_filters_for_benchmark")
+    customized = st.session_state.get("pcs_deviation_benchmark_customized", False)
+
+    if prev_main != main_key and (prev_main is None or not customized):
+        st.session_state["pcs_deviation_benchmark_start_season"] = start_season
+        st.session_state["pcs_deviation_benchmark_end_season"] = end_season
+        st.session_state["pcs_deviation_benchmark_competition_scope"] = scope_label
+        st.session_state["pcs_deviation_benchmark_segment_levels"] = seg_session
+
+    st.session_state["pcs_deviation_ranking_filters_for_benchmark"] = main_key
+
+
+def pcs_deviation_analysis_page():
+    """PCS marking scores vs panel-median control (sigma-normalized)."""
+    from pcs_deviation_analysis import (
+        ELEMENT_RANKING_LEVEL_FILTER_ALL,
+        ELEMENT_RANKING_LEVEL_FILTER_LABELS,
+        MIN_PCS_DEVIATION_EVENT_DATE,
+        PCS_DEVIATION_COMPETITION_SCOPE_LABELS,
+        apply_min_marks_to_pcs_deviation_result,
+        compute_pcs_deviation_rankings_from_run_params,
+        filter_pcs_deviation_season_years,
+        pcs_deviation_competition_scope_key,
+        pcs_deviation_discipline_types,
+        run_params_same_sigma_and_ranking_scope,
+        unpack_pcs_deviation_run_params,
+        uses_separate_benchmark_pool,
+        validate_pcs_deviation_scope,
+    )
+
+    st.header("PCS Deviation Analysis")
+    st.caption(
+        "Ranks judges by how closely their PCS marks track a **panel control score** "
+        "(median PCS per skater × component), after normalizing spread by discipline, "
+        "PCS component, and panel-median score range (0.25–1, 1.25–2, etc.). "
+        "**Lower marking score = closer to the model**. "
+        f"Only competitions on or after **{MIN_PCS_DEVIATION_EVENT_DATE.isoformat()}**; "
+        "disciplines limited to Singles, Pairs, Ice Dance, and Synchronized. "
+        "Warm shards with ``scripts/precompute_pcs_deviation_cache.py`` "
+        "(add ``--sigma-benchmark --summaries`` for cache-only loads without loading all marks)."
+    )
+
+    with st.expander("Methodology", expanded=False):
+        st.markdown(
+            """
+**1. Data** — PCS marks from competitions on or after **2022-07-01**.
+Judges linked to the same directory official are merged (same identity groups as
+other judge reports).
+
+**2. Control score** — For each skater × PCS component, the panel **median** PCS.
+**Error** = judge PCS − control score.
+
+**3. Intrinsic spread σ̂** — For each *(discipline, PCS component, panel-median
+range)* with at least ``min_bin_count`` marks, estimate σ̂ as the sample standard
+deviation of errors in that bin. Ranges are width 1 (0.25–1, 1.25–2, 2.25–3, …).
+If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global fallback σ.
+
+**4. Normalized mark** — ``m = error / σ̂`` (per mark).
+
+**5. Marking score** — Per judge identity: ``M = √(mean(m²))``. Ranked ascending.
+            """
+        )
+
+    analytics = get_analytics_safe()
+
+    st.subheader("Filters")
+    scope_label = st.selectbox(
+        "Competition scope",
+        list(PCS_DEVIATION_COMPETITION_SCOPE_LABELS),
+        index=0,
+        key="pcs_deviation_competition_scope",
+        help="Filters competitions via linked officials competition type (NQS-only excluded).",
+    )
+    scope_key = pcs_deviation_competition_scope_key(scope_label)
+
+    years = filter_pcs_deviation_season_years(analytics.get_years())
+    if not years:
+        st.error("No competition seasons found in the database.")
+        return
+    start_season_year = None
+    end_season_year = None
+    event_start_iso = None
+    event_end_iso = None
+
+    col_y1, col_y2 = st.columns(2)
+    with col_y1:
+        start_season = st.selectbox(
+            "Season year from",
+            ["Any"] + years,
+            key="pcs_deviation_start_season",
+        )
+        start_season_year = None if start_season == "Any" else start_season
+    with col_y2:
+        end_season = st.selectbox(
+            "Season year to",
+            ["Any"] + years,
+            key="pcs_deviation_end_season",
+        )
+        end_season_year = None if end_season == "Any" else end_season
+
+    st.caption(
+        f"PCS marks are limited to competitions on or after "
+        f"**{MIN_PCS_DEVIATION_EVENT_DATE.isoformat()}**."
+    )
+    use_event_dates = st.checkbox(
+        "Narrow by competition event dates",
+        key="pcs_deviation_use_event_dates",
+        help=(
+            "Further restrict rankings by event date (not applied to the σ̂ benchmark pool). "
+            "Events with neither date are excluded."
+        ),
+    )
+    if use_event_dates:
+        date_min, date_max = analytics.get_competition_event_date_bounds(
+            competition_scope=scope_key,
+        )
+        date_min = max(date_min, MIN_PCS_DEVIATION_EVENT_DATE)
+        date_max = max(date_max, date_min)
+        default_start = max(date_min, MIN_PCS_DEVIATION_EVENT_DATE)
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            event_start = st.date_input(
+                "Event on or after",
+                value=default_start,
+                min_value=MIN_PCS_DEVIATION_EVENT_DATE,
+                max_value=date_max,
+                key="pcs_deviation_start_date",
+            )
+        with dc2:
+            event_end = st.date_input(
+                "Event on or before",
+                value=date_max,
+                min_value=MIN_PCS_DEVIATION_EVENT_DATE,
+                max_value=date_max,
+                key="pcs_deviation_end_date",
+            )
+        if event_start > event_end:
+            st.warning("Start date is after end date; results may be empty.")
+        event_start_iso = event_start.isoformat()
+        event_end_iso = event_end.isoformat()
+
+    col_d, col_levels, col_cache = st.columns([2, 1, 1])
+    with col_d:
+        discipline_types = pcs_deviation_discipline_types(analytics, scope_key)
+        discipline_names = [name for _id, name in discipline_types]
+        if "pcs_deviation_disciplines" not in st.session_state:
+            st.session_state["pcs_deviation_disciplines"] = discipline_names
+        selected_disciplines = st.multiselect(
+            "Discipline types",
+            discipline_names,
+            key="pcs_deviation_disciplines",
+        )
+        discipline_ids = (
+            [dt_id for dt_id, name in discipline_types if name in selected_disciplines]
+            if selected_disciplines
+            else None
+        )
+    with col_levels:
+        segment_level_preset = st.selectbox(
+            "Segment levels",
+            list(ELEMENT_RANKING_LEVEL_FILTER_LABELS),
+            format_func=lambda key: ELEMENT_RANKING_LEVEL_FILTER_LABELS[key],
+            key="pcs_deviation_segment_levels",
+            help="Restrict PCS marks by ``segment.level`` (Novice / Junior / Senior presets).",
+        )
+        if segment_level_preset == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+            segment_level_preset = None
+    with col_cache:
+        use_precomputed_cache = st.checkbox(
+            "Use precomputed cache",
+            value=True,
+            key="pcs_deviation_use_cache",
+            help=(
+                "Load cached season×discipline shards and assemble "
+                "(missing shards are computed)."
+            ),
+        )
+
+    _sync_pcs_deviation_benchmark_pool(
+        start_season, end_season, scope_label, segment_level_preset
+    )
+
+    benchmark_start_season_year = None
+    benchmark_end_season_year = None
+    benchmark_scope_key = COMPETITION_SCOPE_ALL
+    benchmark_segment_level_preset = None
+    with st.expander("σ̂ benchmark pool", expanded=False):
+        st.caption(
+            "Seasons, competition scope, and segment levels used only to fit "
+            "intrinsic spread (σ̂). Defaults to the same values as the ranking "
+            "filters above. Event dates apply to rankings only, not to this pool."
+        )
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            bench_start_pick = st.selectbox(
+                "Season year from",
+                ["Any"] + years,
+                key="pcs_deviation_benchmark_start_season",
+                on_change=_mark_pcs_deviation_benchmark_customized,
+            )
+            benchmark_start_season_year = (
+                None if bench_start_pick == "Any" else bench_start_pick
+            )
+        with bc2:
+            bench_end_pick = st.selectbox(
+                "Season year to",
+                ["Any"] + years,
+                key="pcs_deviation_benchmark_end_season",
+                on_change=_mark_pcs_deviation_benchmark_customized,
+            )
+            benchmark_end_season_year = (
+                None if bench_end_pick == "Any" else bench_end_pick
+            )
+        bench_scope_label = st.selectbox(
+            "Competition scope",
+            list(PCS_DEVIATION_COMPETITION_SCOPE_LABELS),
+            key="pcs_deviation_benchmark_competition_scope",
+            on_change=_mark_pcs_deviation_benchmark_customized,
+        )
+        benchmark_scope_key = pcs_deviation_competition_scope_key(bench_scope_label)
+        bench_segment_level_pick = st.selectbox(
+            "Segment levels",
+            list(ELEMENT_RANKING_LEVEL_FILTER_LABELS),
+            format_func=lambda key: ELEMENT_RANKING_LEVEL_FILTER_LABELS[key],
+            key="pcs_deviation_benchmark_segment_levels",
+            on_change=_mark_pcs_deviation_benchmark_customized,
+        )
+        if bench_segment_level_pick == ELEMENT_RANKING_LEVEL_FILTER_ALL:
+            benchmark_segment_level_preset = None
+        else:
+            benchmark_segment_level_preset = bench_segment_level_pick
+
+    st.subheader("Model parameters")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        if "pcs_deviation_min_marks" not in st.session_state:
+            st.session_state["pcs_deviation_min_marks"] = 0
+        min_marks = st.number_input(
+            "Minimum PCS marks per judge",
+            min_value=0,
+            step=50,
+            key="pcs_deviation_min_marks",
+            help="Exclude identities with fewer marks after filters.",
+        )
+    with p2:
+        floor_sigma = st.number_input(
+            "Floor σ̂",
+            min_value=0.01,
+            max_value=1.0,
+            value=float(_PCS_DEVIATION_FLOOR_SIGMA),
+            step=0.01,
+            format="%.2f",
+            key="pcs_deviation_floor_sigma",
+        )
+    with p3:
+        min_bin_count = st.number_input(
+            "Min marks per σ̂ bin",
+            min_value=5,
+            max_value=200,
+            value=int(_PCS_DEVIATION_MIN_BIN_COUNT),
+            step=5,
+            key="pcs_deviation_min_bin_count",
+            help="(discipline, component, panel-median range) buckets with fewer marks are skipped.",
+        )
+
+    us_officials_only = st.checkbox(
+        "US directory officials only",
+        key="pcs_deviation_us_officials_only",
+        help="Show rankings only for judges linked to a USFS official.",
+    )
+
+    disc_tuple = tuple(discipline_ids) if discipline_ids else None
+    run_params = (
+        start_season_year,
+        end_season_year,
+        disc_tuple,
+        scope_key,
+        event_start_iso,
+        event_end_iso,
+        int(min_marks),
+        float(floor_sigma),
+        int(min_bin_count),
+        benchmark_start_season_year,
+        benchmark_end_season_year,
+        benchmark_scope_key,
+        segment_level_preset,
+        benchmark_segment_level_preset,
+    )
+
+    scope_err = validate_pcs_deviation_scope(
+        start_season_year,
+        end_season_year,
+        available_years=years,
+    )
+    if scope_err:
+        st.error(scope_err)
+
+    run_clicked = st.button(
+        "Run analysis",
+        type="primary",
+        key="pcs_deviation_run_btn",
+        disabled=bool(scope_err),
+    )
+
+    if run_clicked and not scope_err:
+        st.session_state.pcs_deviation_run_params = run_params
+        st.session_state.pop("pcs_deviation_result", None)
+        st.session_state.pop("pcs_deviation_cache_saved", None)
+        st.session_state.pop("pcs_deviation_cache_error", None)
+        _clear_pcs_deviation_judge_detail_cache()
+        if use_precomputed_cache:
+            from pcs_deviation_cache import load_cached_pcs_deviation_rankings
+
+            cached = run_with_isolated_analytics(
+                lambda cache_analytics, rp: load_cached_pcs_deviation_rankings(
+                    cache_analytics.session, cache_analytics, rp
+                ),
+                run_params,
+            )
+            if cached is not None:
+                st.session_state.pcs_deviation_result = cached
+                st.session_state.pcs_deviation_cache_saved = True
+                st.success("Loaded precomputed cache for this filter set.")
+                st.rerun()
+        with st.spinner("Computing PCS deviation rankings…"):
+            result = run_with_isolated_analytics(
+                compute_pcs_deviation_rankings_from_run_params,
+                run_params,
+            )
+        st.session_state.pcs_deviation_result = result
+        from pcs_deviation_cache import try_save_pcs_deviation_cache
+
+        ok, err = run_with_isolated_analytics(
+            lambda cache_analytics, rp, ranking_result: try_save_pcs_deviation_cache(
+                cache_analytics.session,
+                cache_analytics,
+                rp,
+                ranking_result,
+            ),
+            run_params,
+            result,
+        )
+        if ok:
+            st.session_state.pcs_deviation_cache_saved = True
+            st.session_state.pop("pcs_deviation_cache_error", None)
+        elif err:
+            st.session_state.pcs_deviation_cache_error = err
+        st.rerun()
+
+    stored_params = st.session_state.get("pcs_deviation_run_params")
+    base_result = st.session_state.get("pcs_deviation_result")
+    if base_result is None:
+        st.info(
+            "Set filters and click **Run analysis**. "
+            "Rankings are not computed automatically."
+        )
+        return
+
+    compute_match = (
+        stored_params is not None
+        and run_params_same_sigma_and_ranking_scope(stored_params, run_params)
+    )
+    if not compute_match:
+        st.warning(
+            "Filters or model parameters changed since the last run. "
+            "Click **Run analysis** to refresh results."
+        )
+        return
+
+    result = apply_min_marks_to_pcs_deviation_result(base_result, int(min_marks))
+
+    if us_officials_only:
+        from judge_official_display_filter import (
+            apply_us_officials_display_filter_to_ranking_result,
+        )
+
+        n_before_us = len(result.get("marking", pd.DataFrame()))
+        result = apply_us_officials_display_filter_to_ranking_result(
+            result, us_linked_identity_labels_for_ui()
+        )
+        n_after_us = len(result.get("marking", pd.DataFrame()))
+        if n_before_us and n_after_us < n_before_us:
+            st.caption(
+                f"US officials display filter: **{n_after_us}** of {n_before_us} ranked "
+                "identities are linked to the USFS directory."
+            )
+
+    if result.get("error"):
+        st.warning(result["error"])
+        return
+
+    cache_err = st.session_state.get("pcs_deviation_cache_error")
+    if cache_err:
+        st.warning(
+            "Rankings completed but could not be saved for reuse: "
+            f"{cache_err}"
+        )
+    elif st.session_state.get("pcs_deviation_cache_saved"):
+        st.caption("Results loaded from or saved to cache for this filter set.")
+
+    st.subheader("Run summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("PCS marks (filtered)", f"{result['n_raw_marks']:,}")
+    m2.metric("σ̂ bins fitted", f"{result['n_sigma_buckets']:,}")
+    m3.metric("Judges ranked", len(result["marking"]))
+    m4.metric("Floor σ̂", f"{floor_sigma:.2f}")
+
+    if uses_separate_benchmark_pool(run_params):
+        from pcs_deviation_analysis import PCS_DEVIATION_SCOPE_LABEL_TO_KEY
+
+        rp = unpack_pcs_deviation_run_params(run_params)
+        bench_start, bench_end = rp[9], rp[10]
+        scope_labels = {v: k for k, v in PCS_DEVIATION_SCOPE_LABEL_TO_KEY.items()}
+        bench_scope_label = scope_labels.get(benchmark_scope_key, benchmark_scope_key)
+        rank_scope_label = scope_labels.get(scope_key, scope_key)
+
+        def _level_label(preset: str | None) -> str:
+            return ELEMENT_RANKING_LEVEL_FILTER_LABELS.get(
+                preset or ELEMENT_RANKING_LEVEL_FILTER_ALL, "All"
+            )
+
+        st.caption(
+            f"σ̂ benchmark pool: seasons **{bench_start or 'Any'}**–**{bench_end or 'Any'}**, "
+            f"scope **{bench_scope_label}**, levels **{_level_label(benchmark_segment_level_preset)}**. "
+            f"Rankings: seasons **{start_season_year or 'Any'}**–**{end_season_year or 'Any'}**, "
+            f"scope **{rank_scope_label}**, levels **{_level_label(segment_level_preset)}**"
+            + (
+                f", events **{event_start_iso}**–**{event_end_iso}**"
+                if event_start_iso and event_end_iso
+                else ""
+            )
+            + "."
+        )
+
+    if result["marking"].empty:
+        st.info("No judges remain after filters and minimum marks threshold.")
+        return
+
+    marking = result["marking"]
+
+    st.subheader("Distribution of marking scores")
+    if not result["summary"].empty:
+        st.dataframe(
+            result["summary"],
+            width="stretch",
+            hide_index=True,
+        )
+    fig = px.histogram(
+        marking,
+        x="Marking score",
+        nbins=min(40, max(10, len(marking) // 5)),
+        title="Marking scores across judges (lower = closer to control-score model)",
+    )
+    fig.update_layout(bargap=0.05)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Rankings")
+    st.caption(
+        "**Marking score** = √(mean(m²)) over PCS marks, with m = (PCS − panel median) / σ̂. "
+        "**Mean PCS bias** is the signed average raw PCS − panel median."
+    )
+    st.dataframe(
+        marking,
+        width="stretch",
+        hide_index=True,
+        column_config=_pcs_deviation_rankings_column_config(),
+    )
+    _streamlit_download(
+        "Download rankings CSV",
+        data=marking.to_csv(index=False).encode("utf-8"),
+        file_name="pcs_deviation_rankings.csv",
+        mime="text/csv",
+        key="pcs_deviation_rankings_download",
+    )
+
+    st.subheader("σ̂ parameters (by discipline, component, panel-median range)")
+    sigma_bins = result.get("sigma_bins", pd.DataFrame())
+    if sigma_bins.empty:
+        st.info("No σ̂ bins to display for the current filters.")
+    else:
+        st.dataframe(
+            sigma_bins,
+            width="stretch",
+            hide_index=True,
+            column_config=_pcs_deviation_sigma_bins_column_config(),
+        )
+        _streamlit_download(
+            "Download σ̂ parameters CSV",
+            data=sigma_bins.to_csv(index=False).encode("utf-8"),
+            file_name="pcs_sigma_parameters.csv",
+            mime="text/csv",
+            key="pcs_deviation_sigma_download",
+        )
+
+    judge_names = marking["Judge"].tolist() if "Judge" in marking.columns else []
+    if judge_names:
+        st.subheader("How a judge’s score breaks down")
+        pick_judge = st.selectbox(
+            "Select judge",
+            judge_names,
+            key="pcs_deviation_detail_judge",
+        )
+        jd = result.get("judge_discipline_detail", pd.DataFrame())
+        jc = result.get("judge_component_detail", pd.DataFrame())
+        jb = result.get("judge_control_bin_detail", pd.DataFrame())
+        if jd.empty or pick_judge not in set(jd.get("Judge", [])):
+            jd, jc, jb = _pcs_deviation_load_judge_breakdown(
+                result, run_params, pick_judge
+            )
+        else:
+            jd = jd.loc[jd["Judge"] == pick_judge] if not jd.empty else jd
+            jc = jc.loc[jc["Judge"] == pick_judge] if not jc.empty else jc
+            jb = jb.loc[jb["Judge"] == pick_judge] if not jb.empty else jb
+
+        detail_cfg = _pcs_deviation_judge_detail_column_config()
+        if jd.empty and jc.empty and jb.empty:
+            st.info(_pcs_deviation_breakdown_failure_hint(result, run_params, pick_judge))
+        else:
+            if not jd.empty:
+                st.markdown("**By discipline**")
+                st.dataframe(
+                    jd.sort_values("Partial marking score"),
+                    width="stretch",
+                    hide_index=True,
+                    column_config=detail_cfg,
+                )
+            if not jc.empty:
+                st.markdown("**By discipline and component**")
+                st.dataframe(
+                    jc.sort_values("Partial marking score", ascending=False),
+                    width="stretch",
+                    hide_index=True,
+                    column_config=detail_cfg,
+                )
+            if not jb.empty:
+                st.markdown("**By panel-median range** (discipline × component × range)")
+                st.caption(
+                    "Each row is one σ̂ bin. Partial score is √(mean(m²)) using "
+                    "normalized marks m = (PCS − panel median) / σ̂."
+                )
+                judge_filter_key = pick_judge.replace(" ", "_")[:48]
+                chart_series_options = _pcs_deviation_chart_series_options(
+                    jc if not jc.empty else jb
+                )
+                chart_c1, chart_c2 = st.columns([3, 1])
+                with chart_c1:
+                    chart_series = st.multiselect(
+                        "Chart series (discipline × component)",
+                        chart_series_options,
+                        default=chart_series_options,
+                        key=f"pcs_deviation_chart_series_{judge_filter_key}",
+                        help=(
+                            "Each line plots the selected Y metric vs panel-median PCS range. "
+                            "Defaults to all components in the breakdown."
+                        ),
+                    )
+                with chart_c2:
+                    chart_y_metric = st.selectbox(
+                        "Chart Y axis",
+                        options=[
+                            _PCS_DEVIATION_CHART_Y_PARTIAL,
+                            _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR,
+                        ],
+                        format_func=lambda k: {
+                            _PCS_DEVIATION_CHART_Y_PARTIAL: "Partial marking score",
+                            _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR: "Mean |error|",
+                        }[k],
+                        key=f"pcs_deviation_chart_y_{judge_filter_key}",
+                        help=(
+                            "Partial marking score uses σ̂-normalized marks; "
+                            "Mean |error| is average |PCS − panel median| in raw PCS units."
+                        ),
+                    )
+                pcs_fig = _pcs_deviation_control_bin_chart(
+                    jb,
+                    jc if not jc.empty else jb,
+                    min_bin_marks=0,
+                    series_keys=chart_series or None,
+                    y_metric=chart_y_metric,
+                )
+                if pcs_fig is not None:
+                    st.plotly_chart(pcs_fig, width="stretch")
+                elif chart_series:
+                    st.caption(
+                        "No chart: selected series have no rows under the current filters."
+                    )
+                st.dataframe(
+                    jb.sort_values("Partial marking score", ascending=False),
+                    width="stretch",
+                    hide_index=True,
+                    column_config=detail_cfg,
+                )
+
+
 def temporal_trend_analysis():
     """Temporal Trend Analysis for Judge Consistency"""
     st.header("Temporal Trend Analysis")
@@ -4977,6 +5908,9 @@ elif page == "Cross-Judge Benchmarking":
 
 elif page == "PCS Quality Analysis":
     pcs_quality_analysis_page()
+
+elif page == "PCS Deviation Analysis":
+    pcs_deviation_analysis_page()
 
 elif page == "Element Deviation Ranking Analysis":
     element_deviation_ranking_page()

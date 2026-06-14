@@ -76,6 +76,8 @@ from activityAnalysis.international_major_events import (
     major_event_matrix_legend,
     style_major_event_matrix_display,
 )
+from activityAnalysis.isu_major_event_classification import is_synchro_major_event
+from activityAnalysis.load_activity_data import DISC_SYNCHRO_ID
 from activityAnalysis.international_officials_detail import (
     INTL_VIEW_DETAIL,
     INTL_VIEW_MAJOR_EVENTS,
@@ -818,7 +820,8 @@ if view_mode == INTL_VIEW_MAJOR_EVENTS:
     st.title("Major ISU Events Activity")
     st.caption(
         "Calendar-year matrix of panel service at ISU Championship-tier events "
-        "(Worlds, Olympics, Junior Worlds, Four Continents, Europeans) and the Grand Prix Final."
+        "(Worlds, Olympics, Junior Worlds, Four Continents, Europeans, synchronized "
+        "World Championships) and the Grand Prix Final."
     )
 
     appt_df = _load_appointment_type_options()
@@ -865,10 +868,18 @@ if view_mode == INTL_VIEW_MAJOR_EVENTS:
     major_idvo_only = major_appt_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID
     if major_idvo_only and st.session_state.get("intl_major_event_disc") != _ALL_LABEL:
         st.session_state["intl_major_event_disc"] = _ALL_LABEL
+    if is_synchro_major_event(event_key):
+        cur_disc = st.session_state.get("intl_major_event_disc")
+        if cur_disc not in (_ALL_LABEL, DISC_SYNCHRO_ID):
+            st.session_state["intl_major_event_disc"] = _ALL_LABEL
 
     disc_df = _load_discipline_options(
         major_appt_id, DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP, active_only
     )
+    if is_synchro_major_event(event_key) and not disc_df.empty:
+        disc_df = disc_df.loc[
+            disc_df["discipline_id"].astype(int) == DISC_SYNCHRO_ID
+        ].reset_index(drop=True)
     disc_options = [_ALL_LABEL]
     disc_labels = {_ALL_LABEL: _ALL_LABEL}
     if not major_idvo_only and not disc_df.empty:

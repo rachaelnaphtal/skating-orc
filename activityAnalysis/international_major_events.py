@@ -24,6 +24,8 @@ try:
         MAJOR_ISU_EVENT_LABELS,
         classify_isu_major_event,
         competition_matches_major_event,
+        is_synchro_major_event,
+        major_event_from_results_url,
         year_from_competition_name,
     )
     from activityAnalysis.international_officials_data import (
@@ -38,6 +40,7 @@ try:
         DISC_DANCE_ID,
         DISC_PAIRS_ID,
         DISC_SINGLES_PAIRS_ID,
+        DISC_SYNCHRO_ID,
         SINGLES_DISCIPLINE_ID,
         activity_database_is_postgresql,
         build_activity_matrix,
@@ -54,6 +57,8 @@ except ModuleNotFoundError:
         MAJOR_ISU_EVENT_LABELS,
         classify_isu_major_event,
         competition_matches_major_event,
+        is_synchro_major_event,
+        major_event_from_results_url,
         year_from_competition_name,
     )
     from international_officials_data import (
@@ -68,6 +73,7 @@ except ModuleNotFoundError:
         DISC_DANCE_ID,
         DISC_PAIRS_ID,
         DISC_SINGLES_PAIRS_ID,
+        DISC_SYNCHRO_ID,
         SINGLES_DISCIPLINE_ID,
         activity_database_is_postgresql,
         build_activity_matrix,
@@ -86,6 +92,11 @@ SPD_DIRECTORY_DISCIPLINE_IDS: tuple[int, ...] = (
     DISC_SINGLES_PAIRS_ID,
 )
 
+SYNCHRO_DIRECTORY_DISCIPLINE_IDS: tuple[int, ...] = (DISC_SYNCHRO_ID,)
+
+# ``public.discipline_type.id`` for synchronized skating segments.
+SYNCHRO_SEGMENT_DISCIPLINE_TYPE_ID = 5
+
 # ``segment_official.appointment_type_id`` → short role code for matrix cells.
 NATIONAL_PANEL_ROLE_ABBREV: dict[int, str] = {
     1: "J",
@@ -95,15 +106,16 @@ NATIONAL_PANEL_ROLE_ABBREV: dict[int, str] = {
     11: "TC",
 }
 
-# ``segment.discipline_type_id`` (Singles / Pairs / Ice Dance).
+# ``segment.discipline_type_id`` (Singles / Pairs / Ice Dance / Synchronized).
 SEGMENT_DISCIPLINE_ABBREV: dict[int, str] = {
     1: "S",
     2: "P",
     3: "D",
+    5: "SYS",
 }
 
 _ROLE_SORT_ORDER = {"J": 0, "R": 1, "TC": 2, "TS": 3, "DO": 4}
-_DISC_SORT_ORDER = {"S": 0, "P": 1, "D": 2}
+_DISC_SORT_ORDER = {"S": 0, "P": 1, "D": 2, "SYS": 3}
 
 _MAJOR_EVENT_ACTIVITY_COLUMNS = [
     "official_id",
@@ -137,6 +149,7 @@ def competition_calendar_year(
     end_date: Any,
     competition_year: Any,
     competition_name: str = "",
+    results_url: str = "",
 ) -> int | None:
     """Best-effort calendar year for matrix columns."""
     for val in (start_date, end_date):
@@ -151,7 +164,10 @@ def competition_calendar_year(
             return int(parsed.year)
 
     title_year = year_from_competition_name(competition_name)
-    if title_year is not None and classify_isu_major_event(competition_name):
+    if title_year is not None and (
+        classify_isu_major_event(competition_name)
+        or major_event_from_results_url(results_url)
+    ):
         return title_year
 
     from_stored = _calendar_year_from_stored_season(competition_year)
@@ -227,10 +243,13 @@ def _resolve_directory_discipline_ids(
     discipline_id: int | None,
     *,
     appointment_type_id: int | None = None,
+    event_key: str | None = None,
 ) -> list[int] | None:
     if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
         return None
     if discipline_id is None:
+        if event_key is not None and is_synchro_major_event(event_key):
+            return list(SYNCHRO_DIRECTORY_DISCIPLINE_IDS)
         return list(SPD_DIRECTORY_DISCIPLINE_IDS)
     return [int(discipline_id)]
 
@@ -240,20 +259,27 @@ def _isu_major_event_official_scope(
     *,
     appointment_type_id: int | None,
     discipline_id: int | None,
+    event_key: str | None = None,
 ) -> None:
-    """Narrow directory rows to ISU SPD and/or IDVO appointments for the matrix."""
+    """Narrow directory rows to ISU SPD/Synchro and/or IDVO appointments for the matrix."""
+    synchro_event = event_key is not None and is_synchro_major_event(event_key)
+    directory_disc_ids = (
+        SYNCHRO_DIRECTORY_DISCIPLINE_IDS
+        if synchro_event
+        else SPD_DIRECTORY_DISCIPLINE_IDS
+    )
     if appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
         return
     if appointment_type_id is not None:
         if discipline_id is None:
-            where_parts.append(Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)))
+            where_parts.append(Appointments.discipline_id.in_(list(directory_disc_ids)))
         return
     if discipline_id is not None:
         return
     where_parts.append(
         or_(
             Appointments.appointment_type_id == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID,
-            Appointments.discipline_id.in_(list(SPD_DIRECTORY_DISCIPLINE_IDS)),
+            Appointments.discipline_id.in_(list(directory_disc_ids)),
         )
     )
 
@@ -401,13 +427,14 @@ def style_major_event_matrix_display(
 
 def get_isu_spd_qualified_officials(
     *,
+    event_key: str,
     appointment_type_id: int | None = None,
     discipline_id: int | None = None,
     isu_level_id: int,
     active_appointments_only: bool = True,
 ) -> pd.DataFrame:
     """
-    Officials with active ISU-level international appointments in SPD and/or IDVO.
+    Officials with active ISU-level international appointments in SPD/Synchro and/or IDVO.
 
     Returns one row per official even when they hold multiple matching appointments.
     """
@@ -421,6 +448,7 @@ def get_isu_spd_qualified_officials(
         where_parts,
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
+        event_key=event_key,
     )
 
     with Session(engine) as session:
@@ -446,7 +474,9 @@ def _segment_discipline_filter_sql(
     *,
     appointment_type_id: int | None,
     discipline_id: int | None,
+    event_key: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    synchro_event = event_key is not None and is_synchro_major_event(event_key)
     if appointment_type_id is not None and discipline_id is None:
         if int(appointment_type_id) == INTERNATIONAL_DATA_OPERATOR_APPOINTMENT_TYPE_ID:
             return (
@@ -472,6 +502,15 @@ def _segment_discipline_filter_sql(
         return (
             " AND s.discipline_type_id IN :segment_discipline_type_ids",
             {"segment_discipline_type_ids": list(seg_ids)},
+        )
+    if synchro_event:
+        return (
+            " AND s.discipline_type_id IN :synchro_segment_discipline_type_ids",
+            {
+                "synchro_segment_discipline_type_ids": [
+                    SYNCHRO_SEGMENT_DISCIPLINE_TYPE_ID
+                ]
+            },
         )
     return (
         " AND s.discipline_type_id IN :spd_segment_discipline_type_ids",
@@ -506,6 +545,7 @@ def _query_major_event_assignment_rows(
     disc_sql, disc_params = _segment_discipline_filter_sql(
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
+        event_key=event_key,
     )
     comp_type_ids = sorted(OFFICIALS_COMPETITION_TYPE_IDS_ISU_EVENT)
     official_sql = " AND so.official_id IN :official_ids" if ids is not None else ""
@@ -522,6 +562,7 @@ def _query_major_event_assignment_rows(
             SELECT DISTINCT
                 so.official_id,
                 c.name AS competition_name,
+                c.results_url,
                 c.start_date,
                 c.end_date,
                 c.year AS competition_year,
@@ -559,6 +600,8 @@ def _query_major_event_assignment_rows(
         stmt = stmt.bindparams(bindparam("spd_segment_discipline_type_ids", expanding=True))
     if "idvo_segment_discipline_type_ids" in disc_params:
         stmt = stmt.bindparams(bindparam("idvo_segment_discipline_type_ids", expanding=True))
+    if "synchro_segment_discipline_type_ids" in disc_params:
+        stmt = stmt.bindparams(bindparam("synchro_segment_discipline_type_ids", expanding=True))
 
     try:
         with Session(engine) as session:
@@ -571,8 +614,13 @@ def _query_major_event_assignment_rows(
 
     df = pd.DataFrame(rows)
     df = df.loc[
-        df["competition_name"].apply(
-            lambda n: competition_matches_major_event(str(n or ""), event_key)
+        df.apply(
+            lambda r: competition_matches_major_event(
+                str(r.get("competition_name") or ""),
+                event_key,
+                results_url=str(r.get("results_url") or ""),
+            ),
+            axis=1,
         )
     ]
     if df.empty:
@@ -584,6 +632,7 @@ def _query_major_event_assignment_rows(
             end_date=r.get("end_date"),
             competition_year=r.get("competition_year"),
             competition_name=str(r.get("competition_name") or ""),
+            results_url=str(r.get("results_url") or ""),
         ),
         axis=1,
     )
@@ -662,6 +711,7 @@ def get_international_major_event_matrix(
 ) -> pd.DataFrame:
     """Activity matrix: ISU-appointed SPD officials × calendar years at ``event_key``."""
     qualified = get_isu_spd_qualified_officials(
+        event_key=event_key,
         appointment_type_id=appointment_type_id,
         discipline_id=discipline_id,
         isu_level_id=isu_level_id,
@@ -748,7 +798,8 @@ def major_event_matrix_legend() -> str:
     return (
         "J = Judge, R = Referee, TC = Technical Controller, TS = Technical Specialist, "
         "DO = International Data & Video Operator; "
-        "S = Singles, P = Pairs, D = Ice Dance (e.g. J-D = dance judge). "
+        "S = Singles, P = Pairs, D = Ice Dance, SYS = Synchronized "
+        "(e.g. J-D = dance judge). "
         "Gray year cells are on or before the official's earliest ISU appointment year. "
         "Years eligible is the current calendar year minus the year of their earliest "
         "ISU appointment matching the selected appointment type and discipline filters."

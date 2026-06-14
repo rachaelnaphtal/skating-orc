@@ -326,6 +326,7 @@ ANALYSIS_PAGE_SLUG_TO_LABEL = {
     "load-competition": "Load Competition",
     "element-deviation-ranking": "Element Deviation Ranking Analysis",
     "pcs-quality": "PCS Quality Analysis",
+    "pcs-deviation": "PCS Deviation Analysis",
 }
 ANALYSIS_LABEL_TO_PAGE_SLUG = {
     v: k for k, v in ANALYSIS_PAGE_SLUG_TO_LABEL.items()
@@ -341,6 +342,15 @@ COMPETITION_SCOPE_SLUG_TO_LABEL = {
 }
 COMPETITION_SCOPE_LABEL_TO_SLUG = {
     v: k for k, v in COMPETITION_SCOPE_SLUG_TO_LABEL.items()
+}
+
+PCS_DEVIATION_SCOPE_SLUG_TO_LABEL = {
+    k: v
+    for k, v in COMPETITION_SCOPE_SLUG_TO_LABEL.items()
+    if k != "nqs"
+}
+PCS_DEVIATION_SCOPE_LABEL_TO_SLUG = {
+    v: k for k, v in PCS_DEVIATION_SCOPE_SLUG_TO_LABEL.items()
 }
 
 # Mirrors analysis_app ``_COMPETITION_SCOPE_LABEL_TO_KEY`` (scope label → analytics key).
@@ -454,6 +464,7 @@ def _scope_session_key_for_page(page: str) -> str | None:
         "Panel size benchmarks": "panel_benchmarks_scope",
         "Element Deviation Ranking Analysis": "element_ranking_competition_scope",
         "PCS Quality Analysis": "pcs_quality_competition_scope",
+        "PCS Deviation Analysis": "pcs_deviation_competition_scope",
     }.get(page)
 
 
@@ -461,6 +472,7 @@ _ANALYTICS_URL_FILTER_PAGES = frozenset(
     {
         "Individual Judge Analysis",
         "PCS Quality Analysis",
+        "PCS Deviation Analysis",
         "Element Deviation Ranking Analysis",
         "Cross-Judge Benchmarking",
         "Temporal Trend Analysis",
@@ -541,6 +553,103 @@ def _apply_analysis_page_url_filters(page: str, analytics) -> None:
                 elif disc_names:
                     st.session_state["pcs_quality_disciplines"] = [disc_names[0]]
         apply_bool_param("us_officials_only", "pcs_quality_us_officials_only")
+
+    elif page == "PCS Deviation Analysis":
+        apply_choice_param(
+            "competition_scope",
+            "pcs_deviation_competition_scope",
+            PCS_DEVIATION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=PCS_DEVIATION_SCOPE_SLUG_TO_LABEL,
+        )
+        start_sy = qp_get("start_season")
+        end_sy = qp_get("end_season")
+        if start_sy:
+            import streamlit as st
+
+            st.session_state["pcs_deviation_start_season"] = start_sy
+        if end_sy:
+            import streamlit as st
+
+            st.session_state["pcs_deviation_end_season"] = end_sy
+        scope_label = st.session_state.get(
+            "pcs_deviation_competition_scope", "All competitions"
+        )
+        from pcs_deviation_analysis import (
+            pcs_deviation_competition_scope_key,
+            pcs_deviation_discipline_names_for_scope,
+        )
+
+        scope_key = pcs_deviation_competition_scope_key(scope_label)
+        apply_multiselect_param(
+            "disciplines",
+            "pcs_deviation_disciplines",
+            pcs_deviation_discipline_names_for_scope(analytics, scope_key),
+        )
+        if _apply_date_param("start_date", "pcs_deviation_start_date") or _apply_date_param(
+            "end_date", "pcs_deviation_end_date"
+        ):
+            import streamlit as st
+
+            st.session_state["pcs_deviation_use_event_dates"] = True
+        min_m = qp_get("min_marks")
+        if min_m:
+            try:
+                import streamlit as st
+
+                st.session_state["pcs_deviation_min_marks"] = int(min_m)
+            except ValueError:
+                pass
+        apply_bool_param("us_officials_only", "pcs_deviation_us_officials_only")
+        apply_choice_param(
+            "segment_levels",
+            "pcs_deviation_segment_levels",
+            tuple(_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET.values()),
+            slug_map=_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET,
+        )
+        apply_float_param(
+            "floor_sigma",
+            "pcs_deviation_floor_sigma",
+            min_value=0.01,
+            max_value=1.0,
+        )
+        apply_int_param(
+            "min_bin_count",
+            "pcs_deviation_min_bin_count",
+            min_value=5,
+            max_value=200,
+        )
+        bench_start = qp_get("bench_start_season")
+        bench_end = qp_get("bench_end_season")
+        if bench_start or bench_end:
+            import streamlit as st
+
+            if bench_start:
+                st.session_state["pcs_deviation_benchmark_start_season"] = (
+                    "Any" if bench_start.lower() == "any" else bench_start
+                )
+            if bench_end:
+                st.session_state["pcs_deviation_benchmark_end_season"] = (
+                    "Any" if bench_end.lower() == "any" else bench_end
+                )
+            st.session_state["pcs_deviation_benchmark_customized"] = True
+        if apply_choice_param(
+            "bench_competition_scope",
+            "pcs_deviation_benchmark_competition_scope",
+            PCS_DEVIATION_SCOPE_SLUG_TO_LABEL.values(),
+            slug_map=PCS_DEVIATION_SCOPE_SLUG_TO_LABEL,
+        ):
+            import streamlit as st
+
+            st.session_state["pcs_deviation_benchmark_customized"] = True
+        if apply_choice_param(
+            "bench_segment_levels",
+            "pcs_deviation_benchmark_segment_levels",
+            tuple(_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET.values()),
+            slug_map=_ELEMENT_RANKING_SEGMENT_LEVEL_SLUG_TO_PRESET,
+        ):
+            import streamlit as st
+
+            st.session_state["pcs_deviation_benchmark_customized"] = True
 
     elif page == "Element Deviation Ranking Analysis":
         apply_choice_param(
@@ -773,6 +882,72 @@ def sync_analysis_app_query_params(page: str) -> None:
         params["disciplines"] = disc if disc else None
         if st.session_state.get("pcs_quality_us_officials_only"):
             params["us_officials_only"] = "1"
+
+    elif page == "PCS Deviation Analysis":
+        from pcs_deviation_analysis import FLOOR_SIGMA, MIN_BIN_COUNT
+
+        scope_ss = st.session_state.get("pcs_deviation_competition_scope")
+        if scope_ss:
+            params["competition_scope"] = PCS_DEVIATION_SCOPE_LABEL_TO_SLUG.get(scope_ss)
+        start_sy = st.session_state.get("pcs_deviation_start_season")
+        if start_sy and start_sy != "Any":
+            params["start_season"] = str(start_sy)
+        end_sy = st.session_state.get("pcs_deviation_end_season")
+        if end_sy and end_sy != "Any":
+            params["end_season"] = str(end_sy)
+        disc = st.session_state.get("pcs_deviation_disciplines")
+        params["disciplines"] = disc if disc else None
+        if st.session_state.get("pcs_deviation_use_event_dates"):
+            start = st.session_state.get("pcs_deviation_start_date")
+            end = st.session_state.get("pcs_deviation_end_date")
+            if start is not None:
+                params["start_date"] = start.isoformat()
+            if end is not None:
+                params["end_date"] = end.isoformat()
+        min_m = st.session_state.get("pcs_deviation_min_marks")
+        if min_m and int(min_m) > 0:
+            params["min_marks"] = int(min_m)
+        if st.session_state.get("pcs_deviation_us_officials_only"):
+            params["us_officials_only"] = "1"
+        seg = st.session_state.get("pcs_deviation_segment_levels", "all")
+        seg_slug = _ELEMENT_RANKING_SEGMENT_LEVEL_PRESET_TO_SLUG.get(seg, "all")
+        if seg_slug != "all":
+            params["segment_levels"] = seg_slug
+        floor_sigma = st.session_state.get("pcs_deviation_floor_sigma")
+        if floor_sigma is not None and float(floor_sigma) != float(FLOOR_SIGMA):
+            params["floor_sigma"] = f"{float(floor_sigma):.2f}"
+        min_bin = st.session_state.get("pcs_deviation_min_bin_count")
+        if min_bin is not None and int(min_bin) != int(MIN_BIN_COUNT):
+            params["min_bin_count"] = int(min_bin)
+        if st.session_state.get("pcs_deviation_benchmark_customized"):
+            bench_start = st.session_state.get("pcs_deviation_benchmark_start_season")
+            if bench_start:
+                params["bench_start_season"] = (
+                    "any" if bench_start == "Any" else str(bench_start)
+                )
+            bench_end = st.session_state.get("pcs_deviation_benchmark_end_season")
+            if bench_end:
+                params["bench_end_season"] = (
+                    "any" if bench_end == "Any" else str(bench_end)
+                )
+            bench_scope = st.session_state.get(
+                "pcs_deviation_benchmark_competition_scope"
+            )
+            rank_scope = st.session_state.get("pcs_deviation_competition_scope")
+            if bench_scope and bench_scope != rank_scope:
+                bench_slug = PCS_DEVIATION_SCOPE_LABEL_TO_SLUG.get(bench_scope)
+                if bench_slug:
+                    params["bench_competition_scope"] = bench_slug
+            bench_seg = st.session_state.get(
+                "pcs_deviation_benchmark_segment_levels", "all"
+            )
+            rank_seg = st.session_state.get("pcs_deviation_segment_levels", "all")
+            if bench_seg != rank_seg:
+                bench_seg_slug = _ELEMENT_RANKING_SEGMENT_LEVEL_PRESET_TO_SLUG.get(
+                    bench_seg, "all"
+                )
+                if bench_seg_slug != "all":
+                    params["bench_segment_levels"] = bench_seg_slug
 
     elif page == "Element Deviation Ranking Analysis":
         from element_deviation_ranking import FLOOR_SIGMA, MIN_BIN_COUNT

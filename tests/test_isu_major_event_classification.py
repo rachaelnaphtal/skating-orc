@@ -2,11 +2,14 @@ from activityAnalysis.isu_major_event_classification import (
     MAJOR_ISU_EVENT_EUROPEANS,
     MAJOR_ISU_EVENT_FOUR_CONTINENTS,
     MAJOR_ISU_EVENT_GRAND_PRIX_FINAL,
+    MAJOR_ISU_EVENT_JUNIOR_SYNCHRO_WORLDS,
     MAJOR_ISU_EVENT_JUNIOR_WORLDS,
     MAJOR_ISU_EVENT_OLYMPICS,
+    MAJOR_ISU_EVENT_SYNCHRO_WORLDS,
     MAJOR_ISU_EVENT_WORLDS,
     classify_isu_major_event,
     competition_matches_major_event,
+    major_event_from_results_url,
     year_from_competition_name,
 )
 
@@ -82,6 +85,63 @@ def test_synchro_worlds_not_classified_for_spd():
     assert (
         classify_isu_major_event("Synchronized Skating Junior World Championships")
         is None
+    )
+
+
+def test_major_event_from_results_url_synchro():
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season2425/wsysc2025/"
+        )
+        == MAJOR_ISU_EVENT_SYNCHRO_WORLDS
+    )
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season1819/wcsys2019/"
+        )
+        == MAJOR_ISU_EVENT_SYNCHRO_WORLDS
+    )
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season0910/syswc2010/"
+        )
+        == MAJOR_ISU_EVENT_SYNCHRO_WORLDS
+    )
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season2526/wjsysc2026/"
+        )
+        == MAJOR_ISU_EVENT_JUNIOR_SYNCHRO_WORLDS
+    )
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season1112/wjcsys2012/"
+        )
+        == MAJOR_ISU_EVENT_JUNIOR_SYNCHRO_WORLDS
+    )
+    assert (
+        major_event_from_results_url(
+            "https://results.isu.org/results/season0910/syswjc2010/"
+        )
+        == MAJOR_ISU_EVENT_JUNIOR_SYNCHRO_WORLDS
+    )
+    assert major_event_from_results_url("https://results.isu.org/results/season2526/wc2026/") is None
+
+
+def test_competition_matches_synchro_major_event_by_url():
+    name = "ISU World Synchronized Championships 2025"
+    url = "https://results.isu.org/results/season2425/wsysc2025/"
+    assert competition_matches_major_event(name, MAJOR_ISU_EVENT_SYNCHRO_WORLDS, results_url=url)
+    assert not competition_matches_major_event(name, MAJOR_ISU_EVENT_WORLDS, results_url=url)
+    assert competition_matches_major_event(
+        "ISU World Junior Synchronized Championships 2025",
+        MAJOR_ISU_EVENT_JUNIOR_SYNCHRO_WORLDS,
+        results_url="https://results.isu.org/results/season2425/wjsysc2025/",
+    )
+    assert not competition_matches_major_event(
+        "ISU World Junior Synchronized Championships 2025",
+        MAJOR_ISU_EVENT_JUNIOR_WORLDS,
+        results_url="https://results.isu.org/results/season2425/wjsysc2025/",
     )
 
 
