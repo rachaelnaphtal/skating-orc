@@ -362,6 +362,48 @@ def _apply_scope_filters(
     )
 
 
+def _pcs_deviation_marks_scope_query(
+    analytics: JudgeAnalytics,
+    *,
+    seg_discipline_ids: list[int],
+    start_season_year: Optional[str],
+    end_season_year: Optional[str],
+    effective_start: date,
+    event_end_date: date | None,
+    competition_scope: str,
+    segment_levels: Optional[Iterable[str]],
+):
+    """Scoped PCS mark rows (joins + filters) shared by panel median and output."""
+    marks_q = (
+        select(
+            PcsScorePerJudge.judge_id,
+            PcsScorePerJudge.skater_segment_id,
+            PcsScorePerJudge.pcs_type_id,
+            PcsType.name.label("pcs_type_name"),
+            PcsScorePerJudge.judge_score,
+            Segment.discipline_type_id,
+            DisciplineType.name.label("discipline_name"),
+        )
+        .select_from(PcsScorePerJudge)
+        .join(PcsType, PcsScorePerJudge.pcs_type_id == PcsType.id)
+        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
+        .join(Segment, SkaterSegment.segment_id == Segment.id)
+        .join(Competition, Segment.competition_id == Competition.id)
+        .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)
+    )
+    return _apply_scope_filters(
+        marks_q,
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
+        segment_levels=segment_levels,
+    )
+
+
 def load_pcs_deviation_marks(
     analytics: JudgeAnalytics,
     *,
@@ -384,75 +426,53 @@ def load_pcs_deviation_marks(
     segment_levels = segment_levels_for_ranking_preset(segment_level_preset)
     effective_start = _effective_start(event_start_date)
 
+    # PostgreSQL does not support percentile_cont(...) OVER (...), so apply scope
+    # joins/filters once in a CTE, aggregate panel medians from that, then join back.
+    marks_cte = _pcs_deviation_marks_scope_query(
+        analytics,
+        seg_discipline_ids=seg_discipline_ids,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        effective_start=effective_start,
+        event_end_date=event_end_date,
+        competition_scope=competition_scope,
+        segment_levels=segment_levels,
+    ).cte("pcs_deviation_marks_scope")
+
     panel_sq = (
         select(
-            PcsScorePerJudge.skater_segment_id.label("skater_segment_id"),
-            PcsScorePerJudge.pcs_type_id.label("pcs_type_id"),
+            marks_cte.c.skater_segment_id,
+            marks_cte.c.pcs_type_id,
             func.percentile_cont(0.5)
-            .within_group(PcsScorePerJudge.judge_score)
+            .within_group(marks_cte.c.judge_score)
             .label("control_score"),
         )
-        .select_from(PcsScorePerJudge)
-        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
-        .join(Segment, SkaterSegment.segment_id == Segment.id)
-        .join(Competition, Segment.competition_id == Competition.id)
+        .group_by(marks_cte.c.skater_segment_id, marks_cte.c.pcs_type_id)
+        .subquery("pcs_deviation_panel_medians")
     )
-    panel_sq = _apply_scope_filters(
-        panel_sq,
-        analytics,
-        seg_discipline_ids=seg_discipline_ids,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        effective_start=effective_start,
-        event_end_date=event_end_date,
-        competition_scope=competition_scope,
-        segment_levels=segment_levels,
-    )
-    panel_sq = panel_sq.group_by(
-        PcsScorePerJudge.skater_segment_id,
-        PcsScorePerJudge.pcs_type_id,
-    ).subquery()
 
-    marks_q = (
-        select(
-            PcsScorePerJudge.judge_id,
-            PcsScorePerJudge.skater_segment_id,
-            PcsScorePerJudge.pcs_type_id,
-            PcsType.name.label("pcs_type_name"),
-            PcsScorePerJudge.judge_score,
-            Segment.discipline_type_id,
-            DisciplineType.name.label("discipline_name"),
-            panel_sq.c.control_score,
-        )
-        .select_from(PcsScorePerJudge)
-        .join(PcsType, PcsScorePerJudge.pcs_type_id == PcsType.id)
-        .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
-        .join(Segment, SkaterSegment.segment_id == Segment.id)
-        .join(Competition, Segment.competition_id == Competition.id)
-        .outerjoin(DisciplineType, Segment.discipline_type_id == DisciplineType.id)
-        .join(
+    marks_q = select(
+        marks_cte.c.judge_id,
+        marks_cte.c.skater_segment_id,
+        marks_cte.c.pcs_type_id,
+        marks_cte.c.pcs_type_name,
+        marks_cte.c.judge_score,
+        marks_cte.c.discipline_type_id,
+        marks_cte.c.discipline_name,
+        panel_sq.c.control_score,
+    ).select_from(
+        marks_cte.join(
             panel_sq,
             and_(
-                PcsScorePerJudge.skater_segment_id == panel_sq.c.skater_segment_id,
-                PcsScorePerJudge.pcs_type_id == panel_sq.c.pcs_type_id,
+                marks_cte.c.skater_segment_id == panel_sq.c.skater_segment_id,
+                marks_cte.c.pcs_type_id == panel_sq.c.pcs_type_id,
             ),
         )
-    )
-    marks_q = _apply_scope_filters(
-        marks_q,
-        analytics,
-        seg_discipline_ids=seg_discipline_ids,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        effective_start=effective_start,
-        event_end_date=event_end_date,
-        competition_scope=competition_scope,
-        segment_levels=segment_levels,
     )
     if judge_ids is not None:
         judge_id_list = [int(j) for j in judge_ids]
         if judge_id_list:
-            marks_q = marks_q.where(PcsScorePerJudge.judge_id.in_(judge_id_list))
+            marks_q = marks_q.where(marks_cte.c.judge_id.in_(judge_id_list))
 
     df = pd.read_sql(marks_q, analytics.session.bind)
     if df.empty:

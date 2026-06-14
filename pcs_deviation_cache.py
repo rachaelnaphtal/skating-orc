@@ -161,6 +161,7 @@ def _load_marks_from_db(
     shard: PcsDeviationShard,
     *,
     judge_ids: Iterable[int] | None = None,
+    id_map: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     event_start = (
         date.fromisoformat(shard.event_start_iso) if shard.event_start_iso else None
@@ -179,7 +180,7 @@ def _load_marks_from_db(
     )
     if df.empty:
         return pd.DataFrame(columns=list(PCS_DEVIATION_SHARD_MARK_COLUMNS))
-    return normalize_pcs_deviation_shard_marks(df, analytics)
+    return normalize_pcs_deviation_shard_marks(df, analytics, id_map=id_map)
 
 
 def _normalize_shard_marks(
@@ -224,11 +225,13 @@ def _save_shard_row(
     analytics: JudgeAnalytics,
     shard: PcsDeviationShard,
     marks: pd.DataFrame,
+    *,
+    data_fingerprint: str | None = None,
 ) -> None:
     _require_postgres(session.get_bind())
     key = shard_cache_key(shard)
     payload = pickle.dumps(marks, protocol=pickle.HIGHEST_PROTOCOL)
-    fingerprint = _shard_fingerprint(session, analytics, shard)
+    fingerprint = data_fingerprint or _shard_fingerprint(session, analytics, shard)
     now = datetime.now(timezone.utc)
     row = {
         "shard_key": key,
@@ -326,17 +329,31 @@ def collect_marks_for_run(
     if not shards:
         return pd.DataFrame()
 
+    id_map = load_judge_identity_map(analytics)
     parts: list[pd.DataFrame] = []
     for shard in shards:
         marks = _load_shard_row(
-            session, analytics, shard, validate_fingerprint=not cache_only
+            session,
+            analytics,
+            shard,
+            validate_fingerprint=not cache_only,
+            id_map=id_map,
         )
         if marks is None:
             if cache_only:
                 return None
-            marks = _load_marks_from_db(session, analytics, shard)
+            marks = _load_marks_from_db(
+                session, analytics, shard, id_map=id_map
+            )
             if persist_shards:
-                _save_shard_row(session, analytics, shard, marks)
+                fingerprint = _shard_fingerprint(session, analytics, shard)
+                _save_shard_row(
+                    session,
+                    analytics,
+                    shard,
+                    marks,
+                    data_fingerprint=fingerprint,
+                )
         if not marks.empty:
             parts.append(marks)
 
@@ -1108,6 +1125,7 @@ def precompute_pcs_deviation_shards(
     disc_ids = discipline_ids_for_pcs_deviation(
         analytics, discipline_type_ids, competition_scope
     )
+    id_map = load_judge_identity_map(analytics)
     written = 0
     skipped = 0
     for sy in years:
@@ -1118,12 +1136,23 @@ def precompute_pcs_deviation_shards(
                 competition_scope=competition_scope,
                 segment_level_preset=segment_level_preset,
             )
-            if skip_unchanged and _shard_cache_is_fresh(session, analytics, shard):
-                skipped += 1
-                print(f"  shard {sy} discipline_id={dt_id}: skipped (unchanged)")
-                continue
-            marks = _load_marks_from_db(session, analytics, shard)
-            _save_shard_row(session, analytics, shard, marks)
+            fingerprint = _shard_fingerprint(session, analytics, shard)
+            if skip_unchanged:
+                row = session.get(PcsDeviationRankingShardCache, shard_cache_key(shard))
+                if row is not None and row.data_fingerprint == fingerprint:
+                    skipped += 1
+                    print(f"  shard {sy} discipline_id={dt_id}: skipped (unchanged)")
+                    continue
+            marks = _load_marks_from_db(
+                session, analytics, shard, id_map=id_map
+            )
+            _save_shard_row(
+                session,
+                analytics,
+                shard,
+                marks,
+                data_fingerprint=fingerprint,
+            )
             written += 1
             print(f"  shard {sy} discipline_id={dt_id}: {len(marks):,} marks")
     return written, skipped
