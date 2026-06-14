@@ -3513,6 +3513,33 @@ def _pcs_deviation_breakdown_failure_hint(
     )
 
 
+def _pcs_deviation_judge_detail_from_result(
+    result: dict,
+    pick_judge: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+    """Slice precomputed drill-down tables when the run already materialized them."""
+
+    def _slice_judge(df: object) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or "Judge" not in df.columns:
+            return pd.DataFrame()
+        return df.loc[df["Judge"] == pick_judge].copy()
+
+    jd_all = result.get("judge_discipline_detail_all")
+    if isinstance(jd_all, pd.DataFrame) and not jd_all.empty:
+        jd = _slice_judge(jd_all)
+        jc = _slice_judge(result.get("judge_component_detail_all"))
+        jb = _slice_judge(result.get("judge_control_bin_detail_all"))
+        if not jd.empty or not jc.empty or not jb.empty:
+            return jd, jc, jb
+
+    jd = _slice_judge(result.get("judge_discipline_detail"))
+    jc = _slice_judge(result.get("judge_component_detail"))
+    jb = _slice_judge(result.get("judge_control_bin_detail"))
+    if not jd.empty or not jc.empty or not jb.empty:
+        return jd, jc, jb
+    return None
+
+
 def _pcs_deviation_load_judge_breakdown(
     result: dict,
     run_params: tuple,
@@ -3525,6 +3552,16 @@ def _pcs_deviation_load_judge_breakdown(
         run_params_ranking_compute_key,
         unpack_pcs_deviation_run_params,
     )
+
+    embedded = _pcs_deviation_judge_detail_from_result(result, pick_judge)
+    if embedded is not None:
+        detail_key = (
+            "pcs_deviation_judge_detail",
+            run_params_ranking_compute_key(run_params),
+            pick_judge,
+        )
+        st.session_state[detail_key] = embedded
+        return embedded
 
     empty = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     params = _pcs_deviation_sigma_params(result, run_params)
@@ -4089,101 +4126,212 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
     judge_names = marking["Judge"].tolist() if "Judge" in marking.columns else []
     if judge_names:
         st.subheader("How a judge’s score breaks down")
-        pick_judge = st.selectbox(
-            "Select judge",
-            judge_names,
-            key="pcs_deviation_detail_judge",
+        show_drilldown = st.checkbox(
+            "Show per-judge breakdown",
+            value=False,
+            key="pcs_deviation_show_drilldown",
+            help=(
+                "Load discipline, component, and panel-median tables for one judge. "
+                "Leave unchecked to keep the page responsive after Run analysis."
+            ),
         )
-        jd = result.get("judge_discipline_detail", pd.DataFrame())
-        jc = result.get("judge_component_detail", pd.DataFrame())
-        jb = result.get("judge_control_bin_detail", pd.DataFrame())
-        if jd.empty or pick_judge not in set(jd.get("Judge", [])):
-            jd, jc, jb = _pcs_deviation_load_judge_breakdown(
-                result, run_params, pick_judge
+        if show_drilldown:
+            st.caption(
+                "Partial marking score in each table is √(mean(m²)) over PCS marks in that "
+                "slice, with m = (PCS − panel median) / σ̂. **Mean PCS bias** is the signed "
+                "average raw PCS − panel median (+ above, − below). Use drill-down filters to "
+                "hide thin rows."
             )
-        else:
-            jd = jd.loc[jd["Judge"] == pick_judge] if not jd.empty else jd
-            jc = jc.loc[jc["Judge"] == pick_judge] if not jc.empty else jc
-            jb = jb.loc[jb["Judge"] == pick_judge] if not jb.empty else jb
-
-        detail_cfg = _pcs_deviation_judge_detail_column_config()
-        if jd.empty and jc.empty and jb.empty:
-            st.info(_pcs_deviation_breakdown_failure_hint(result, run_params, pick_judge))
-        else:
-            if not jd.empty:
-                st.markdown("**By discipline**")
-                st.dataframe(
-                    jd.sort_values("Partial marking score"),
-                    width="stretch",
-                    hide_index=True,
-                    column_config=detail_cfg,
+            pick_judge = st.selectbox(
+                "Select judge",
+                judge_names,
+                key="pcs_deviation_detail_judge",
+            )
+            judge_row = marking.loc[marking["Judge"] == pick_judge]
+            if not judge_row.empty and "Mean PCS bias" in judge_row.columns:
+                bias = float(judge_row["Mean PCS bias"].iloc[0])
+                bias_label = (
+                    "above panel median"
+                    if bias > 0.005
+                    else "below panel median"
+                    if bias < -0.005
+                    else "near panel median"
                 )
-            if not jc.empty:
-                st.markdown("**By discipline and component**")
-                st.dataframe(
-                    jc.sort_values("Partial marking score", ascending=False),
-                    width="stretch",
-                    hide_index=True,
-                    column_config=detail_cfg,
+                st.metric(
+                    "Overall mean PCS bias",
+                    f"{bias:+.3f}",
+                    help=(
+                        "Signed average of (judge PCS − panel median PCS) over all PCS "
+                        "marks for this judge. Positive = systematically higher than the "
+                        "panel median; negative = systematically lower."
+                    ),
                 )
-            if not jb.empty:
-                st.markdown("**By panel-median range** (discipline × component × range)")
                 st.caption(
-                    "Each row is one σ̂ bin. Partial score is √(mean(m²)) using "
-                    "normalized marks m = (PCS − panel median) / σ̂."
+                    f"On average this judge marks **{bias_label}** "
+                    f"({bias:+.3f} PCS vs panel median per mark)."
                 )
+
+            detail_cfg = _pcs_deviation_judge_detail_column_config()
+            jd = result.get("judge_discipline_detail", pd.DataFrame())
+            jc = result.get("judge_component_detail", pd.DataFrame())
+            jb = result.get("judge_control_bin_detail", pd.DataFrame())
+            if jd.empty or pick_judge not in set(jd.get("Judge", [])):
+                jd, jc, jb = _pcs_deviation_load_judge_breakdown(
+                    result, run_params, pick_judge
+                )
+            else:
+                jd = jd.loc[jd["Judge"] == pick_judge] if not jd.empty else jd
+                jc = jc.loc[jc["Judge"] == pick_judge] if not jc.empty else jc
+                jb = jb.loc[jb["Judge"] == pick_judge] if not jb.empty else jb
+
+            if jd.empty and jc.empty and jb.empty:
+                st.info(
+                    _pcs_deviation_breakdown_failure_hint(
+                        result, run_params, pick_judge
+                    )
+                )
+            else:
+                from pcs_deviation_takeaways import (
+                    filter_pcs_judge_detail_tables,
+                    pcs_detail_filter_options,
+                )
+
+                disc_options, comp_options = pcs_detail_filter_options(jd, jc, jb)
                 judge_filter_key = pick_judge.replace(" ", "_")[:48]
-                chart_series_options = _pcs_deviation_chart_series_options(
-                    jc if not jc.empty else jb
-                )
-                chart_c1, chart_c2 = st.columns([3, 1])
-                with chart_c1:
-                    chart_series = st.multiselect(
-                        "Chart series (discipline × component)",
-                        chart_series_options,
-                        default=chart_series_options,
-                        key=f"pcs_deviation_chart_series_{judge_filter_key}",
-                        help=(
-                            "Each line plots the selected Y metric vs panel-median PCS range. "
-                            "Defaults to all components in the breakdown."
-                        ),
-                    )
-                with chart_c2:
-                    chart_y_metric = st.selectbox(
-                        "Chart Y axis",
-                        options=[
-                            _PCS_DEVIATION_CHART_Y_PARTIAL,
-                            _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR,
-                        ],
-                        format_func=lambda k: {
-                            _PCS_DEVIATION_CHART_Y_PARTIAL: "Partial marking score",
-                            _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR: "Mean |error|",
-                        }[k],
-                        key=f"pcs_deviation_chart_y_{judge_filter_key}",
-                        help=(
-                            "Partial marking score uses σ̂-normalized marks; "
-                            "Mean |error| is average |PCS − panel median| in raw PCS units."
-                        ),
-                    )
-                pcs_fig = _pcs_deviation_control_bin_chart(
+                with st.expander("Drill-down filters", expanded=False):
+                    filt_c1, filt_c2, filt_c3 = st.columns(3)
+                    with filt_c1:
+                        detail_min_marks = st.number_input(
+                            "Minimum marks per row",
+                            min_value=0,
+                            value=0,
+                            step=5,
+                            key=f"pcs_deviation_detail_min_marks_{judge_filter_key}",
+                            help="Hide breakdown rows with fewer PCS marks than this.",
+                        )
+                    with filt_c2:
+                        detail_disciplines = st.multiselect(
+                            "Discipline",
+                            disc_options,
+                            default=disc_options,
+                            key=f"pcs_deviation_detail_disciplines_{judge_filter_key}",
+                            help=(
+                                "Defaults to all disciplines in this breakdown. "
+                                "Clear all to include every discipline present."
+                            ),
+                        )
+                    with filt_c3:
+                        detail_components = st.multiselect(
+                            "PCS component",
+                            comp_options,
+                            default=comp_options,
+                            key=f"pcs_deviation_detail_components_{judge_filter_key}",
+                            help=(
+                                "Defaults to all components for this judge. "
+                                "Clear all to include every component in the breakdown."
+                            ),
+                        )
+
+                jd_f, jc_f, jb_f = filter_pcs_judge_detail_tables(
+                    jd,
+                    jc,
                     jb,
-                    jc if not jc.empty else jb,
-                    min_bin_marks=0,
-                    series_keys=chart_series or None,
-                    y_metric=chart_y_metric,
+                    min_marks=int(detail_min_marks) if int(detail_min_marks) > 0 else None,
+                    disciplines=detail_disciplines or None,
+                    components=detail_components or None,
                 )
-                if pcs_fig is not None:
-                    st.plotly_chart(pcs_fig, width="stretch")
-                elif chart_series:
-                    st.caption(
-                        "No chart: selected series have no rows under the current filters."
+                if jd_f.empty and jc_f.empty and jb_f.empty:
+                    st.warning(
+                        "No breakdown rows match the drill-down filters. "
+                        "Lower the minimum marks or clear discipline / component filters."
                     )
-                st.dataframe(
-                    jb.sort_values("Partial marking score", ascending=False),
-                    width="stretch",
-                    hide_index=True,
-                    column_config=detail_cfg,
-                )
+                else:
+                    if not jd_f.empty:
+                        st.markdown(
+                            "**By discipline** "
+                            "(partial score = √(mean(m²)) within that discipline; σ̂-scaled)"
+                        )
+                        st.dataframe(
+                            jd_f.sort_values("Partial marking score"),
+                            width="stretch",
+                            hide_index=True,
+                            column_config=detail_cfg,
+                        )
+                    if not jc_f.empty:
+                        st.markdown(
+                            "**By discipline and component** "
+                            "(largest normalized partial scores first)"
+                        )
+                        st.dataframe(
+                            jc_f.sort_values("Partial marking score", ascending=False),
+                            width="stretch",
+                            hide_index=True,
+                            column_config=detail_cfg,
+                        )
+                    if not jb_f.empty:
+                        st.markdown(
+                            "**By panel-median range** "
+                            "(discipline × component × panel-median PCS bin)"
+                        )
+                        st.caption(
+                            "Each row is one σ̂ bin. Partial score is √(mean(m²)) using "
+                            "normalized marks m = (PCS − panel median) / σ̂."
+                        )
+                        chart_series_options = _pcs_deviation_chart_series_options(
+                            jc_f if not jc_f.empty else jb_f
+                        )
+                        chart_c1, chart_c2 = st.columns([3, 1])
+                        with chart_c1:
+                            chart_series = st.multiselect(
+                                "Chart series (discipline × component)",
+                                chart_series_options,
+                                default=chart_series_options,
+                                key=f"pcs_deviation_chart_series_{judge_filter_key}",
+                                help=(
+                                    "Each line plots the selected Y metric vs panel-median "
+                                    "PCS range. Points match the drill-down filters above."
+                                ),
+                            )
+                        with chart_c2:
+                            chart_y_metric = st.selectbox(
+                                "Chart Y axis",
+                                options=[
+                                    _PCS_DEVIATION_CHART_Y_PARTIAL,
+                                    _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR,
+                                ],
+                                format_func=lambda k: {
+                                    _PCS_DEVIATION_CHART_Y_PARTIAL: "Partial marking score",
+                                    _PCS_DEVIATION_CHART_Y_MEAN_ABS_ERROR: "Mean |error|",
+                                }[k],
+                                key=f"pcs_deviation_chart_y_{judge_filter_key}",
+                                help=(
+                                    "Partial marking score uses σ̂-normalized marks; "
+                                    "Mean |error| is average |PCS − panel median| in raw PCS units."
+                                ),
+                            )
+                        chart_min_marks = (
+                            int(detail_min_marks) if int(detail_min_marks) > 0 else 0
+                        )
+                        pcs_fig = _pcs_deviation_control_bin_chart(
+                            jb_f,
+                            jc_f if not jc_f.empty else jb_f,
+                            min_bin_marks=chart_min_marks,
+                            series_keys=chart_series or None,
+                            y_metric=chart_y_metric,
+                        )
+                        if pcs_fig is not None:
+                            st.plotly_chart(pcs_fig, width="stretch")
+                        elif chart_series:
+                            st.caption(
+                                "No chart: selected series have no rows under the "
+                                "current drill-down filters."
+                            )
+                        st.dataframe(
+                            jb_f.sort_values("Partial marking score", ascending=False),
+                            width="stretch",
+                            hide_index=True,
+                            column_config=detail_cfg,
+                        )
 
 
 def temporal_trend_analysis():

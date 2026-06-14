@@ -358,13 +358,28 @@ def collect_marks_for_judge_detail(
     segment_level_preset: str | None = None,
 ) -> pd.DataFrame:
     """
-    PCS marks for one identity, preferring cached shards (filtered per shard).
+    PCS marks for one identity.
 
-    Falls back to a single scoped SQL load with ``judge_ids`` when shards are missing.
+    Prefer a single judge-scoped SQL load (fast for drill-down). Fall back to cached
+    shards only when SQL returns no rows but shard pickles exist.
     """
     judge_id_set = {int(j) for j in judge_ids}
     if not judge_id_set:
         return pd.DataFrame()
+
+    sql_df = load_pcs_deviation_marks(
+        analytics,
+        start_season_year=start_season_year,
+        end_season_year=end_season_year,
+        event_start_date=event_start_date,
+        event_end_date=event_end_date,
+        discipline_type_ids=discipline_type_ids,
+        competition_scope=competition_scope,
+        segment_level_preset=segment_level_preset,
+        judge_ids=judge_id_set,
+    )
+    if not sql_df.empty:
+        return normalize_pcs_deviation_shard_marks(sql_df, analytics)
 
     session = analytics.session
     shards = iter_pcs_deviation_shards(
@@ -400,17 +415,7 @@ def collect_marks_for_judge_detail(
             return pd.concat(parts, ignore_index=True)
         return pd.DataFrame()
 
-    return load_pcs_deviation_marks(
-        analytics,
-        start_season_year=start_season_year,
-        end_season_year=end_season_year,
-        event_start_date=event_start_date,
-        event_end_date=event_end_date,
-        discipline_type_ids=discipline_type_ids,
-        competition_scope=competition_scope,
-        segment_level_preset=segment_level_preset,
-        judge_ids=judge_id_set,
-    )
+    return pd.DataFrame()
 
 
 def load_cached_sigma_params_for_run(
