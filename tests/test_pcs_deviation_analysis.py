@@ -11,6 +11,7 @@ from pcs_deviation_analysis import (
     control_bin_label,
     fit_sigma_discrete_pcs,
     load_pcs_deviation_marks,
+    sigma_bin_from_control_score,
 )
 
 
@@ -42,7 +43,7 @@ def test_fit_sigma_discrete_pcs_min_count():
         )
     df = compute_errors(pd.DataFrame(rows))
     params = fit_sigma_discrete_pcs(df, min_bin_count=30)
-    key = (1, "SS", control_bin_from_median(7.5))
+    key = (1, "SS", sigma_bin_from_control_score(7.5))
     assert key in params
     assert params[key] > 0
 
@@ -61,7 +62,7 @@ def test_annotate_normalized_marks_pcs_uses_fitted_sigma():
             ]
         )
     )
-    params = {(1, "SS", control_bin_from_median(7.0)): 0.25}
+    params = {(1, "SS", sigma_bin_from_control_score(7.0)): 0.25}
     out = annotate_normalized_marks_pcs(df, params, floor_sigma=0.05)
     assert np.isclose(out["m_pj"].iloc[0], 0.2 / 0.25)
     assert out["sigma_source"].iloc[0] == "fitted"

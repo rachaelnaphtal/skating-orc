@@ -166,6 +166,14 @@ WHERE es.is_rule_error IS NOT TRUE
                   AND c.officials_analysis_competition_type_id IS NOT NULL
                   AND c.officials_analysis_competition_type_id <> 11
               )
+              OR (
+                  (SELECT competition_scope FROM _calibration_params LIMIT 1) = 'international'
+                  AND c.officials_analysis_competition_type_id IN (15, 16, 17)
+              )
+              OR (
+                  (SELECT competition_scope FROM _calibration_params LIMIT 1) = 'isu_event'
+                  AND c.officials_analysis_competition_type_id IN (15, 16)
+              )
           )
       )
   );

@@ -11,6 +11,7 @@ Example::
     python scripts/precompute_pcs_deviation_cache.py --all-scopes
     python scripts/precompute_pcs_deviation_cache.py --scope qualifying --season 2425
     python scripts/precompute_pcs_deviation_cache.py --all-scopes --sigma-benchmark --summaries
+    python scripts/precompute_pcs_deviation_cache.py --all-scopes --sigma-benchmark --summaries --sigma-model quadratic
     python scripts/precompute_pcs_deviation_cache.py --all-scopes --sigma-benchmark --summaries --skip-unchanged
     python scripts/precompute_pcs_deviation_cache.py --all-scopes --all-segment-levels --sigma-benchmark --summaries
 """
@@ -34,7 +35,10 @@ from element_deviation_ranking import (
 )
 from pcs_deviation_analysis import (
     PCS_DEVIATION_COMPETITION_SCOPES,
+    PCS_SIGMA_MODEL_DISCRETE,
+    PCS_SIGMA_MODEL_QUADRATIC,
     filter_pcs_deviation_season_years,
+    normalize_sigma_model,
 )
 from pcs_deviation_cache import (
     _sigma_cache_is_fresh,
@@ -83,6 +87,7 @@ def _precompute_scope(
     competition_scope: str,
     years: list[str],
     segment_level_preset: str | None,
+    sigma_model: str,
     sigma_benchmark: bool,
     warm_summaries: bool,
     skip_unchanged: bool,
@@ -116,9 +121,11 @@ def _precompute_scope(
     summaries_skipped = 0
     sigma_skipped = False
     if sigma_benchmark:
+        print(f"  σ̂ model: {sigma_model}")
         run_params = build_precompute_pcs_deviation_run_params(
             competition_scope,
             segment_level_preset=segment_level_preset,
+            sigma_model=sigma_model,
         )
         if summaries_only:
             if warm_summaries:
@@ -208,6 +215,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Warm every segment level preset.",
     )
     parser.add_argument(
+        "--sigma-model",
+        choices=[PCS_SIGMA_MODEL_DISCRETE, PCS_SIGMA_MODEL_QUADRATIC],
+        default=PCS_SIGMA_MODEL_QUADRATIC,
+        help=(
+            "σ̂ model to warm with --sigma-benchmark (default: quadratic). "
+            "Quadratic uses 0.125 PCS bins; discrete uses 0.25. Separate cache keys."
+        ),
+    )
+    parser.add_argument(
         "--sigma-benchmark",
         action="store_true",
         help="Also warm σ̂ cache per scope (all seasons, same scope as benchmark pool).",
@@ -273,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--summaries-only.",
             )
 
+        sigma_model = normalize_sigma_model(args.sigma_model)
         total_shards = 0
         total_skipped = 0
         total_summaries = 0
@@ -295,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
                     competition_scope=scope,
                     years=years,
                     segment_level_preset=_segment_level_preset_arg(preset),
+                    sigma_model=sigma_model,
                     sigma_benchmark=args.sigma_benchmark,
                     warm_summaries=warm_summaries,
                     skip_unchanged=args.skip_unchanged,
@@ -315,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(level_presets)} level preset(s)."
         )
         if sigma_keys:
-            print(f"σ̂ keys: {', '.join(dict.fromkeys(sigma_keys))}")
+            print(f"σ̂ keys ({sigma_model}): {', '.join(dict.fromkeys(sigma_keys))}")
             if sigma_skipped_any:
                 print("σ̂ benchmark: reused unchanged cache where applicable")
         if total_summaries:

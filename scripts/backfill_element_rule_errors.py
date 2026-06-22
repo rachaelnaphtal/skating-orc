@@ -477,6 +477,26 @@ def backfill_one_segment(
     return out
 
 
+def _competition_ids_from_csv(path: str) -> list[int]:
+    import csv
+
+    ids: list[int] = []
+    seen: set[int] = set()
+    with Path(path).open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or "competition_id" not in reader.fieldnames:
+            raise ValueError(f"{path}: CSV must include a competition_id column")
+        for row in reader:
+            text = str(row.get("competition_id") or "").strip()
+            if not text:
+                continue
+            cid = int(text)
+            if cid not in seen:
+                seen.add(cid)
+                ids.append(cid)
+    return sorted(ids)
+
+
 def _build_segment_query(session, args):
     q = (
         session.query(Segment, Competition)
@@ -488,6 +508,10 @@ def _build_segment_query(session, args):
             Competition.officials_analysis_competition_type_id.in_(
                 sorted(OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL)
             )
+        )
+    if args.competition_ids_csv:
+        q = q.filter(
+            Competition.id.in_(_competition_ids_from_csv(args.competition_ids_csv))
         )
     if args.competition_id is not None:
         q = q.filter(Competition.id == args.competition_id)
@@ -520,6 +544,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--competition-id", type=int, default=None)
+    parser.add_argument(
+        "--competition-ids-csv",
+        default=None,
+        help="CSV with competition_id column; backfill only those competitions.",
+    )
     parser.add_argument("--segment-id", type=int, default=None)
     parser.add_argument(
         "--scope",
@@ -545,6 +574,9 @@ def main() -> int:
         help="Max segments to process in this chunk (after offset).",
     )
     args = parser.parse_args()
+    if args.competition_id is not None and args.competition_ids_csv:
+        print("Use only one of --competition-id and --competition-ids-csv.", file=sys.stderr)
+        return 2
 
     ensure_database_for_streamlit()
     db_url = get_database_url()
