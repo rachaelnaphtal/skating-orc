@@ -70,6 +70,38 @@ def normalize_scraped_judge_name(name: str | None) -> str:
     return s.strip()
 
 
+def judge_person_match_key(name: str | None) -> str:
+    """Normalized key for case-insensitive judge deduplication (``public.judge.name``)."""
+    return _normalize_person_name(normalize_scraped_judge_name(name))
+
+
+def select_canonical_judge_ids_per_match_key(
+    candidates: dict[str, list[int]],
+    score_counts: dict[int, int],
+) -> dict[str, int]:
+    """
+    Pick one ``judge.id`` per normalized match key when duplicates exist.
+
+    Prefer the row referenced by the most element/PCS scores; tie-break to lowest id
+    (original load row).
+    """
+    out: dict[str, int] = {}
+    for key, ids in candidates.items():
+        unique_ids = list(dict.fromkeys(int(i) for i in ids))
+        if len(unique_ids) == 1:
+            out[key] = unique_ids[0]
+            continue
+        out[key] = min(
+            unique_ids,
+            key=lambda jid: (-int(score_counts.get(jid, 0)), jid),
+        )
+    return out
+
+
+def _judge_match_key_sql_expr() -> str:
+    return "lower(regexp_replace(trim(name), '\\\\s+', ' ', 'g'))"
+
+
 def _normalize_skater_name_key(name: str) -> str:
     if not name:
         return ""
@@ -332,26 +364,60 @@ class DatabaseLoader:
                     merged.append(raw)
         return merged
 
+    def _judge_score_counts(self, judge_ids: list[int]) -> dict[int, int]:
+        unique_ids = list(dict.fromkeys(int(i) for i in judge_ids))
+        if not unique_ids:
+            return {}
+        rows = self.session.execute(
+            text("""
+                SELECT judge_id, SUM(cnt)::bigint AS total
+                FROM (
+                    SELECT judge_id, COUNT(*)::bigint AS cnt
+                    FROM element_score_per_judge
+                    WHERE judge_id IN :ids
+                    GROUP BY judge_id
+                    UNION ALL
+                    SELECT judge_id, COUNT(*)::bigint AS cnt
+                    FROM pcs_score_per_judge
+                    WHERE judge_id IN :ids
+                    GROUP BY judge_id
+                ) sub
+                GROUP BY judge_id
+            """).bindparams(bindparam("ids", expanding=True)),
+            {"ids": unique_ids},
+        ).all()
+        return {int(row.judge_id): int(row.total) for row in rows}
+
     def _ensure_judges_by_name(self, names: list[str]) -> dict[str, int]:
         displays = [normalize_scraped_judge_name(str(n)) for n in names]
         unique_displays = list(dict.fromkeys(d for d in displays if d))
         if not unique_displays:
             return {}
-        keys = {d: _normalize_person_name(d) for d in unique_displays}
+        keys = {d: judge_person_match_key(d) for d in unique_displays}
         unique_keys = list(dict.fromkeys(keys.values()))
         by_key: dict[str, int] = {}
         if unique_keys:
+            match_key_expr = _judge_match_key_sql_expr()
             rows = self.session.execute(
-                text("""
-                    SELECT id,
-                           lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) AS match_key
+                text(f"""
+                    SELECT id, name, {match_key_expr} AS match_key
                     FROM judge
-                    WHERE lower(regexp_replace(trim(name), '\\s+', ' ', 'g')) IN :keys
+                    WHERE {match_key_expr} IN :keys
+                    ORDER BY id
                 """).bindparams(bindparam("keys", expanding=True)),
                 {"keys": unique_keys},
             ).all()
+            candidates: dict[str, list[int]] = {}
             for row in rows:
-                by_key[str(row.match_key)] = int(row.id)
+                mk = str(row.match_key)
+                candidates.setdefault(mk, []).append(int(row.id))
+            dup_ids = [
+                jid for jid_list in candidates.values() if len(jid_list) > 1 for jid in jid_list
+            ]
+            score_counts = self._judge_score_counts(dup_ids) if dup_ids else {}
+            by_key = select_canonical_judge_ids_per_match_key(
+                candidates, score_counts
+            )
         by_name: dict[str, int] = {}
         for display in unique_displays:
             mk = keys[display]
@@ -1675,6 +1741,83 @@ class DatabaseLoader:
                     raise NameError("Scores do not align")
 
         self._persist()
+
+
+def fetch_duplicate_judge_groups(session: Session) -> list[dict]:
+    """
+    Return judge rows grouped by normalized name key where more than one row exists.
+
+    Each group dict has ``match_key``, ``canonical_id``, and ``members`` (list of
+    ``{id, name, element_scores, pcs_scores, total_scores}``).
+    """
+    match_key_expr = _judge_match_key_sql_expr()
+    rows = session.execute(
+        text(f"""
+            SELECT id, name, {match_key_expr} AS match_key
+            FROM judge
+            ORDER BY match_key, id
+        """)
+    ).all()
+    grouped: dict[str, list[tuple[int, str]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.match_key), []).append((int(row.id), str(row.name)))
+    duplicate_groups = {k: v for k, v in grouped.items() if len(v) > 1}
+    if not duplicate_groups:
+        return []
+
+    all_ids = [jid for members in duplicate_groups.values() for jid, _ in members]
+    elem_counts: dict[int, int] = {}
+    pcs_counts: dict[int, int] = {}
+    step = 500
+    for i in range(0, len(all_ids), step):
+        chunk = all_ids[i : i + step]
+        for row in session.execute(
+            text("""
+                SELECT judge_id, COUNT(*)::bigint AS cnt
+                FROM element_score_per_judge
+                WHERE judge_id IN :ids
+                GROUP BY judge_id
+            """).bindparams(bindparam("ids", expanding=True)),
+            {"ids": chunk},
+        ).all():
+            elem_counts[int(row.judge_id)] = int(row.cnt)
+        for row in session.execute(
+            text("""
+                SELECT judge_id, COUNT(*)::bigint AS cnt
+                FROM pcs_score_per_judge
+                WHERE judge_id IN :ids
+                GROUP BY judge_id
+            """).bindparams(bindparam("ids", expanding=True)),
+            {"ids": chunk},
+        ).all():
+            pcs_counts[int(row.judge_id)] = int(row.cnt)
+
+    total_counts = {
+        jid: elem_counts.get(jid, 0) + pcs_counts.get(jid, 0) for jid in all_ids
+    }
+    out: list[dict] = []
+    for match_key, members in sorted(duplicate_groups.items()):
+        ids = [jid for jid, _ in members]
+        canonical_id = select_canonical_judge_ids_per_match_key(
+            {match_key: ids}, total_counts
+        )[match_key]
+        out.append({
+            "match_key": match_key,
+            "canonical_id": canonical_id,
+            "members": [
+                {
+                    "id": jid,
+                    "name": name,
+                    "element_scores": elem_counts.get(jid, 0),
+                    "pcs_scores": pcs_counts.get(jid, 0),
+                    "total_scores": total_counts.get(jid, 0),
+                    "is_canonical": jid == canonical_id,
+                }
+                for jid, name in members
+            ],
+        })
+    return out
+
 
 # session = get_db_session()
 # database_obj = DatabaseLoader(session)

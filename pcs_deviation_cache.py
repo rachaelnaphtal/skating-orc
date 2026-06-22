@@ -39,15 +39,18 @@ from pcs_deviation_analysis import (
     FLOOR_SIGMA,
     MIN_BIN_COUNT,
     PCS_DEVIATION_SHARD_MARK_COLUMNS,
+    PCS_SIGMA_MODEL_DISCRETE,
+    PCS_SIGMA_MODEL_QUADRATIC,
     PcsDeviationShard,
-    annotate_normalized_marks_pcs,
+    annotate_normalized_marks_for_sigma_model,
     apply_min_marks_to_pcs_deviation_result,
     benchmark_competition_scope,
     benchmark_scope_kwargs_from_run_params,
     benchmark_season_bounds,
     benchmark_segment_level_preset,
+    build_quadratic_sigma_fits_dataframe_pcs,
     build_ranking_display_table_pcs,
-    build_sigma_bins_dataframe_pcs,
+    build_sigma_display_dataframe_pcs,
     compute_errors,
     compute_mergeable_judge_summary_pcs,
     compute_pcs_deviation_data_fingerprint,
@@ -58,10 +61,12 @@ from pcs_deviation_analysis import (
     load_judge_identity_map,
     load_pcs_deviation_marks,
     marking_score_summary_pcs,
+    min_bin_count_for_sigma_model,
     normalize_pcs_deviation_shard_marks,
     ranking_scope_kwargs_from_run_params,
     run_params_benchmark_compute_key,
     season_years_in_run_range,
+    sigma_model_from_run_params,
     unpack_pcs_deviation_run_params,
     uses_separate_benchmark_pool,
 )
@@ -557,7 +562,12 @@ def get_or_fit_benchmark_sigma_params(
     if bench_marks is None or bench_marks.empty:
         return {}, pd.DataFrame() if bench_marks is not None else None, False
 
-    params = fit_sigma_params_from_marks(bench_marks, min_bin_count=int(rp[8]))
+    params = fit_sigma_params_from_marks(
+        bench_marks,
+        min_bin_count=int(rp[8]),
+        sigma_model=sigma_model_from_run_params(run_params),
+        floor_sigma=float(rp[7]),
+    )
     if persist_sigma and params:
         _save_sigma_cache_row(
             session, analytics, run_params, params, n_marks=len(bench_marks)
@@ -730,8 +740,11 @@ def _persist_shard_summaries_for_scope(
             marks = _load_marks_from_db(session, analytics, shard)
         if marks.empty:
             continue
-        work = annotate_normalized_marks_pcs(
-            compute_errors(marks), params, floor_sigma=floor_sigma
+        work = annotate_normalized_marks_for_sigma_model(
+            compute_errors(marks),
+            params,
+            sigma_model=sigma_model_from_run_params(run_params),
+            floor_sigma=floor_sigma,
         )
         mergeable = compute_mergeable_judge_summary_pcs(work)
         _save_shard_summary_row(
@@ -801,22 +814,31 @@ def _try_assemble_ranking_from_shard_summaries(
         return _empty_ranking_error("No PCS score rows found for the selected filters.")
 
     disc_map = {int(i): n for i, n in analytics.get_discipline_types()}
+    sigma_model = sigma_model_from_run_params(run_params)
     bins_df = sigma_reference_df if sigma_reference_df is not None else pd.DataFrame()
     sigma_bins = (
-        build_sigma_bins_dataframe_pcs(
+        build_sigma_display_dataframe_pcs(
             compute_errors(bins_df.copy()) if not bins_df.empty else bins_df,
             params,
             disc_map,
             min_bin_count=min_bin_count,
+            sigma_model=sigma_model,
+            floor_sigma=floor_sigma,
         )
         if not bins_df.empty
         else pd.DataFrame()
     )
     marking = build_ranking_display_table_pcs(judge_summary_all)
+    sigma_fits = (
+        build_quadratic_sigma_fits_dataframe_pcs(params, disc_map)
+        if sigma_model == PCS_SIGMA_MODEL_QUADRATIC
+        else pd.DataFrame()
+    )
     return {
         "marking": marking,
         "summary": marking_score_summary_pcs(judge_summary_all),
         "sigma_bins": sigma_bins,
+        "sigma_fits": sigma_fits,
         "judge_summary_all": judge_summary_all,
         "judge_discipline_detail": pd.DataFrame(),
         "judge_component_detail": pd.DataFrame(),
@@ -825,6 +847,7 @@ def _try_assemble_ranking_from_shard_summaries(
         "judge_component_detail_all": pd.DataFrame(),
         "judge_control_bin_detail_all": pd.DataFrame(),
         "params": params,
+        "sigma_model": sigma_model,
         "n_raw_marks": n_raw,
         "n_sigma_buckets": len(params),
         "error": None,
@@ -852,6 +875,7 @@ def run_pcs_deviation_ranking_pipeline(
     benchmark_end_season_year: str | None = None,
     benchmark_competition_scope_key: str | None = None,
     benchmark_segment_level_preset: str | None | object = _BENCHMARK_SEGMENT_LEVEL_UNSET,
+    sigma_model: str = PCS_SIGMA_MODEL_DISCRETE,
     cache_only: bool = False,
     persist_shards: bool = True,
 ) -> dict[str, Any]:
@@ -875,6 +899,7 @@ def run_pcs_deviation_ranking_pipeline(
         benchmark_competition_scope_key,
         segment_level_preset,
         bench_levels,
+        sigma_model,
     )
     session = analytics.session
     if not cache_only:
@@ -951,7 +976,10 @@ def run_pcs_deviation_ranking_pipeline(
             params = None
         elif params is None and not cache_only:
             params = fit_sigma_params_from_marks(
-                ranking_marks, min_bin_count=int(min_bin_count)
+                ranking_marks,
+                min_bin_count=int(min_bin_count),
+                sigma_model=sigma_model_from_run_params(run_params),
+                floor_sigma=float(floor_sigma),
             )
             if persist_shards and params:
                 _save_sigma_cache_row(
@@ -965,7 +993,11 @@ def run_pcs_deviation_ranking_pipeline(
 
     if ranking_marks.empty:
         return finish_pcs_deviation_rankings_from_marks(
-            analytics, ranking_marks, min_marks=0, params=params or {}
+            analytics,
+            ranking_marks,
+            min_marks=0,
+            params=params or {},
+            sigma_model=sigma_model_from_run_params(run_params),
         )
 
     result = finish_pcs_deviation_rankings_from_marks(
@@ -976,6 +1008,7 @@ def run_pcs_deviation_ranking_pipeline(
         min_bin_count=min_bin_count,
         params=params if params else None,
         sigma_reference_df=sigma_ref,
+        sigma_model=sigma_model_from_run_params(run_params),
     )
     result["benchmark_start_season_year"] = bs
     result["benchmark_end_season_year"] = be
@@ -1012,6 +1045,7 @@ def load_cached_pcs_deviation_rankings(
         benchmark_end_season_year=benchmark_season_bounds(run_params)[1],
         benchmark_competition_scope_key=benchmark_competition_scope(run_params),
         benchmark_segment_level_preset=benchmark_segment_level_preset(run_params),
+        sigma_model=sigma_model_from_run_params(run_params),
         cache_only=True,
         persist_shards=False,
     )
@@ -1090,6 +1124,7 @@ def build_precompute_pcs_deviation_run_params(
     competition_scope: str,
     *,
     segment_level_preset: str | None = None,
+    sigma_model: str = PCS_SIGMA_MODEL_DISCRETE,
 ) -> tuple:
     return (
         None,
@@ -1100,12 +1135,13 @@ def build_precompute_pcs_deviation_run_params(
         None,
         0,
         float(FLOOR_SIGMA),
-        int(MIN_BIN_COUNT),
+        int(min_bin_count_for_sigma_model(sigma_model)),
         None,
         None,
         competition_scope,
         segment_level_preset,
         segment_level_preset,
+        sigma_model,
     )
 
 

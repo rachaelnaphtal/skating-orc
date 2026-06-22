@@ -3402,7 +3402,7 @@ PCS scores are not part of this model.
 
 
 _PCS_DEVIATION_FLOOR_SIGMA = 0.05
-_PCS_DEVIATION_MIN_BIN_COUNT = 30
+_PCS_DEVIATION_MIN_BIN_COUNT = 10
 
 
 def _pcs_deviation_rankings_column_config() -> dict:
@@ -3444,11 +3444,40 @@ def _pcs_deviation_rankings_column_config() -> dict:
 def _pcs_deviation_sigma_bins_column_config() -> dict:
     return {
         "Marks in bin": st.column_config.NumberColumn("Marks in bin", format="%d"),
-        "Error stdev (all marks)": st.column_config.NumberColumn(
-            "Error stdev (all marks)", format="%.4f"
+        "Mean control score": st.column_config.NumberColumn(
+            "Mean control score", format="%.3f"
+        ),
+        "Error variance (sample, ddof=1)": st.column_config.NumberColumn(
+            "Error variance (sample, ddof=1)", format="%.6f"
+        ),
+        "Error stdev (sample, ddof=1)": st.column_config.NumberColumn(
+            "Error stdev (sample, ddof=1)", format="%.4f"
+        ),
+        "σ̂ fitted (quadratic)": st.column_config.NumberColumn(
+            "σ̂ fitted (quadratic)", format="%.4f"
         ),
         "σ̂ used in model": st.column_config.NumberColumn(
             "σ̂ used in model", format="%.4f"
+        ),
+        "Error stdev (all marks)": st.column_config.NumberColumn(
+            "Error stdev (all marks)", format="%.4f"
+        ),
+    }
+
+
+def _pcs_deviation_sigma_fits_column_config() -> dict:
+    return {
+        "Bins fitted": st.column_config.NumberColumn("Bins fitted", format="%d"),
+        "Marks in fit": st.column_config.NumberColumn("Marks in fit", format="%d"),
+        "Plot bins": st.column_config.NumberColumn("Plot bins", format="%d"),
+        "Competitions (plot overlay)": st.column_config.NumberColumn(
+            "Competitions (plot overlay)", format="%d"
+        ),
+        "RMSE (variance fit, σ)": st.column_config.NumberColumn(
+            "RMSE (variance fit, σ)", format="%.4f"
+        ),
+        "RMSE (direct σ, plot bins)": st.column_config.NumberColumn(
+            "RMSE (direct σ, plot bins)", format="%.4f"
         ),
     }
 
@@ -3550,6 +3579,7 @@ def _pcs_deviation_load_judge_breakdown(
         compute_judge_detail_for_identity_pcs,
         ranking_scope_kwargs_from_run_params,
         run_params_ranking_compute_key,
+        sigma_model_from_run_params,
         unpack_pcs_deviation_run_params,
     )
 
@@ -3589,21 +3619,24 @@ def _pcs_deviation_load_judge_breakdown(
     rp = unpack_pcs_deviation_run_params(run_params)
     scope = ranking_scope_kwargs_from_run_params(run_params)
 
-    def _compute_judge_breakdown(analytics, judge_name, sigma_params, rank_scope):
+    def _compute_judge_breakdown(analytics, judge_name, sigma_params, rank_scope, model):
         return compute_judge_detail_for_identity_pcs(
             analytics,
             judge_name,
             sigma_params,
             floor_sigma=float(rp[7]),
+            sigma_model=model,
             **rank_scope,
         )
 
+    sigma_model = sigma_model_from_run_params(run_params)
     with st.spinner(f"Loading breakdown for {pick_judge}…"):
         detail = run_with_isolated_analytics(
             _compute_judge_breakdown,
             pick_judge,
             params,
             scope,
+            sigma_model,
         )
     if detail[0].empty and detail[1].empty and detail[2].empty:
         return detail
@@ -3648,12 +3681,25 @@ def pcs_deviation_analysis_page():
         ELEMENT_RANKING_LEVEL_FILTER_LABELS,
         MIN_PCS_DEVIATION_EVENT_DATE,
         PCS_DEVIATION_COMPETITION_SCOPE_LABELS,
+        PCS_SIGMA_MODEL_LABELS,
+        PCS_SIGMA_MODEL_QUADRATIC,
+        PCS_SIGMA_MODEL_DISCRETE,
         apply_min_marks_to_pcs_deviation_result,
+        benchmark_scope_kwargs_from_run_params,
+        build_pcs_heteroscedasticity_figure,
+        collect_sigma_per_competition_stats_pcs,
+        collect_sigma_plot_stats_pcs,
+        compute_errors,
         compute_pcs_deviation_rankings_from_run_params,
         filter_pcs_deviation_season_years,
+        load_pcs_deviation_marks,
+        min_bin_count_for_sigma_model,
+        normalize_sigma_model,
         pcs_deviation_competition_scope_key,
         pcs_deviation_discipline_types,
+        pcs_sigma_bin_width_for_model,
         run_params_same_sigma_and_ranking_scope,
+        sigma_model_from_run_params,
         unpack_pcs_deviation_run_params,
         uses_separate_benchmark_pool,
         validate_pcs_deviation_scope,
@@ -3681,10 +3727,11 @@ other judge reports).
 **2. Control score** — For each skater × PCS component, the panel **median** PCS.
 **Error** = judge PCS − control score.
 
-**3. Intrinsic spread σ̂** — For each *(discipline, PCS component, panel-median
-range)* with at least ``min_bin_count`` marks, estimate σ̂ as the sample standard
-deviation of errors in that bin. Ranges are width 1 (0.25–1, 1.25–2, 2.25–3, …).
-If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global fallback σ.
+**3. Intrinsic spread σ̂** — Choose **discrete bins** or a **quadratic variance** model.
+**Discrete:** **0.25 PCS** bins (centers 0, 0.25, 0.5, …). **Quadratic:** **0.125 PCS** bins
+(centers 0.125, 0.25, 0.375, 0.5, …). Minimum marks per bin: **10** for both.
+Discrete: σ̂ per bin from sample stdev. Quadratic: fit sample variance vs control score, then
+σ̂(c)=√Var̂(c). Missing discrete bins try neighbors (±0.25, ±0.5); quadratic uses the smooth curve.
 
 **4. Normalized mark** — ``m = error / σ̂`` (per mark).
 
@@ -3862,7 +3909,18 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
             benchmark_segment_level_preset = bench_segment_level_pick
 
     st.subheader("Model parameters")
-    p1, p2, p3 = st.columns(3)
+    _sigma_model_options = list(PCS_SIGMA_MODEL_LABELS)
+    sigma_model_label = st.selectbox(
+        "σ̂ model",
+        _sigma_model_options,
+        index=_sigma_model_options.index(PCS_SIGMA_MODEL_QUADRATIC),
+        format_func=lambda key: PCS_SIGMA_MODEL_LABELS[key],
+        key="pcs_deviation_sigma_model",
+    )
+    sigma_model = normalize_sigma_model(sigma_model_label)
+    sigma_bin_width = pcs_sigma_bin_width_for_model(sigma_model)
+    min_bin_count = min_bin_count_for_sigma_model(sigma_model)
+    p1, p2 = st.columns(2)
     with p1:
         if "pcs_deviation_min_marks" not in st.session_state:
             st.session_state["pcs_deviation_min_marks"] = 0
@@ -3883,16 +3941,10 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
             format="%.2f",
             key="pcs_deviation_floor_sigma",
         )
-    with p3:
-        min_bin_count = st.number_input(
-            "Min marks per σ̂ bin",
-            min_value=5,
-            max_value=200,
-            value=int(_PCS_DEVIATION_MIN_BIN_COUNT),
-            step=5,
-            key="pcs_deviation_min_bin_count",
-            help="(discipline, component, panel-median range) buckets with fewer marks are skipped.",
-        )
+    st.caption(
+        f"σ̂ bins are **{sigma_bin_width:g} PCS** wide "
+        f"(min **{min_bin_count}** marks per bin)."
+    )
 
     us_officials_only = st.checkbox(
         "US directory officials only",
@@ -3916,6 +3968,7 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
         benchmark_scope_key,
         segment_level_preset,
         benchmark_segment_level_preset,
+        sigma_model,
     )
 
     scope_err = validate_pcs_deviation_scope(
@@ -3948,11 +4001,13 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
                 ),
                 run_params,
             )
-            if cached is not None:
-                st.session_state.pcs_deviation_result = cached
-                st.session_state.pcs_deviation_cache_saved = True
-                st.success("Loaded precomputed cache for this filter set.")
-                st.rerun()
+            if cached is not None and not cached.get("error"):
+                cached_model = normalize_sigma_model(cached.get("sigma_model"))
+                if cached_model == sigma_model:
+                    st.session_state.pcs_deviation_result = cached
+                    st.session_state.pcs_deviation_cache_saved = True
+                    st.success("Loaded precomputed cache for this filter set.")
+                    st.rerun()
         with st.spinner("Computing PCS deviation rankings…"):
             result = run_with_isolated_analytics(
                 compute_pcs_deviation_rankings_from_run_params,
@@ -4030,11 +4085,18 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
         st.caption("Results loaded from or saved to cache for this filter set.")
 
     st.subheader("Run summary")
-    m1, m2, m3, m4 = st.columns(4)
+    sigma_model_used = normalize_sigma_model(
+        result.get("sigma_model") or sigma_model_from_run_params(run_params)
+    )
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("PCS marks (filtered)", f"{result['n_raw_marks']:,}")
     m2.metric("σ̂ bins fitted", f"{result['n_sigma_buckets']:,}")
     m3.metric("Judges ranked", len(result["marking"]))
     m4.metric("Floor σ̂", f"{floor_sigma:.2f}")
+    m5.metric(
+        "σ̂ model",
+        PCS_SIGMA_MODEL_LABELS.get(sigma_model_used, sigma_model_used),
+    )
 
     if uses_separate_benchmark_pool(run_params):
         from pcs_deviation_analysis import PCS_DEVIATION_SCOPE_LABEL_TO_KEY
@@ -4104,7 +4166,92 @@ If a mark’s bin is missing, try neighboring ranges (±1, ±2), else a global f
         key="pcs_deviation_rankings_download",
     )
 
-    st.subheader("σ̂ parameters (by discipline, component, panel-median range)")
+    sigma_fits = result.get("sigma_fits", pd.DataFrame())
+    if sigma_model_used == PCS_SIGMA_MODEL_QUADRATIC:
+        st.subheader("σ̂ quadratic fits (by discipline × component)")
+        if isinstance(sigma_fits, pd.DataFrame) and not sigma_fits.empty:
+            st.dataframe(
+                sigma_fits,
+                width="stretch",
+                hide_index=True,
+                column_config=_pcs_deviation_sigma_fits_column_config(),
+            )
+        else:
+            st.info("No quadratic σ̂ series were fitted for the current filters.")
+
+        params = result.get("params") or {}
+        if params:
+            with st.expander(
+                "Heteroscedasticity plots (sample σ vs quadratic fit)",
+                expanded=False,
+            ):
+                st.caption(
+                    f"Filled dots: empirical σ in **{sigma_bin_width:g} PCS** bins (min **{int(min_bin_count)}** "
+                    "marks). **Solid line**: production √(variance) fit. **Dashed line**: "
+                    "direct σ quadratic on those bins. Open circles: one point per competition "
+                    "(≥30 marks pooled)."
+                )
+                bench_scope = benchmark_scope_kwargs_from_run_params(run_params)
+                bench_marks = run_with_isolated_analytics(
+                    lambda analytics, scope: load_pcs_deviation_marks(analytics, **scope),
+                    bench_scope,
+                )
+                disc_map = run_with_isolated_analytics(
+                    lambda analytics, sk: {
+                        int(i): n for i, n in pcs_deviation_discipline_types(analytics, sk)
+                    },
+                    benchmark_scope_key,
+                )
+                if isinstance(bench_marks, pd.DataFrame) and not bench_marks.empty:
+                    work = compute_errors(
+                        bench_marks, bin_width=sigma_bin_width
+                    )
+                    stats_all = collect_sigma_plot_stats_pcs(
+                        work,
+                        bin_width=sigma_bin_width,
+                        min_bin_count=int(min_bin_count),
+                    )
+                    per_comp_all = collect_sigma_per_competition_stats_pcs(work)
+                    for (disc_id, component), p in sorted(
+                        params.items(), key=lambda kv: (kv[0][0], kv[0][1])
+                    ):
+                        if not isinstance(p, dict):
+                            continue
+                        disc_name = disc_map.get(int(disc_id), str(disc_id))
+                        mask = (stats_all["discipline_type_id"] == int(disc_id)) & (
+                            stats_all["component"] == str(component)
+                        )
+                        stats = stats_all.loc[mask]
+                        comp_mask = (
+                            per_comp_all["discipline_type_id"] == int(disc_id)
+                        ) & (per_comp_all["component"] == str(component))
+                        per_comp = per_comp_all.loc[comp_mask]
+                        fig = build_pcs_heteroscedasticity_figure(
+                            stats,
+                            p,
+                            title=f"{disc_name} — {component}",
+                            per_competition_stats=per_comp,
+                            floor_sigma=float(floor_sigma),
+                            bin_width=float(sigma_bin_width),
+                        )
+                        if fig is not None:
+                            n_comp = int(p.get("n_competitions_plot", len(per_comp)))
+                            st.caption(
+                                f"{disc_name} — {component}: **{len(stats)}** σ bins, "
+                                f"**{n_comp}** competitions in overlay."
+                            )
+                            st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info(
+                        "No benchmark marks for this σ̂ pool — widen seasons or scope, "
+                        "or run analysis once without **Use precomputed cache**."
+                    )
+
+    st.subheader(
+        "σ̂ bin diagnostics"
+        if sigma_model_used == PCS_SIGMA_MODEL_QUADRATIC
+        else "σ̂ parameters (by discipline, component, control-score bin)"
+    )
     sigma_bins = result.get("sigma_bins", pd.DataFrame())
     if sigma_bins.empty:
         st.info("No σ̂ bins to display for the current filters.")
@@ -6404,6 +6551,13 @@ render_query_help([
     "**PCS quality:** `?competition_scope=`, `?start_season=`, `?end_season=`, "
     "`?disciplines=` (required; comma-separated names, e.g. `Singles`), "
     "`?start_date=` / `?end_date=`, `?min_pcs_marks=`, `?us_officials_only=1`",
+    "",
+    "**PCS deviation:** `?page=pcs-deviation`, `?competition_scope=` (no `nqs`; "
+    "includes `isu_event`), `?start_season=`, `?end_season=`, `?disciplines=`, "
+    "`?start_date=` / `?end_date=`, `?min_marks=`, `?segment_levels=`, "
+    "`?floor_sigma=`, `?sigma_model=` (`discrete`, `quadratic`), "
+    "`?bench_start_season=` / `?bench_end_season=`, `?bench_competition_scope=`, "
+    "`?bench_segment_levels=`, `?us_officials_only=1`",
     "",
     "**Temporal:** `?analysis_type=`, `?metric=`, `?score_type=`, `?judge=`",
     "",

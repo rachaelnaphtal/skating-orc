@@ -40,6 +40,7 @@ from officials_competition_types import (
     COMPETITION_SCOPE_ALL,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
     COMPETITION_SCOPE_INTERNATIONAL,
+    COMPETITION_SCOPE_ISU_EVENT,
     COMPETITION_SCOPE_NQS,
     COMPETITION_SCOPE_QUALIFYING,
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
@@ -47,6 +48,7 @@ from officials_competition_types import (
     OFFICIALS_COMPETITION_TYPE_ID_NQS,
     OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY,
     OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL,
+    OFFICIALS_COMPETITION_TYPE_IDS_ISU_EVENT,
     OFFICIALS_COMPETITION_TYPE_IDS_SECTIONALS_AND_CHAMPIONSHIPS,
 )
 
@@ -226,6 +228,9 @@ class JudgeAnalytics:
                 Competition.officials_analysis_competition_type_id.isnot(None),
                 Competition.officials_analysis_competition_type_id
                 != OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING,
+                ~Competition.officials_analysis_competition_type_id.in_(
+                    OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL
+                ),
             )
         if competition_scope == COMPETITION_SCOPE_NQS:
             return (
@@ -243,6 +248,10 @@ class JudgeAnalytics:
         if competition_scope == COMPETITION_SCOPE_INTERNATIONAL:
             return Competition.officials_analysis_competition_type_id.in_(
                 OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL
+            )
+        if competition_scope == COMPETITION_SCOPE_ISU_EVENT:
+            return Competition.officials_analysis_competition_type_id.in_(
+                OFFICIALS_COMPETITION_TYPE_IDS_ISU_EVENT
             )
         return None
 

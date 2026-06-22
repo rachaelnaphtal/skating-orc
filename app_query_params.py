@@ -21,6 +21,10 @@ Example (element deviation ranking)::
 
     ?page=element-deviation-ranking&competition_scope=qualifying&segment_levels=junior-senior
         &floor_sigma=0.05&min_bin_count=30&bench_start_season=2223&bench_end_season=2526
+
+Example (PCS deviation)::
+
+    ?page=pcs-deviation&competition_scope=isu_event&sigma_model=quadratic
 """
 
 from __future__ import annotations
@@ -339,6 +343,7 @@ COMPETITION_SCOPE_SLUG_TO_LABEL = {
     "sectionals": "Sectionals & championships",
     "championships": "Championships only",
     "international": "International",
+    "isu_event": "ISU events",
 }
 COMPETITION_SCOPE_LABEL_TO_SLUG = {
     v: k for k, v in COMPETITION_SCOPE_SLUG_TO_LABEL.items()
@@ -358,6 +363,7 @@ from officials_competition_types import (  # noqa: E402
     COMPETITION_SCOPE_ALL,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
     COMPETITION_SCOPE_INTERNATIONAL,
+    COMPETITION_SCOPE_ISU_EVENT,
     COMPETITION_SCOPE_NQS,
     COMPETITION_SCOPE_QUALIFYING,
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
@@ -370,6 +376,7 @@ COMPETITION_SCOPE_LABEL_TO_KEY = {
     "Sectionals & championships": COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
     "Championships only": COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
     "International": COMPETITION_SCOPE_INTERNATIONAL,
+    "ISU events": COMPETITION_SCOPE_ISU_EVENT,
 }
 
 _CROSS_JUDGE_METRICS = (
@@ -555,11 +562,21 @@ def _apply_analysis_page_url_filters(page: str, analytics) -> None:
         apply_bool_param("us_officials_only", "pcs_quality_us_officials_only")
 
     elif page == "PCS Deviation Analysis":
+        from pcs_deviation_analysis import (
+            PCS_SIGMA_MODEL_DISCRETE,
+            PCS_SIGMA_MODEL_QUADRATIC,
+        )
+
         apply_choice_param(
             "competition_scope",
             "pcs_deviation_competition_scope",
             PCS_DEVIATION_SCOPE_SLUG_TO_LABEL.values(),
             slug_map=PCS_DEVIATION_SCOPE_SLUG_TO_LABEL,
+        )
+        apply_choice_param(
+            "sigma_model",
+            "pcs_deviation_sigma_model",
+            (PCS_SIGMA_MODEL_DISCRETE, PCS_SIGMA_MODEL_QUADRATIC),
         )
         start_sy = qp_get("start_season")
         end_sy = qp_get("end_season")
@@ -611,12 +628,6 @@ def _apply_analysis_page_url_filters(page: str, analytics) -> None:
             "pcs_deviation_floor_sigma",
             min_value=0.01,
             max_value=1.0,
-        )
-        apply_int_param(
-            "min_bin_count",
-            "pcs_deviation_min_bin_count",
-            min_value=5,
-            max_value=200,
         )
         bench_start = qp_get("bench_start_season")
         bench_end = qp_get("bench_end_season")
@@ -884,7 +895,11 @@ def sync_analysis_app_query_params(page: str) -> None:
             params["us_officials_only"] = "1"
 
     elif page == "PCS Deviation Analysis":
-        from pcs_deviation_analysis import FLOOR_SIGMA, MIN_BIN_COUNT
+        from pcs_deviation_analysis import (
+            FLOOR_SIGMA,
+            MIN_BIN_COUNT,
+            PCS_SIGMA_MODEL_DISCRETE,
+        )
 
         scope_ss = st.session_state.get("pcs_deviation_competition_scope")
         if scope_ss:
@@ -916,9 +931,11 @@ def sync_analysis_app_query_params(page: str) -> None:
         floor_sigma = st.session_state.get("pcs_deviation_floor_sigma")
         if floor_sigma is not None and float(floor_sigma) != float(FLOOR_SIGMA):
             params["floor_sigma"] = f"{float(floor_sigma):.2f}"
-        min_bin = st.session_state.get("pcs_deviation_min_bin_count")
-        if min_bin is not None and int(min_bin) != int(MIN_BIN_COUNT):
-            params["min_bin_count"] = int(min_bin)
+        sigma_model = st.session_state.get(
+            "pcs_deviation_sigma_model", PCS_SIGMA_MODEL_DISCRETE
+        )
+        if sigma_model and sigma_model != PCS_SIGMA_MODEL_DISCRETE:
+            params["sigma_model"] = str(sigma_model)
         if st.session_state.get("pcs_deviation_benchmark_customized"):
             bench_start = st.session_state.get("pcs_deviation_benchmark_start_season")
             if bench_start:

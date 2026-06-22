@@ -1,9 +1,10 @@
 """
 USFS ``officials_analysis.competition_type`` ids used when linking ``public.competition``.
 
-Qualifying analytics scope: every linked type **except** ``NON_QUALIFYING`` (11);
-that includes Adult / Collegiate types **12–14**. They are **not** part of
-**Sectionals & championships** or **Championships only** scope lists (types **1–9** / **4, 8** only).
+Qualifying analytics scope: every linked type **except** ``NON_QUALIFYING`` (11) and
+international types **15–17**. Includes Adult / Collegiate types **12–14**. They are
+**not** part of **Sectionals & championships** or **Championships only** scope lists
+(types **1–9** / **4, 8** only).
 NQS scope: type id **10** (National Qualifying Series).
 """
 
@@ -57,6 +58,7 @@ COMPETITION_SCOPE_NQS = "nqs"
 COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS = "sectionals_and_championships"
 COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY = "championships_only"
 COMPETITION_SCOPE_INTERNATIONAL = "international"
+COMPETITION_SCOPE_ISU_EVENT = "isu_event"
 
 # Every analytics scope key (matches Streamlit competition-scope filters).
 ALL_COMPETITION_SCOPES: tuple[str, ...] = (
@@ -66,6 +68,7 @@ ALL_COMPETITION_SCOPES: tuple[str, ...] = (
     COMPETITION_SCOPE_SECTIONALS_AND_CHAMPIONSHIPS,
     COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
     COMPETITION_SCOPE_INTERNATIONAL,
+    COMPETITION_SCOPE_ISU_EVENT,
 )
 
 # Types 1–3 SPD sectionals, 4 US Champs, 5–7,9 SYS sectionals, 8 US Synchro Champs.
