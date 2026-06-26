@@ -275,6 +275,25 @@ def isu_season_codes_preceding_july1(listing_july1_year: int, n: int) -> list[in
     return codes
 
 
+def season_codes_ending_at(end_season_code: int, n: int) -> list[int]:
+    """
+    USFS season codes for the ``n`` seasons ending at ``end_season_code`` (inclusive).
+
+    Example: end ``2526``, n=4 → ``[2223, 2324, 2425, 2526]``.
+    """
+    if n <= 0:
+        return []
+    end = int(end_season_code)
+    codes: list[int] = []
+    for _ in range(n):
+        codes.insert(0, end)
+        start_yy = end // 100
+        end_yy = end % 100
+        prev_start = (start_yy - 1) % 100
+        end = int(f"{prev_start:02d}{start_yy:02d}")
+    return codes
+
+
 def season_codes_preceding_listing(anchor_season_code: int, n: int) -> list[int]:
     """
     USFS season codes for the ``n`` completed seasons before the listing anchor.

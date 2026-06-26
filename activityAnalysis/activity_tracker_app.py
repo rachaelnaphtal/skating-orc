@@ -10,6 +10,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from app_query_params import (
+    activity_person_report_url,
     apply_activity_achieved_dates_from_query,
     apply_activity_competition_group_from_query,
     apply_activity_discipline_from_query,
@@ -51,9 +52,16 @@ from load_activity_data import (
     get_competitions_for_report_dropdown,
     get_competition_assignment_rows,
     get_nqs_detailed_activity_report_df,
+    get_total_activity_across_seasons_report_df,
     activity_database_is_postgresql,
     NQS_REPORT_LEVEL_FILTER_BY_LABEL,
     SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL,
+    SYNCHRO_TOTAL_ACTIVITY_JUNIOR_SENIOR_MIN_TEAM_COUNT,
+    TOTAL_ACTIVITY_COL_ALL_COMPS,
+    TOTAL_ACTIVITY_COL_OAC_COMPS,
+    _get_appointment_type_id_by_name,
+    _nqs_directory_appointment_type_name,
+    _nqs_resolve_directory_and_segment_disciplines,
     get_appointments_by_achieved_date_range,
 )
 from sqlalchemy.orm import Session
@@ -549,6 +557,7 @@ REPORT_PERSON_ASSIGNMENTS = "Per-person assignments"
 REPORT_COMPETITION_ASSIGNMENTS = "Per-competition assignments"
 REPORT_NQS_DETAILED = "NQS detailed activity"
 REPORT_SYNCHRO_ACTIVITY = "Synchro Activity"
+REPORT_TOTAL_ACTIVITY_ACROSS_SEASONS = "Total Activity Across Seasons"
 REPORT_APPOINTMENTS_BY_ACHIEVED_DATE = "Appointments by achieved date"
 REPORT_QUALIFYING_AVAILABILITY = "Qualifying availability"
 
@@ -566,6 +575,7 @@ _ACTIVITY_REPORT_OPTIONS = [
     REPORT_COMPETITION_ASSIGNMENTS,
     REPORT_NQS_DETAILED,
     REPORT_SYNCHRO_ACTIVITY,
+    REPORT_TOTAL_ACTIVITY_ACROSS_SEASONS,
     REPORT_APPOINTMENTS_BY_ACHIEVED_DATE,
     REPORT_QUALIFYING_AVAILABILITY,
 ]
@@ -613,6 +623,7 @@ if report_mode in (
     REPORT_SECTIONALS_DETAILED,
     REPORT_NQS_DETAILED,
     REPORT_SYNCHRO_ACTIVITY,
+    REPORT_TOTAL_ACTIVITY_ACROSS_SEASONS,
 ):
     active_appointments_only = st.checkbox(
         "Active appointments only",
@@ -775,6 +786,32 @@ def load_nqs_activity_table(
         require_competition_nqs=require_competition_nqs,
         require_competition_synchronized=require_competition_synchronized,
         include_qualifying_competitions=include_qualifying_competitions,
+    )
+
+
+@st.cache_data(ttl=_ACTIVITY_CACHE_TTL_SEC)
+def load_total_activity_across_seasons_table(
+    official_type: str,
+    discipline: str,
+    active_only: bool,
+    directory_level_ids: tuple[int, ...],
+    *,
+    end_season_code: int,
+    n_seasons: int,
+    include_qualifying_competitions: bool = True,
+    include_per_season_columns: bool = False,
+    junior_senior_min_starts: int = 0,
+):
+    return get_total_activity_across_seasons_report_df(
+        official_type,
+        discipline,
+        end_season_code=end_season_code,
+        n_seasons=n_seasons,
+        active_appointments_only=active_only,
+        directory_level_ids=directory_level_ids,
+        include_qualifying_competitions=include_qualifying_competitions,
+        include_per_season_columns=include_per_season_columns,
+        junior_senior_min_starts=junior_senior_min_starts,
     )
 
 
@@ -1960,6 +1997,311 @@ if report_mode == REPORT_QUALIFYING_AVAILABILITY:
             activity_url_changed=_activity_url_changed,
             on_stop=_activity_stop,
         )
+
+if report_mode == REPORT_TOTAL_ACTIVITY_ACROSS_SEASONS:
+    try:
+        from activityAnalysis.international_listing_seasons import (
+            format_usfs_season_code,
+            season_codes_ending_at,
+        )
+    except ModuleNotFoundError:
+        from international_listing_seasons import (  # type: ignore[no-redef]
+            format_usfs_season_code,
+            season_codes_ending_at,
+        )
+
+    if not activity_database_is_postgresql():
+        st.info(
+            "This report needs PostgreSQL with judging ``public`` tables "
+            "(``segment_official``, ``competition``, ``segment``)."
+        )
+        _activity_stop()
+
+    _ta_key = "total_activity_"
+    _ta_discipline_key = f"{_ta_key}discipline"
+    _synchro_discipline_selected = (
+        st.session_state.get(_ta_discipline_key) == "Synchronized"
+    )
+    _official_type_options = [
+        "Judge",
+        "Referee",
+        "Technical Controller",
+        "Technical Specialist",
+    ]
+    if _synchro_discipline_selected:
+        _official_type_options = ["All", *_official_type_options]
+    ta_official_type = st.selectbox(
+        "Official type",
+        options=_official_type_options,
+        key=f"{_ta_key}official_type",
+    )
+    if ta_official_type == "All":
+        ta_discipline = "Synchronized"
+    elif ta_official_type in ("Judge", "Referee"):
+        ta_discipline = st.selectbox(
+            "Discipline",
+            options=["Singles/Pairs", "Dance", "Synchronized"],
+            key=_ta_discipline_key,
+        )
+    else:
+        ta_discipline = st.selectbox(
+            "Discipline",
+            options=["Singles", "Pairs", "Dance", "Synchronized"],
+            key=_ta_discipline_key,
+        )
+    synchronized_skating = ta_discipline == "Synchronized"
+    include_qualifying_competitions = True
+    _level_options = (
+        SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL
+        if synchronized_skating
+        else NQS_REPORT_LEVEL_FILTER_BY_LABEL
+    )
+    _level_option_labels = list(_level_options.keys())
+    if _activity_url_changed:
+        apply_activity_level_filter_from_query(
+            _level_option_labels, session_key=f"{_ta_key}level_filter"
+        )
+    ta_level_labels = st.multiselect(
+        "Official level (directory)",
+        options=list(_level_options.keys()),
+        default=list(_level_options.keys()),
+        key=f"{_ta_key}level_filter",
+    )
+    if not ta_level_labels:
+        st.info("Select at least one appointment level.")
+        _activity_stop()
+    ta_directory_level_ids = tuple(
+        sorted(_level_options[lbl] for lbl in ta_level_labels)
+    )
+
+    _season_end_options = season_codes_ending_at(2627, 12)
+    if 2526 not in _season_end_options:
+        _season_end_options = [2526] + _season_end_options
+    _season_col1, _season_col2 = st.columns(2)
+    with _season_col1:
+        ta_end_season = st.selectbox(
+            "End season",
+            options=_season_end_options,
+            index=_season_end_options.index(2526)
+            if 2526 in _season_end_options
+            else 0,
+            format_func=lambda c: f"{format_usfs_season_code(c)} ({c})",
+            key=f"{_ta_key}end_season",
+        )
+    with _season_col2:
+        ta_n_seasons = st.number_input(
+            "Number of seasons",
+            min_value=1,
+            max_value=12,
+            value=4,
+            step=1,
+            key=f"{_ta_key}n_seasons",
+        )
+    ta_show_per_season = st.checkbox(
+        "Show per-season columns",
+        value=False,
+        key=f"{_ta_key}show_per_season",
+        help="When off, only period totals are shown (no separate columns per season year).",
+    )
+    ta_jr_sr_min_starts = int(
+        st.number_input(
+            "Minimum Jr/Sr starts to include",
+            min_value=0,
+            max_value=20,
+            value=(
+                SYNCHRO_TOTAL_ACTIVITY_JUNIOR_SENIOR_MIN_TEAM_COUNT
+                if synchronized_skating
+                else 0
+            ),
+            step=1,
+            key=f"{_ta_key}jr_sr_min_starts_{'synchro' if synchronized_skating else 'other'}",
+            help=(
+                "Jr/Sr columns count only Junior or Senior segments with more than this "
+                "many starts (teams in synchronized skating, skaters otherwise). "
+                "Use 0 to include all Junior/Senior segments."
+            ),
+        )
+    )
+    _window_codes = season_codes_ending_at(int(ta_end_season), int(ta_n_seasons))
+    _jr_sr_caption = (
+        "Junior/Senior segments require segment level Junior or Senior"
+        + (
+            f" with more than {ta_jr_sr_min_starts} starts."
+            if ta_jr_sr_min_starts > 0
+            else "."
+        )
+    )
+    st.caption(
+        "Season window: "
+        + ", ".join(format_usfs_season_code(c) for c in _window_codes)
+        + ". Counts use protocol panel rows for the selected role "
+        "and segment discipline. "
+        + _jr_sr_caption
+    )
+
+    ta_table = load_total_activity_across_seasons_table(
+        ta_official_type,
+        ta_discipline,
+        active_appointments_only,
+        ta_directory_level_ids,
+        end_season_code=int(ta_end_season),
+        n_seasons=int(ta_n_seasons),
+        include_qualifying_competitions=include_qualifying_competitions,
+        include_per_season_columns=ta_show_per_season,
+        junior_senior_min_starts=ta_jr_sr_min_starts,
+    )
+    if ta_table.empty:
+        st.info(
+            "No officials match the directory filters, or no panel activity was found "
+            "for the selected season window."
+        )
+    else:
+        ta_show = ta_table.copy()
+        if ta_official_type != "Judge":
+            ta_show = ta_show.drop(columns=[TOTAL_ACTIVITY_COL_OAC_COMPS], errors="ignore")
+        _ta_show_isu = (
+            ta_official_type != "All"
+            and "official_id" in ta_show.columns
+            and "Name" in ta_show.columns
+        )
+        _ta_nat_appt_id = None
+        _ta_dir_disc_id = None
+        if _ta_show_isu:
+            try:
+                _ta_nat_appt_id = _get_appointment_type_id_by_name(
+                    _nqs_directory_appointment_type_name(ta_official_type)
+                )
+                _ta_dir_disc_id, _ = _nqs_resolve_directory_and_segment_disciplines(
+                    ta_official_type, ta_discipline
+                )
+            except (ValueError, KeyError):
+                _ta_show_isu = False
+            if (
+                _ta_nat_appt_id is None
+                or not national_appointment_type_has_isu_mapping(_ta_nat_appt_id)
+            ):
+                _ta_show_isu = False
+        if _ta_show_isu:
+            _ta_oids = ta_show["official_id"].dropna().astype(int).unique().tolist()
+            _ta_isu_ids = get_official_ids_with_isu_appointment(
+                _ta_oids,
+                _ta_nat_appt_id,
+                _ta_dir_disc_id,
+                active_appointments_only=active_appointments_only,
+            )
+            ta_show["ISU"] = ta_show["official_id"].map(
+                lambda x: "Yes" if pd.notna(x) and int(x) in _ta_isu_ids else "No"
+            )
+            _ta_cols = list(ta_show.columns)
+            _ta_cols.remove("ISU")
+            _ta_cols.insert(_ta_cols.index("Name") + 1, "ISU")
+            ta_show = ta_show[_ta_cols]
+            ta_isu_filter = st.selectbox(
+                "ISU appointment",
+                options=["All", "ISU only", "Non-ISU only"],
+                index=0,
+                key=f"{_ta_key}isu_filter",
+                help=(
+                    "Filter by active international (ISU) appointment type matching this "
+                    "report role and discipline (same rules as Championships Detailed)."
+                ),
+            )
+            if ta_isu_filter == "ISU only":
+                ta_show = ta_show[ta_show["ISU"] == "Yes"].reset_index(drop=True)
+            elif ta_isu_filter == "Non-ISU only":
+                ta_show = ta_show[ta_show["ISU"] == "No"].reset_index(drop=True)
+        ta_name_search = st.text_input(
+            "Search name",
+            value="",
+            key=f"{_ta_key}name_search",
+            placeholder="Show only officials whose name contains…",
+        )
+        if ta_name_search.strip():
+            ta_show = ta_show[
+                ta_show["Name"]
+                .astype(str)
+                .str.contains(ta_name_search.strip(), case=False, na=False, regex=False)
+            ].reset_index(drop=True)
+        if "official_id" in ta_show.columns:
+            ta_show = ta_show.copy()
+            ta_show["Open"] = ta_show["official_id"].map(
+                lambda oid: activity_person_report_url(int(oid))
+                if pd.notna(oid)
+                else None
+            )
+        ta_show = ta_show.drop(columns=["official_id"], errors="ignore")
+        if ta_show.empty:
+            st.info("No officials match the current filters.")
+        else:
+            _ta_label_cols = {"Name", "Open", "Level", "ISU"}
+            _ta_col_cfg: dict[str, st.column_config.Column] = {
+                "Name": st.column_config.TextColumn(
+                    "Name",
+                    width="medium",
+                    pinned=True,
+                ),
+            }
+            if "Open" in ta_show.columns:
+                _ta_col_cfg["Open"] = st.column_config.LinkColumn(
+                    "Open",
+                    display_text="Open",
+                    width="small",
+                    pinned=True,
+                    help="Open **Per-person assignments** for this official.",
+                )
+            if "Level" in ta_show.columns:
+                _ta_col_cfg["Level"] = st.column_config.TextColumn("Level", width="small")
+            if "ISU" in ta_show.columns:
+                _ta_col_cfg["ISU"] = st.column_config.TextColumn(
+                    "ISU",
+                    width="small",
+                    help=(
+                        "Active international (ISU) appointment matching this report role "
+                        "and discipline (same rules as Championships Detailed)."
+                    ),
+                )
+            for _c in ta_show.columns:
+                if _c in _ta_label_cols:
+                    continue
+                _ta_col_cfg[_c] = st.column_config.NumberColumn(
+                    str(_c),
+                    format="%d",
+                    width="small",
+                )
+            if TOTAL_ACTIVITY_COL_ALL_COMPS in ta_show.columns:
+                _ta_col_cfg[TOTAL_ACTIVITY_COL_ALL_COMPS] = st.column_config.NumberColumn(
+                    TOTAL_ACTIVITY_COL_ALL_COMPS,
+                    format="%d",
+                    width="small",
+                    help="Total distinct competitions across the selected season window.",
+                )
+            if TOTAL_ACTIVITY_COL_OAC_COMPS in ta_show.columns:
+                _ta_col_cfg[TOTAL_ACTIVITY_COL_OAC_COMPS] = st.column_config.NumberColumn(
+                    TOTAL_ACTIVITY_COL_OAC_COMPS,
+                    format="%d",
+                    width="small",
+                    help=(
+                        "Sectionals + US Championships / Synchro Championships + "
+                        "ISU/international competitions (sum of Sect, Champs, and Intl comps)."
+                    ),
+                )
+
+            _ta_column_order = list(ta_show.columns)
+            if "Open" in _ta_column_order:
+                _ta_column_order.remove("Open")
+                _name_idx = _ta_column_order.index("Name")
+                _ta_column_order.insert(_name_idx + 1, "Open")
+            st.dataframe(
+                ta_show,
+                width="stretch",
+                hide_index=True,
+                column_order=_ta_column_order,
+                column_config=_ta_col_cfg,
+            )
+            if "Open" in ta_show.columns:
+                st.caption("Use **Open** beside a name to view **Per-person assignments**.")
+    _activity_stop()
+
 
 if report_mode in (REPORT_NQS_DETAILED, REPORT_SYNCHRO_ACTIVITY):
     synchro = report_mode == REPORT_SYNCHRO_ACTIVITY

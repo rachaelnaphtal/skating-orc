@@ -35,6 +35,24 @@ import math
 import re
 from datetime import date, datetime
 
+from officials_competition_types import (
+    OFFICIALS_COMPETITION_TYPE_ID_NQS,
+    OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING,
+    OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY,
+    OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL,
+)
+
+try:
+    from activityAnalysis.international_listing_seasons import (
+        season_codes_ending_at,
+        usfs_season_code_ending_in_calendar_year,
+    )
+except ModuleNotFoundError:
+    from international_listing_seasons import (  # type: ignore[no-redef]
+        season_codes_ending_at,
+        usfs_season_code_ending_in_calendar_year,
+    )
+
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
 DEFAULT_ACTIVITY_DB_URL = "sqlite:////tmp/activity_tracker.db"
 
@@ -3385,6 +3403,787 @@ def get_nqs_detailed_activity_report_df(
     out = out[[c for c in col_order if c in out.columns]]
     # Streamlit/PyArrow warn on mixed-type column labels (str vs int year keys from pivot).
     out.columns = pd.Index([str(c) for c in out.columns])
+    return out.sort_values("Name", kind="mergesort").reset_index(drop=True)
+
+
+# Total activity across seasons report (activity tracker).
+TOTAL_ACTIVITY_BUCKET_NONQUALIFYING_DOMESTIC = "nonqualifying_domestic"
+TOTAL_ACTIVITY_BUCKET_NQS = "nqs"
+TOTAL_ACTIVITY_BUCKET_SECTIONALS = "sectionals"
+TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS = "championships"
+TOTAL_ACTIVITY_BUCKET_INTERNATIONALS = "internationals"
+TOTAL_ACTIVITY_BUCKET_OTHER_QUALIFYING = "other_qualifying"
+
+TOTAL_ACTIVITY_NAMED_BUCKETS: tuple[str, ...] = (
+    TOTAL_ACTIVITY_BUCKET_NONQUALIFYING_DOMESTIC,
+    TOTAL_ACTIVITY_BUCKET_NQS,
+    TOTAL_ACTIVITY_BUCKET_SECTIONALS,
+    TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS,
+    TOTAL_ACTIVITY_BUCKET_INTERNATIONALS,
+)
+
+TOTAL_ACTIVITY_BUCKET_DISPLAY: dict[str, str] = {
+    TOTAL_ACTIVITY_BUCKET_NONQUALIFYING_DOMESTIC: "NQ",
+    TOTAL_ACTIVITY_BUCKET_NQS: "NQS",
+    TOTAL_ACTIVITY_BUCKET_SECTIONALS: "Sect",
+    TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS: "Champs",
+    TOTAL_ACTIVITY_BUCKET_INTERNATIONALS: "Intl",
+}
+
+TOTAL_ACTIVITY_COL_ALL_COMPS = "All comps"
+TOTAL_ACTIVITY_COL_OAC_COMPS = "# OAC Competitions"
+TOTAL_ACTIVITY_COL_ALL_SEGS = "All segs"
+TOTAL_ACTIVITY_COL_ALL_JR_SR = "All Jr/Sr"
+TOTAL_ACTIVITY_COL_QUAL_COMPS = "Qual comps"
+TOTAL_ACTIVITY_COL_QUAL_SEGS = "Qual segs"
+TOTAL_ACTIVITY_COL_QUAL_JR_SR = "Qual Jr/Sr"
+TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX = " segs"
+TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX = " Jr/Sr"
+
+TOTAL_ACTIVITY_OAC_COMP_BUCKETS: tuple[str, ...] = (
+    TOTAL_ACTIVITY_BUCKET_SECTIONALS,
+    TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS,
+    TOTAL_ACTIVITY_BUCKET_INTERNATIONALS,
+)
+
+TOTAL_ACTIVITY_JUNIOR_SENIOR_LEVELS: frozenset[str] = frozenset({"Junior", "Senior"})
+SYNCHRO_TOTAL_ACTIVITY_JUNIOR_SENIOR_MIN_TEAM_COUNT = 3
+
+_SECTIONAL_COMPETITION_TYPE_IDS = frozenset({1, 2, 3, 5, 6, 7, 9})
+
+
+def activity_competition_bucket(
+    *,
+    international: bool,
+    qualifying: bool,
+    nqs: bool,
+    competition_type_id: object,
+) -> str:
+    """Mutually exclusive activity bucket for one ``public.competition`` row."""
+    if international:
+        return TOTAL_ACTIVITY_BUCKET_INTERNATIONALS
+    try:
+        tid = int(competition_type_id) if competition_type_id is not None else None
+    except (TypeError, ValueError):
+        tid = None
+    if tid is not None and tid in OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL:
+        return TOTAL_ACTIVITY_BUCKET_INTERNATIONALS
+    if tid in OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY:
+        return TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS
+    if tid in _SECTIONAL_COMPETITION_TYPE_IDS:
+        return TOTAL_ACTIVITY_BUCKET_SECTIONALS
+    if nqs or tid == OFFICIALS_COMPETITION_TYPE_ID_NQS:
+        return TOTAL_ACTIVITY_BUCKET_NQS
+    if not qualifying or tid == OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING:
+        return TOTAL_ACTIVITY_BUCKET_NONQUALIFYING_DOMESTIC
+    return TOTAL_ACTIVITY_BUCKET_OTHER_QUALIFYING
+
+
+def _normalize_competition_season_code(
+    year_val: object,
+    season_codes: tuple[int, ...],
+) -> int | None:
+    """Map ``competition.year`` to a USFS season code in ``season_codes``."""
+    if year_val is None or (isinstance(year_val, float) and pd.isna(year_val)):
+        return None
+    text = str(year_val).strip()
+    if not text.isdigit():
+        return None
+    n = int(text)
+    allowed = {int(c) for c in season_codes}
+    if n in allowed:
+        return n
+    if 2000 <= n <= 2100:
+        code = usfs_season_code_ending_in_calendar_year(n)
+        if code in allowed:
+            return code
+    return None
+
+
+def _segment_counts_junior_senior(
+    segment_level: object,
+    team_count: object,
+    *,
+    junior_senior_min_team_count: int | None,
+) -> bool:
+    level = (str(segment_level).strip() if segment_level is not None else "")
+    if level not in TOTAL_ACTIVITY_JUNIOR_SENIOR_LEVELS:
+        return False
+    if junior_senior_min_team_count is not None:
+        try:
+            teams = int(team_count or 0)
+        except (TypeError, ValueError):
+            teams = 0
+        if teams <= int(junior_senior_min_team_count):
+            return False
+    return True
+
+
+def _competition_season_code_sql(alias: str = "c") -> str:
+    """SQL expression mapping ``competition.year`` to a USFS season code bind set."""
+    return f"""
+    CASE
+      WHEN btrim({alias}.year::text) ~ '^[0-9]+$'
+           AND btrim({alias}.year::text)::integer IN :season_year_codes
+        THEN btrim({alias}.year::text)::integer
+      WHEN btrim({alias}.year::text) ~ '^[0-9]{{4}}$'
+           AND btrim({alias}.year::text)::integer IN :calendar_year_codes
+        THEN (
+          MOD((btrim({alias}.year::text)::integer % 100 + 99), 100) * 100
+          + (btrim({alias}.year::text)::integer % 100)
+        )
+      ELSE NULL
+    END"""
+
+
+def _activity_bucket_sql_case(alias: str = "d") -> str:
+    intl = ",".join(str(x) for x in sorted(OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL))
+    champs = ",".join(str(x) for x in sorted(OFFICIALS_COMPETITION_TYPE_IDS_CHAMPIONSHIPS_ONLY))
+    sect = ",".join(str(x) for x in sorted(_SECTIONAL_COMPETITION_TYPE_IDS))
+    return f"""
+    CASE
+      WHEN COALESCE({alias}.international, false)
+           OR {alias}.competition_type_id IN ({intl})
+        THEN '{TOTAL_ACTIVITY_BUCKET_INTERNATIONALS}'
+      WHEN {alias}.competition_type_id IN ({champs})
+        THEN '{TOTAL_ACTIVITY_BUCKET_CHAMPIONSHIPS}'
+      WHEN {alias}.competition_type_id IN ({sect})
+        THEN '{TOTAL_ACTIVITY_BUCKET_SECTIONALS}'
+      WHEN COALESCE({alias}.nqs, false)
+           OR {alias}.competition_type_id = {OFFICIALS_COMPETITION_TYPE_ID_NQS}
+        THEN '{TOTAL_ACTIVITY_BUCKET_NQS}'
+      WHEN NOT COALESCE({alias}.qualifying, false)
+           OR {alias}.competition_type_id = {OFFICIALS_COMPETITION_TYPE_ID_NON_QUALIFYING}
+        THEN '{TOTAL_ACTIVITY_BUCKET_NONQUALIFYING_DOMESTIC}'
+      ELSE '{TOTAL_ACTIVITY_BUCKET_OTHER_QUALIFYING}'
+    END"""
+
+
+def _junior_senior_segment_sql_expr(
+    *,
+    level_col: str = "segment_level",
+    team_col: str = "team_count",
+    junior_senior_min_team_count: int | None = None,
+) -> str:
+    level_pred = f"{level_col} IN ('Junior', 'Senior')"
+    if junior_senior_min_team_count is None:
+        return level_pred
+    return (
+        f"({level_pred} AND COALESCE({team_col}, 0) > {int(junior_senior_min_team_count)})"
+    )
+
+
+def _query_total_activity_aggregate_rows(
+    official_ids: list[int],
+    panel_role_kind: str,
+    segment_discipline_type_ids: tuple[int, ...],
+    season_year_codes: list[int],
+    *,
+    include_qualifying_competitions: bool = True,
+    include_nqs_bucket: bool = True,
+    junior_senior_min_team_count: int | None = None,
+) -> pd.DataFrame:
+    """
+    Pre-aggregated activity metrics per official (period + per season).
+
+    Only ``segment_official.official_id`` rows are counted (linked at ingest).
+    Returns rows: official_id, season_code, scope, rollup, bucket, competitions,
+    segments, junior_senior_segments.
+    """
+    cols = [
+        "official_id",
+        "season_code",
+        "scope",
+        "rollup",
+        "bucket",
+        "competitions",
+        "segments",
+        "junior_senior_segments",
+    ]
+    if not official_ids or not season_year_codes:
+        return pd.DataFrame(columns=cols)
+    calendar_years = calendar_years_for_usfs_season_codes(season_year_codes)
+    if not calendar_years:
+        return pd.DataFrame(columns=cols)
+
+    role_pred = (
+        _nqs_panel_role_sql_predicate_all()
+        if panel_role_kind == "all"
+        else _nqs_panel_role_sql_predicate(panel_role_kind)
+    )
+    qual_clause = ""
+    if not include_qualifying_competitions:
+        qual_clause = "              AND COALESCE(c.qualifying, false) = false\n"
+
+    season_expr = _competition_season_code_sql("c")
+    jr_expr = _junior_senior_segment_sql_expr(
+        junior_senior_min_team_count=junior_senior_min_team_count
+    )
+    bucket_case = _activity_bucket_sql_case("d")
+    named_buckets = list(TOTAL_ACTIVITY_NAMED_BUCKETS)
+    if not include_nqs_bucket:
+        named_buckets = [
+            b for b in named_buckets if b != TOTAL_ACTIVITY_BUCKET_NQS
+        ]
+    named_bucket_sql = ", ".join(f"'{b}'" for b in named_buckets)
+
+    if junior_senior_min_team_count is not None:
+        team_counts_cte = """
+        team_counts AS (
+            SELECT segment_id, COUNT(*)::integer AS team_count
+            FROM public.skater_segment
+            GROUP BY segment_id
+        ),
+        """
+        team_count_join = "LEFT JOIN team_counts tc ON tc.segment_id = s.id"
+        team_count_select = "COALESCE(tc.team_count, 0) AS team_count"
+    else:
+        team_counts_cte = ""
+        team_count_join = ""
+        team_count_select = "0 AS team_count"
+
+    stmt = text(
+        f"""
+        WITH {team_counts_cte}panel_rows AS (
+            SELECT
+                so.official_id AS official_id,
+                {season_expr} AS season_code,
+                c.id AS competition_id,
+                s.id AS segment_id,
+                s.level AS segment_level,
+                {team_count_select},
+                COALESCE(c.international, false) AS international,
+                COALESCE(c.qualifying, false) AS qualifying,
+                COALESCE(c.nqs, false) AS nqs,
+                c.officials_analysis_competition_type_id AS competition_type_id
+            FROM public.segment_official so
+            INNER JOIN public.segment s ON s.id = so.segment_id
+            INNER JOIN public.competition c ON c.id = s.competition_id
+            {team_count_join}
+            WHERE so.official_id IN :official_ids
+{_segment_competition_year_sql_predicate()}{qual_clause}              AND s.discipline_type_id IN :discipline_type_ids
+              AND ({role_pred})
+        ),
+        deduped AS (
+            SELECT
+                official_id,
+                season_code,
+                competition_id,
+                segment_id,
+                MAX(segment_level) AS segment_level,
+                MAX(team_count) AS team_count,
+                BOOL_OR(international) AS international,
+                BOOL_OR(qualifying) AS qualifying,
+                BOOL_OR(nqs) AS nqs,
+                MAX(competition_type_id) AS competition_type_id
+            FROM panel_rows
+            WHERE season_code IS NOT NULL
+            GROUP BY official_id, season_code, competition_id, segment_id
+        ),
+        classified AS (
+            SELECT
+                d.*,
+                {bucket_case} AS activity_bucket,
+                CASE WHEN {jr_expr} THEN true ELSE false END AS is_junior_senior
+            FROM deduped d
+        )
+        SELECT official_id,
+               season_code::integer AS season_code,
+               'season'::text AS scope,
+               'bucket'::text AS rollup,
+               activity_bucket AS bucket,
+               COUNT(DISTINCT competition_id)::integer AS competitions,
+               COUNT(DISTINCT segment_id)::integer AS segments,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+                   AS junior_senior_segments
+        FROM classified
+        WHERE activity_bucket IN ({named_bucket_sql})
+        GROUP BY official_id, season_code, activity_bucket
+
+        UNION ALL
+
+        SELECT official_id,
+               NULL::integer AS season_code,
+               'period'::text AS scope,
+               'bucket'::text AS rollup,
+               activity_bucket AS bucket,
+               COUNT(DISTINCT competition_id)::integer,
+               COUNT(DISTINCT segment_id)::integer,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+        FROM classified
+        WHERE activity_bucket IN ({named_bucket_sql})
+        GROUP BY official_id, activity_bucket
+
+        UNION ALL
+
+        SELECT official_id,
+               season_code::integer,
+               'season'::text,
+               'qualifying'::text,
+               NULL::text,
+               COUNT(DISTINCT competition_id)::integer,
+               COUNT(DISTINCT segment_id)::integer,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+        FROM classified
+        WHERE NOT international AND qualifying
+        GROUP BY official_id, season_code
+
+        UNION ALL
+
+        SELECT official_id,
+               NULL::integer,
+               'period'::text,
+               'qualifying'::text,
+               NULL::text,
+               COUNT(DISTINCT competition_id)::integer,
+               COUNT(DISTINCT segment_id)::integer,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+        FROM classified
+        WHERE NOT international AND qualifying
+        GROUP BY official_id
+
+        UNION ALL
+
+        SELECT official_id,
+               season_code::integer,
+               'season'::text,
+               'overall'::text,
+               NULL::text,
+               COUNT(DISTINCT competition_id)::integer,
+               COUNT(DISTINCT segment_id)::integer,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+        FROM classified
+        GROUP BY official_id, season_code
+
+        UNION ALL
+
+        SELECT official_id,
+               NULL::integer,
+               'period'::text,
+               'overall'::text,
+               NULL::text,
+               COUNT(DISTINCT competition_id)::integer,
+               COUNT(DISTINCT segment_id)::integer,
+               COUNT(DISTINCT segment_id) FILTER (WHERE is_junior_senior)::integer
+        FROM classified
+        GROUP BY official_id
+        """
+    ).bindparams(
+        bindparam("official_ids", expanding=True),
+        bindparam("discipline_type_ids", expanding=True),
+        bindparam("season_year_codes", expanding=True),
+        bindparam("calendar_year_codes", expanding=True),
+    )
+    params: dict[str, Any] = {
+        "official_ids": official_ids,
+        "discipline_type_ids": list(segment_discipline_type_ids),
+        "season_year_codes": [int(x) for x in season_year_codes],
+        "calendar_year_codes": [int(x) for x in calendar_years],
+    }
+    try:
+        with Session(engine) as session:
+            rows = session.execute(stmt, params).mappings().all()
+    except Exception:
+        logger.exception(
+            "_query_total_activity_aggregate_rows failed for %s officials",
+            len(official_ids),
+        )
+        return pd.DataFrame(columns=cols)
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows)
+
+
+def _total_activity_metrics_index_from_aggregates(
+    aggregate_rows: pd.DataFrame,
+    official_ids: list[int],
+    season_codes: list[int],
+    *,
+    include_nqs_bucket: bool = True,
+) -> dict[int, dict[str, Any]]:
+    """Build per-official metric tuples from SQL aggregate rows."""
+    empty = (0, 0, 0)
+    named_buckets = list(TOTAL_ACTIVITY_NAMED_BUCKETS)
+    if not include_nqs_bucket:
+        named_buckets = [
+            b for b in named_buckets if b != TOTAL_ACTIVITY_BUCKET_NQS
+        ]
+    out: dict[int, dict[str, Any]] = {}
+    for oid in official_ids:
+        out[int(oid)] = {
+            "buckets": {b: empty for b in named_buckets},
+            "qualifying": {int(sc): empty for sc in season_codes},
+            "qualifying_total": empty,
+            "overall": {int(sc): empty for sc in season_codes},
+            "overall_total": empty,
+        }
+    if aggregate_rows.empty:
+        return out
+
+    for row in aggregate_rows.itertuples(index=False):
+        oid = int(row.official_id)
+        rec = out.get(oid)
+        if rec is None:
+            continue
+        metrics = (
+            int(row.competitions or 0),
+            int(row.segments or 0),
+            int(row.junior_senior_segments or 0),
+        )
+        rollup = str(row.rollup)
+        scope = str(row.scope)
+        if rollup == "bucket":
+            bucket = str(row.bucket)
+            if bucket in rec["buckets"]:
+                if scope == "period":
+                    rec["buckets"][bucket] = metrics
+        elif rollup == "qualifying":
+            if scope == "period":
+                rec["qualifying_total"] = metrics
+            elif row.season_code is not None and not pd.isna(row.season_code):
+                season = int(row.season_code)
+                if season in rec["qualifying"]:
+                    rec["qualifying"][season] = metrics
+        elif rollup == "overall":
+            if scope == "period":
+                rec["overall_total"] = metrics
+            elif row.season_code is not None and not pd.isna(row.season_code):
+                season = int(row.season_code)
+                if season in rec["overall"]:
+                    rec["overall"][season] = metrics
+    return out
+
+
+def _aggregate_total_activity_counts(
+    segment_rows: pd.DataFrame,
+    official_ids: list[int],
+    season_codes: list[int],
+    *,
+    include_nqs_bucket: bool = True,
+    junior_senior_min_team_count: int | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Per-official competition/segment/jr-sr counts by bucket and season rollups."""
+    empty_bucket = lambda: {  # noqa: E731
+        "competitions": set(),
+        "segments": set(),
+        "junior_senior_segments": set(),
+    }
+    out: dict[int, dict[str, Any]] = {}
+    for oid in official_ids:
+        out[int(oid)] = {
+            "buckets": {b: empty_bucket() for b in TOTAL_ACTIVITY_NAMED_BUCKETS},
+            "qualifying": {int(sc): empty_bucket() for sc in season_codes},
+            "qualifying_total": empty_bucket(),
+            "overall": {int(sc): empty_bucket() for sc in season_codes},
+            "overall_total": empty_bucket(),
+        }
+
+    if segment_rows.empty:
+        return out
+
+    named_buckets = list(TOTAL_ACTIVITY_NAMED_BUCKETS)
+    if not include_nqs_bucket:
+        named_buckets = [b for b in named_buckets if b != TOTAL_ACTIVITY_BUCKET_NQS]
+
+    for row in segment_rows.itertuples(index=False):
+        oid = int(row.official_id)
+        if oid not in out:
+            continue
+        season = int(row.season_code)
+        comp_id = int(row.competition_id)
+        seg_id = int(row.segment_id)
+        bucket = activity_competition_bucket(
+            international=bool(row.international),
+            qualifying=bool(row.qualifying),
+            nqs=bool(row.nqs),
+            competition_type_id=row.competition_type_id,
+        )
+        is_js = _segment_counts_junior_senior(
+            row.segment_level,
+            row.team_count,
+            junior_senior_min_team_count=junior_senior_min_team_count,
+        )
+
+        def _add(target: dict[str, set]) -> None:
+            target["competitions"].add(comp_id)
+            target["segments"].add(seg_id)
+            if is_js:
+                target["junior_senior_segments"].add(seg_id)
+
+        rec = out[oid]
+        if bucket in rec["buckets"]:
+            _add(rec["buckets"][bucket])
+        if season in rec["overall"]:
+            _add(rec["overall"][season])
+        _add(rec["overall_total"])
+        if not bool(row.international) and bool(row.qualifying):
+            if season in rec["qualifying"]:
+                _add(rec["qualifying"][season])
+            _add(rec["qualifying_total"])
+
+    return out
+
+
+def _total_activity_bucket_metric_columns(
+    buckets: list[str],
+) -> list[str]:
+    cols: list[str] = []
+    for bucket in buckets:
+        prefix = TOTAL_ACTIVITY_BUCKET_DISPLAY[bucket]
+        cols.extend(
+            [
+                f"{prefix} comps",
+                f"{prefix}{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}",
+                f"{prefix}{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}",
+            ]
+        )
+    return cols
+
+
+def _oac_competition_count(buckets: dict[str, tuple[int, int, int] | dict[str, set]]) -> int:
+    """Distinct competitions in sectionals + nationals + ISU/international buckets."""
+    total = 0
+    for bucket in TOTAL_ACTIVITY_OAC_COMP_BUCKETS:
+        comps, _, _ = _counts_to_row_values(buckets.get(bucket, {}))
+        total += comps
+    return total
+
+
+def _total_activity_metric_columns(
+    season_codes: list[int],
+    *,
+    include_nqs_bucket: bool = True,
+    include_per_season_columns: bool = False,
+) -> list[str]:
+    """Column order for the total-activity report grid."""
+    cols = ["Name", "Level"]
+    cols.extend(
+        [
+            TOTAL_ACTIVITY_COL_ALL_COMPS,
+            TOTAL_ACTIVITY_COL_OAC_COMPS,
+            TOTAL_ACTIVITY_COL_ALL_SEGS,
+            TOTAL_ACTIVITY_COL_ALL_JR_SR,
+            TOTAL_ACTIVITY_COL_QUAL_COMPS,
+            TOTAL_ACTIVITY_COL_QUAL_SEGS,
+            TOTAL_ACTIVITY_COL_QUAL_JR_SR,
+        ]
+    )
+    buckets = list(TOTAL_ACTIVITY_NAMED_BUCKETS)
+    if not include_nqs_bucket:
+        buckets = [b for b in buckets if b != TOTAL_ACTIVITY_BUCKET_NQS]
+    cols.extend(_total_activity_bucket_metric_columns(buckets))
+    if include_per_season_columns:
+        for season in sorted(season_codes, reverse=True):
+            sc = str(season)
+            cols.extend(
+                [
+                    f"{sc} qual comps",
+                    f"{sc} qual{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}",
+                    f"{sc} qual{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}",
+                    f"{sc} all comps",
+                    f"{sc} all{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}",
+                    f"{sc} all{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}",
+                ]
+            )
+    return cols
+
+
+def _counts_to_row_values(counts: dict[str, set] | tuple[int, int, int]) -> tuple[int, int, int]:
+    if isinstance(counts, tuple):
+        return counts
+    return (
+        len(counts.get("competitions", set())),
+        len(counts.get("segments", set())),
+        len(counts.get("junior_senior_segments", set())),
+    )
+
+
+def get_total_activity_across_seasons_report_df(
+    official_type_label: str,
+    discipline_label: str,
+    *,
+    end_season_code: int = 2526,
+    n_seasons: int = 4,
+    active_appointments_only: bool = True,
+    directory_level_ids: tuple[int, ...] | None = None,
+    include_qualifying_competitions: bool = True,
+    include_per_season_columns: bool = False,
+    junior_senior_min_starts: int = 0,
+) -> pd.DataFrame:
+    """
+    Officials with matching directory appointments: competition/segment/junior-senior
+    counts by activity bucket across a USFS season window ending at ``end_season_code``.
+
+    Buckets: nonqualifying domestic, NQS (omitted when discipline is Synchronized),
+    sectionals, championships, internationals; plus qualifying and overall rollups
+    for the full window and each season year.
+
+    ``junior_senior_min_starts``: when > 0, Jr/Sr columns count only segments with
+    more than this many starts (teams or skaters); 0 includes all Junior/Senior levels.
+    """
+    if not activity_database_is_postgresql():
+        return pd.DataFrame()
+
+    n_seasons = max(0, int(n_seasons))
+    season_codes = season_codes_ending_at(int(end_season_code), n_seasons)
+    if not season_codes:
+        return pd.DataFrame()
+
+    synchronized = discipline_label == "Synchronized"
+    include_nqs_bucket = not synchronized
+    jr_min_teams = (
+        int(junior_senior_min_starts)
+        if int(junior_senior_min_starts) > 0
+        else None
+    )
+
+    if official_type_label == "All":
+        if not synchronized:
+            return pd.DataFrame()
+        try:
+            _, seg_dt_ids = _nqs_resolve_directory_and_segment_disciplines(
+                "Judge", "Synchronized"
+            )
+        except ValueError:
+            return pd.DataFrame()
+        dir_disc_id = DISC_SYNCHRO_ID
+        atids = _nqs_synchro_all_appointment_type_ids()
+        if len(atids) < 4:
+            return pd.DataFrame()
+        panel_kind = "all"
+        omit_level_column = True
+    else:
+        try:
+            appt_name = _nqs_directory_appointment_type_name(official_type_label)
+            dir_disc_id, seg_dt_ids = _nqs_resolve_directory_and_segment_disciplines(
+                official_type_label, discipline_label
+            )
+            panel_kind = _nqs_panel_role_kind(official_type_label)
+        except (ValueError, KeyError):
+            return pd.DataFrame()
+
+        atid = _get_appointment_type_id_by_name(appt_name)
+        if atid is None:
+            return pd.DataFrame()
+        omit_level_column = False
+
+    level_ids = (
+        directory_level_ids
+        if directory_level_ids is not None
+        else (
+            tuple(SYNCHRONIZED_NQ_REPORT_LEVEL_FILTER_BY_LABEL.values())
+            if synchronized
+            else _nqs_eligible_directory_level_ids()
+        )
+    )
+    if not level_ids:
+        return pd.DataFrame()
+
+    if official_type_label == "All":
+        qualified = get_qualified_officials_any_appointment_types(
+            dir_disc_id,
+            atids,
+            level_ids,
+            include_appointment_level=False,
+            active_appointments_only=active_appointments_only,
+        )
+    else:
+        qualified = get_qualified_officials(
+            dir_disc_id,
+            atid,
+            level_ids,
+            include_appointment_level=True,
+            active_appointments_only=active_appointments_only,
+        )
+    if qualified.empty:
+        return pd.DataFrame()
+
+    qualified = qualified.sort_values(
+        "achieved_date", ascending=True, na_position="last"
+    ).drop_duplicates(subset=["official_id"], keep="first")
+    if omit_level_column:
+        qualified = qualified[["official_id", "full_name"]]
+    else:
+        level_names = _level_id_to_name_map(qualified["level_id"].tolist())
+        qualified = qualified.copy()
+        qualified["Level"] = qualified["level_id"].map(
+            lambda v: level_names.get(int(v), "")
+            if v is not None and not (isinstance(v, float) and pd.isna(v))
+            else ""
+        )
+
+    oids = [int(x) for x in qualified["official_id"].tolist()]
+    aggregate_rows = _query_total_activity_aggregate_rows(
+        oids,
+        panel_kind,
+        seg_dt_ids,
+        season_codes,
+        include_qualifying_competitions=include_qualifying_competitions,
+        include_nqs_bucket=include_nqs_bucket,
+        junior_senior_min_team_count=jr_min_teams,
+    )
+    aggregated = _total_activity_metrics_index_from_aggregates(
+        aggregate_rows,
+        oids,
+        season_codes,
+        include_nqs_bucket=include_nqs_bucket,
+    )
+
+    col_order = _total_activity_metric_columns(
+        season_codes,
+        include_nqs_bucket=include_nqs_bucket,
+        include_per_season_columns=include_per_season_columns,
+    )
+    rows_out: list[dict[str, Any]] = []
+    for _, qrow in qualified.iterrows():
+        oid = int(qrow["official_id"])
+        rec = aggregated.get(oid, {})
+        row: dict[str, Any] = {
+            "official_id": oid,
+            "Name": qrow["full_name"],
+            "Level": "" if omit_level_column else qrow.get("Level", ""),
+        }
+        buckets = rec.get("buckets", {})
+        named = list(TOTAL_ACTIVITY_NAMED_BUCKETS)
+        if not include_nqs_bucket:
+            named = [b for b in named if b != TOTAL_ACTIVITY_BUCKET_NQS]
+        q_comps, q_segs, q_js = _counts_to_row_values(rec.get("qualifying_total", {}))
+        a_comps, a_segs, a_js = _counts_to_row_values(rec.get("overall_total", {}))
+        row[TOTAL_ACTIVITY_COL_QUAL_COMPS] = q_comps
+        row[TOTAL_ACTIVITY_COL_QUAL_SEGS] = q_segs
+        row[TOTAL_ACTIVITY_COL_QUAL_JR_SR] = q_js
+        row[TOTAL_ACTIVITY_COL_ALL_COMPS] = a_comps
+        row[TOTAL_ACTIVITY_COL_OAC_COMPS] = _oac_competition_count(buckets)
+        row[TOTAL_ACTIVITY_COL_ALL_SEGS] = a_segs
+        row[TOTAL_ACTIVITY_COL_ALL_JR_SR] = a_js
+        for bucket in named:
+            prefix = TOTAL_ACTIVITY_BUCKET_DISPLAY[bucket]
+            comps, segs, js = _counts_to_row_values(buckets.get(bucket, {}))
+            row[f"{prefix} comps"] = comps
+            row[f"{prefix}{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}"] = segs
+            row[f"{prefix}{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}"] = js
+        if include_per_season_columns:
+            for season in sorted(season_codes, reverse=True):
+                sc = str(season)
+                qy = rec.get("qualifying", {}).get(int(season), {})
+                oy = rec.get("overall", {}).get(int(season), {})
+                qc, qs, qj = _counts_to_row_values(qy)
+                ac, ass, aj = _counts_to_row_values(oy)
+                row[f"{sc} qual comps"] = qc
+                row[f"{sc} qual{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}"] = qs
+                row[f"{sc} qual{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}"] = qj
+                row[f"{sc} all comps"] = ac
+                row[f"{sc} all{TOTAL_ACTIVITY_METRIC_SEGS_SUFFIX}"] = ass
+                row[f"{sc} all{TOTAL_ACTIVITY_METRIC_JR_SR_SUFFIX}"] = aj
+        rows_out.append(row)
+
+    out = pd.DataFrame(rows_out)
+    if out.empty:
+        return pd.DataFrame(columns=col_order)
+    display_cols = [c for c in col_order if c in out.columns]
+    if "official_id" in out.columns:
+        display_cols = ["official_id", *display_cols]
+    out = out[display_cols]
     return out.sort_values("Name", kind="mergesort").reset_index(drop=True)
 
 

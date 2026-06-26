@@ -11,7 +11,18 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from models import Judge, Competition, Segment, Skater, SkaterSegment, Element, ElementScorePerJudge, PcsScorePerJudge, PcsType, ElementType, DisciplineType, SegmentOfficial
 from database import get_db_session, test_connection
-from rule_errors_policy import should_flag_rule_errors
+from pcs_fall_rule_errors import (
+    max_pcs_for_fall_count,
+    pcs_score_exceeds_fall_limit,
+    program_fall_count_from_elements,
+)
+from rule_errors_policy import (
+    MIN_PCS_FALL_RULE_ERROR_SEASON_YEAR,
+    PCS_FALL_RULE_DISCIPLINE_TYPE_IDS,
+    segment_supports_pcs_fall_rule_errors,
+    should_flag_pcs_fall_rule_errors,
+    should_flag_rule_errors,
+)
 
 try:
     from judge_official_link_core import (
@@ -1254,9 +1265,36 @@ class DatabaseLoader:
             return None, None
         return row[0], row[1]
 
+    def _competition_year_for_segment(self, segment_id: int) -> str | None:
+        row = self.session.execute(
+            select(Competition.year)
+            .join(Segment, Segment.competition_id == Competition.id)
+            .where(Segment.id == segment_id)
+        ).first()
+        if not row or row[0] is None:
+            return None
+        text = str(row[0]).strip()
+        return text or None
+
     def _should_apply_rule_errors_for_segment(self, segment_id: int) -> bool:
         start, end = self._competition_dates_for_segment(segment_id)
         return should_flag_rule_errors(start, end)
+
+    def _should_apply_pcs_fall_rule_errors_for_segment(self, segment_id: int) -> bool:
+        start, end = self._competition_dates_for_segment(segment_id)
+        year = self._competition_year_for_segment(segment_id)
+        return should_flag_pcs_fall_rule_errors(year, start, end)
+
+    def _segment_discipline_supports_pcs_fall_rules(self, segment_id: int) -> bool:
+        row = self.session.execute(
+            select(Segment.discipline_type_id, Segment.name).where(Segment.id == segment_id)
+        ).first()
+        if not row:
+            return False
+        dt_id, segment_name = row
+        if dt_id is not None and int(dt_id) in PCS_FALL_RULE_DISCIPLINE_TYPE_IDS:
+            return True
+        return segment_supports_pcs_fall_rule_errors(str(segment_name or ""))
 
     def _build_segment_element_score_maps_from_rows(
         self, rows
@@ -1598,6 +1636,366 @@ class DatabaseLoader:
             )
         return len(uniq)
 
+    def _reset_pcs_rule_errors_for_segment(self, segment_id: int) -> None:
+        ss_ids = [
+            int(r[0])
+            for r in self.session.execute(
+                select(SkaterSegment.id).where(SkaterSegment.segment_id == segment_id)
+            ).all()
+        ]
+        if not ss_ids:
+            return
+        step = 500
+        for i in range(0, len(ss_ids), step):
+            chunk = ss_ids[i : i + step]
+            self.session.execute(
+                update(PcsScorePerJudge)
+                .where(PcsScorePerJudge.skater_segment_id.in_(chunk))
+                .values(is_rule_error=False)
+            )
+
+    def _segment_name_for_rule_errors(self, segment_id: int) -> str:
+        row = self.session.execute(
+            select(Segment.name).where(Segment.id == segment_id)
+        ).first()
+        return str(row[0]) if row else ""
+
+    def _program_fall_counts_for_segment(
+        self, segment_id: int
+    ) -> dict[int, int]:
+        rows = self.session.execute(
+            select(
+                SkaterSegment.id,
+                Element.notes,
+            )
+            .join(Element, Element.skater_segment_id == SkaterSegment.id)
+            .where(SkaterSegment.segment_id == segment_id)
+        ).all()
+        by_ss: dict[int, list[dict]] = {}
+        for ss_id, notes in rows:
+            sid = int(ss_id)
+            by_ss.setdefault(sid, []).append({"notes": notes})
+        return {
+            ss_id: program_fall_count_from_elements(elements)
+            for ss_id, elements in by_ss.items()
+        }
+
+    def refresh_pcs_fall_rule_errors_from_db(
+        self,
+        segment_id: int,
+        *,
+        apply_rule_errors: bool | None = None,
+    ) -> dict:
+        """
+        Re-apply PCS fall caps from ``element.notes`` and judge PCS scores in DB.
+
+        Returns ``{"flagged": int}``.
+        """
+        if apply_rule_errors is None:
+            apply_rule_errors = self._should_apply_pcs_fall_rule_errors_for_segment(
+                segment_id
+            )
+        if not apply_rule_errors or not self._segment_discipline_supports_pcs_fall_rules(
+            segment_id
+        ):
+            self._reset_pcs_rule_errors_for_segment(segment_id)
+            self._maybe_flush()
+            return {"flagged": 0}
+
+        self._reset_pcs_rule_errors_for_segment(segment_id)
+
+        fall_counts = self._program_fall_counts_for_segment(segment_id)
+        ss_to_max: dict[int, decimal.Decimal] = {}
+        for ss_id, fc in fall_counts.items():
+            max_pcs = max_pcs_for_fall_count(fc)
+            if max_pcs is not None:
+                ss_to_max[ss_id] = max_pcs
+
+        ss_ids = list(ss_to_max.keys())
+        flagged_keys: list[tuple[int, int, int]] = []
+        step = 500
+        for i in range(0, len(ss_ids), step):
+            chunk = ss_ids[i : i + step]
+            rows = self.session.execute(
+                select(
+                    PcsScorePerJudge.skater_segment_id,
+                    PcsScorePerJudge.pcs_type_id,
+                    PcsScorePerJudge.judge_id,
+                    PcsScorePerJudge.judge_score,
+                ).where(PcsScorePerJudge.skater_segment_id.in_(chunk))
+            ).all()
+            for ss_id, pcs_type_id, judge_id, judge_score in rows:
+                max_pcs = ss_to_max.get(int(ss_id))
+                if max_pcs is None:
+                    continue
+                if pcs_score_exceeds_fall_limit(judge_score, max_pcs):
+                    flagged_keys.append(
+                        (int(ss_id), int(pcs_type_id), int(judge_id))
+                    )
+
+        for i in range(0, len(flagged_keys), step):
+            chunk = flagged_keys[i : i + step]
+            self.session.execute(
+                update(PcsScorePerJudge)
+                .where(
+                    tuple_(
+                        PcsScorePerJudge.skater_segment_id,
+                        PcsScorePerJudge.pcs_type_id,
+                        PcsScorePerJudge.judge_id,
+                    ).in_(chunk)
+                )
+                .values(is_rule_error=True)
+            )
+        self._maybe_flush()
+        return {"flagged": len(flagged_keys)}
+
+    def _count_pcs_fall_rule_errors_for_segment(self, segment_id: int) -> int:
+        if not self._should_apply_pcs_fall_rule_errors_for_segment(segment_id):
+            return 0
+        if not self._segment_discipline_supports_pcs_fall_rules(segment_id):
+            return 0
+
+        fall_counts = self._program_fall_counts_for_segment(segment_id)
+        ss_to_max: dict[int, decimal.Decimal] = {}
+        for ss_id, count in fall_counts.items():
+            max_pcs = max_pcs_for_fall_count(count)
+            if max_pcs is not None:
+                ss_to_max[ss_id] = max_pcs
+        if not ss_to_max:
+            return 0
+
+        ss_ids = list(ss_to_max.keys())
+        flagged = 0
+        step = 500
+        for i in range(0, len(ss_ids), step):
+            chunk = ss_ids[i : i + step]
+            rows = self.session.execute(
+                select(
+                    PcsScorePerJudge.skater_segment_id,
+                    PcsScorePerJudge.judge_score,
+                ).where(PcsScorePerJudge.skater_segment_id.in_(chunk))
+            ).all()
+            for ss_id, judge_score in rows:
+                max_pcs = ss_to_max.get(int(ss_id))
+                if max_pcs is None:
+                    continue
+                if pcs_score_exceeds_fall_limit(judge_score, max_pcs):
+                    flagged += 1
+        return flagged
+
+    def _pcs_fall_bulk_sql_params(
+        self,
+        *,
+        min_season_year: str | None = None,
+        competition_id: int | None = None,
+        segment_id: int | None = None,
+        season_year: str | int | None = None,
+    ) -> dict:
+        return {
+            "discipline_ids": sorted(PCS_FALL_RULE_DISCIPLINE_TYPE_IDS),
+            "min_season_year": min_season_year or MIN_PCS_FALL_RULE_ERROR_SEASON_YEAR,
+            "competition_id": competition_id,
+            "segment_id": segment_id,
+            "season_year": str(season_year) if season_year is not None else None,
+        }
+
+    def _pcs_fall_scope_sql(self, *, eligible_only: bool) -> str:
+        year_clause = (
+            "AND TRIM(c.year) >= :min_season_year"
+            if eligible_only
+            else "AND TRIM(c.year) < :min_season_year AND TRIM(c.year) <> ''"
+        )
+        return f"""
+            s.discipline_type_id = ANY(:discipline_ids)
+            AND (:competition_id IS NULL OR c.id = :competition_id)
+            AND (:segment_id IS NULL OR s.id = :segment_id)
+            AND (:season_year IS NULL OR c.year = :season_year)
+            {year_clause}
+        """
+
+    def count_pcs_fall_rule_errors_bulk(
+        self,
+        *,
+        min_season_year: str | None = None,
+        competition_id: int | None = None,
+        segment_id: int | None = None,
+        season_year: str | int | None = None,
+    ) -> int:
+        """Count PCS fall violations in scope (same logic as examples SQL)."""
+        params = self._pcs_fall_bulk_sql_params(
+            min_season_year=min_season_year,
+            competition_id=competition_id,
+            segment_id=segment_id,
+            season_year=season_year,
+        )
+        scope = self._pcs_fall_scope_sql(eligible_only=True)
+        row = self.session.execute(
+            text(
+                f"""
+                WITH element_falls AS (
+                    SELECT
+                        e.skater_segment_id,
+                        SUM(
+                            CASE
+                                WHEN e.notes ~* 'Fx' THEN 2
+                                WHEN e.notes LIKE '%F%' THEN 1
+                                ELSE 0
+                            END
+                        ) AS program_fall_count
+                    FROM element e
+                    GROUP BY e.skater_segment_id
+                ),
+                fall_caps AS (
+                    SELECT
+                        skater_segment_id,
+                        CASE
+                            WHEN program_fall_count = 1 THEN 9.5
+                            WHEN program_fall_count >= 2 THEN 8.75
+                        END AS max_pcs_allowed
+                    FROM element_falls
+                    WHERE program_fall_count >= 1
+                )
+                SELECT COUNT(*)::bigint
+                FROM pcs_score_per_judge p
+                JOIN fall_caps fc
+                    ON fc.skater_segment_id = p.skater_segment_id
+                JOIN skater_segment ss ON ss.id = p.skater_segment_id
+                JOIN segment s ON s.id = ss.segment_id
+                JOIN competition c ON c.id = s.competition_id
+                WHERE p.judge_score > fc.max_pcs_allowed
+                  AND {scope}
+                """
+            ),
+            params,
+        ).scalar()
+        return int(row or 0)
+
+    def refresh_pcs_fall_rule_errors_bulk(
+        self,
+        *,
+        min_season_year: str | None = None,
+        competition_id: int | None = None,
+        segment_id: int | None = None,
+        season_year: str | int | None = None,
+        clear_pre_season: bool = True,
+    ) -> dict:
+        """
+        Re-apply PCS fall flags in a few set-based SQL statements (fast backfill path).
+
+        Returns ``{"cleared": int, "flagged": int, "pre_season_cleared": int}``.
+        """
+        params = self._pcs_fall_bulk_sql_params(
+            min_season_year=min_season_year,
+            competition_id=competition_id,
+            segment_id=segment_id,
+            season_year=season_year,
+        )
+        eligible_scope = self._pcs_fall_scope_sql(eligible_only=True)
+        pre_season_cleared = 0
+        if (
+            clear_pre_season
+            and competition_id is None
+            and segment_id is None
+            and season_year is None
+        ):
+            pre_scope = self._pcs_fall_scope_sql(eligible_only=False)
+            pre_season_cleared = int(
+                self.session.execute(
+                    text(
+                        f"""
+                        UPDATE pcs_score_per_judge p
+                        SET is_rule_error = false
+                        FROM skater_segment ss
+                        JOIN segment s ON s.id = ss.segment_id
+                        JOIN competition c ON c.id = s.competition_id
+                        WHERE p.skater_segment_id = ss.id
+                          AND p.is_rule_error
+                          AND {pre_scope}
+                        """
+                    ),
+                    params,
+                ).rowcount
+                or 0
+            )
+
+        cleared = int(
+            self.session.execute(
+                text(
+                    f"""
+                    UPDATE pcs_score_per_judge p
+                    SET is_rule_error = false
+                    FROM skater_segment ss
+                    JOIN segment s ON s.id = ss.segment_id
+                    JOIN competition c ON c.id = s.competition_id
+                    WHERE p.skater_segment_id = ss.id
+                      AND {eligible_scope}
+                    """
+                ),
+                params,
+            ).rowcount
+            or 0
+        )
+
+        flagged = int(
+            self.session.execute(
+                text(
+                    f"""
+                    WITH element_falls AS (
+                        SELECT
+                            e.skater_segment_id,
+                            SUM(
+                                CASE
+                                    WHEN e.notes ~* 'Fx' THEN 2
+                                    WHEN e.notes LIKE '%F%' THEN 1
+                                    ELSE 0
+                                END
+                            ) AS program_fall_count
+                        FROM element e
+                        GROUP BY e.skater_segment_id
+                    ),
+                    fall_caps AS (
+                        SELECT
+                            skater_segment_id,
+                            CASE
+                                WHEN program_fall_count = 1 THEN 9.5
+                                WHEN program_fall_count >= 2 THEN 8.75
+                            END AS max_pcs_allowed
+                        FROM element_falls
+                        WHERE program_fall_count >= 1
+                    ),
+                    violations AS (
+                        SELECT
+                            p.skater_segment_id,
+                            p.pcs_type_id,
+                            p.judge_id
+                        FROM pcs_score_per_judge p
+                        JOIN fall_caps fc
+                            ON fc.skater_segment_id = p.skater_segment_id
+                        JOIN skater_segment ss ON ss.id = p.skater_segment_id
+                        JOIN segment s ON s.id = ss.segment_id
+                        JOIN competition c ON c.id = s.competition_id
+                        WHERE p.judge_score > fc.max_pcs_allowed
+                          AND {eligible_scope}
+                    )
+                    UPDATE pcs_score_per_judge p
+                    SET is_rule_error = true
+                    FROM violations v
+                    WHERE p.skater_segment_id = v.skater_segment_id
+                      AND p.pcs_type_id = v.pcs_type_id
+                      AND p.judge_id = v.judge_id
+                    """
+                ),
+                params,
+            ).rowcount
+            or 0
+        )
+        self._persist()
+        return {
+            "cleared": cleared,
+            "flagged": flagged,
+            "pre_season_cleared": pre_season_cleared,
+        }
+
     def insert_rule_errors(self, rule_errors, segment_id):
         """Legacy per-row path; prefer rule errors applied in insert_element_scores."""
         if not rule_errors or not self._should_apply_rule_errors_for_segment(segment_id):
@@ -1739,6 +2137,9 @@ class DatabaseLoader:
                     note_warning(msg)
                 else:
                     raise NameError("Scores do not align")
+
+        if self._should_apply_pcs_fall_rule_errors_for_segment(segment_id):
+            self.refresh_pcs_fall_rule_errors_from_db(segment_id, apply_rule_errors=True)
 
         self._persist()
 

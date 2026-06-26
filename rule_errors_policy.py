@@ -8,6 +8,10 @@ from datetime import date, datetime
 # Competitions that start before this date use legacy marking rules; do not flag.
 MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS = date(2018, 7, 1)
 
+# PCS fall caps apply from 2024-25 onward (``competition.year`` season code >= 2425).
+MIN_PCS_FALL_RULE_ERROR_SEASON_YEAR = "2425"
+MIN_PCS_FALL_RULE_ERROR_START_DATE = date(2024, 7, 1)
+
 
 def _coerce_date(value: date | datetime | str | None) -> date | None:
     if value is None:
@@ -46,7 +50,34 @@ def should_flag_rule_errors(
     return True
 
 
-_SINGLES_SEGMENT_TOKENS = frozenset({"WOMEN", "MEN", "BOYS", "GIRLS", "LADIES", "LADY"})
+def should_flag_pcs_fall_rule_errors(
+    competition_year: str | int | None = None,
+    competition_start_date: date | datetime | str | None = None,
+    competition_end_date: date | datetime | str | None = None,
+) -> bool:
+    """
+    Return True when PCS fall-cap rule errors should run.
+
+    Uses ``competition.year`` (season code, e.g. ``2425``) when present; otherwise
+    falls back to competition start/end dates (>= 2024-07-01).
+    """
+    year_text = str(competition_year).strip() if competition_year is not None else ""
+    if year_text:
+        return year_text >= MIN_PCS_FALL_RULE_ERROR_SEASON_YEAR
+    start = _coerce_date(competition_start_date)
+    if start is not None:
+        return start >= MIN_PCS_FALL_RULE_ERROR_START_DATE
+    end = _coerce_date(competition_end_date)
+    if end is not None:
+        return end >= MIN_PCS_FALL_RULE_ERROR_START_DATE
+    return True
+
+
+# ``public.discipline_type.id``: Singles, Pairs, Ice Dance, Solo Dance, Synchronized.
+PCS_FALL_RULE_DISCIPLINE_TYPE_IDS = frozenset({1, 2, 3, 4, 5})
+
+
+_SINGLES_SEGMENT_TOKENS = frozenset({"WOMEN", "MEN", "BOYS", "GIRLS", "LADIES", "LADY","GIRL","BOY"})
 _PAIRS_SEGMENT_TOKENS = frozenset({"PAIR", "PAIRS"})
 
 
@@ -83,3 +114,24 @@ def segment_is_pairs_for_rule_errors(event_name: str) -> bool:
         return True
     upper = (event_name or "").upper()
     return "PAIR" in upper and "SKATING" in upper
+
+
+def segment_supports_pcs_fall_rule_errors(event_name: str) -> bool:
+    """
+    True when PCS fall-cap rule errors apply to this segment name.
+
+    Covers singles, pairs, ice dance, solo dance, and synchronized skating.
+    """
+    if segment_supports_element_rule_errors(event_name):
+        return True
+    upper = (event_name or "").upper()
+    if "SYNCHRO" in upper or "SYNCHRONIZED" in upper:
+        return True
+    if "SOLO" in upper and "DANCE" in upper:
+        return True
+    if "ICE" in upper and "DANCE" in upper:
+        return True
+    tokens = _segment_name_tokens(event_name)
+    if "DANCE" in upper and tokens & {"RHYTHM", "PATTERN", "FREE"}:
+        return True
+    return False

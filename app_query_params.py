@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from typing import Any, Iterable, Mapping
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlencode, urlsplit, urlunsplit
 
 
 def qp_get(name: str) -> str | None:
@@ -1094,6 +1094,7 @@ ACTIVITY_REPORT_SLUG_TO_LABEL = {
     "competition": "Per-competition assignments",
     "nqs": "NQS detailed activity",
     "synchro": "Synchro Activity",
+    "total-activity": "Total Activity Across Seasons",
     "appointments": "Appointments by achieved date",
     "availability": "Qualifying availability",
 }
@@ -1102,6 +1103,22 @@ ACTIVITY_LABEL_TO_REPORT_SLUG = {
 }
 
 _ACTIVITY_REPORT_OPTIONS = tuple(ACTIVITY_REPORT_SLUG_TO_LABEL.values())
+
+
+def activity_person_report_url(official_id: int) -> str:
+    """Full URL to **Per-person assignments** in the activity tracker (for ``LinkColumn``)."""
+    import streamlit as st
+
+    params = {
+        "report": "person",
+        "official": str(int(official_id)),
+    }
+    try:
+        base = urlsplit(str(st.context.url))
+    except Exception:
+        base = urlsplit("http://localhost:8501")
+    query = urlencode(params)
+    return urlunsplit((base.scheme, base.netloc, base.path, query, ""))
 
 
 def init_activity_tracker_from_query() -> None:

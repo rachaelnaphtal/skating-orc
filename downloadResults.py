@@ -120,6 +120,7 @@ def processEvent(
     write_excel=True,
     competition_start_date=None,
     competition_end_date=None,
+    competition_year=None,
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     if isFSM:
@@ -142,6 +143,7 @@ def processEvent(
             http_session=http_session,
             competition_start_date=competition_start_date,
             competition_end_date=competition_end_date,
+            competition_year=competition_year,
         )
     if use_html:
         return judgingParsing.extract_judge_scores(
@@ -161,6 +163,7 @@ def processEvent(
             http_session=http_session,
             competition_start_date=competition_start_date,
             competition_end_date=competition_end_date,
+            competition_year=competition_year,
         )
     if pdf_browser is not None and pdf_loop is not None:
         pdf_loop.run_until_complete(
@@ -184,6 +187,7 @@ def processEvent(
         http_session=http_session,
         competition_start_date=competition_start_date,
         competition_end_date=competition_end_date,
+        competition_year=competition_year,
     )
 
 
@@ -938,6 +942,7 @@ def scrape(
         proccessed_segments = []
         competition_start_date = None
         competition_end_date = None
+        competition_year = year
         if write_to_database:
             competition_id = database_obj.insert_competition(
                 report_name.replace("_", " "),
@@ -1012,6 +1017,7 @@ def scrape(
                             write_excel=write_excel,
                             competition_start_date=competition_start_date,
                             competition_end_date=competition_end_date,
+                            competition_year=competition_year,
                         )
                     except Exception as exc:
                         note_warning(
@@ -1144,6 +1150,7 @@ def scrape(
                         write_excel=write_excel,
                         competition_start_date=competition_start_date,
                         competition_end_date=competition_end_date,
+                        competition_year=competition_year,
                     )
                     segment_official_rows = None
                     segment_db_key = None

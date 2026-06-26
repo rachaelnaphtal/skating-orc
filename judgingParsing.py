@@ -27,6 +27,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from google.cloud import storage
 import gcsfs
 from gcp_interactions_helper import read_file_from_gcp
+from pcs_fall_rule_errors import detect_pcs_fall_rule_errors
 from rule_errors_policy import (
     segment_is_pairs_for_rule_errors,
     segment_supports_element_rule_errors,
@@ -1193,6 +1194,7 @@ def extract_judge_scores(
     http_session=None,
     competition_start_date=None,
     competition_end_date=None,
+    competition_year=None,
 ):
     if isFSM:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
@@ -1237,6 +1239,17 @@ def extract_judge_scores(
         competition_start_date=competition_start_date,
         competition_end_date=competition_end_date,
     )
+    pcs_fall_errors = detect_pcs_fall_rule_errors(
+        elements_per_skater,
+        pcs_per_skater,
+        judges,
+        event_name,
+        judge_filter=judge_filter,
+        competition_year=competition_year,
+        competition_start_date=competition_start_date,
+        competition_end_date=competition_end_date,
+    )
+    element_errors = element_errors + pcs_fall_errors
     element_deviations = []
     pcs_errors = []
 
