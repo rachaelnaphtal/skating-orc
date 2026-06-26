@@ -67,6 +67,7 @@ from judgingParsing import (
 )
 from models import Competition, Segment
 from officials_competition_types import OFFICIALS_COMPETITION_TYPE_IDS_INTERNATIONAL
+from pcs_fall_rule_errors import detect_pcs_fall_rule_errors
 from rule_errors_policy import (
     segment_supports_element_rule_errors,
     should_flag_rule_errors,
@@ -458,6 +459,19 @@ def backfill_one_segment(
         else:
             out["rule_errors_flagged"] = 0
             out["unresolved_rule_errors"] = []
+        if apply_rule_errors:
+            pcs_fall_errors = detect_pcs_fall_rule_errors(
+                elements_per_skater,
+                pcs_per_skater,
+                judges,
+                parsed_event,
+                competition_year=competition.year,
+                competition_start_date=competition.start_date,
+                competition_end_date=competition.end_date,
+            )
+            out["pcs_fall_rule_errors_flagged"] = len(pcs_fall_errors)
+        else:
+            out["pcs_fall_rule_errors_flagged"] = 0
         return out
 
     out["metadata_updated"] = loader.update_element_protocol_metadata_for_segment(
@@ -474,6 +488,11 @@ def backfill_one_segment(
     )
     out["rule_errors_flagged"] = int(refresh["flagged"])
     out["unresolved_rule_errors"] = list(refresh["unresolved"])
+    pcs_refresh = loader.refresh_pcs_fall_rule_errors_from_db(
+        segment.id,
+        apply_rule_errors=apply_rule_errors,
+    )
+    out["pcs_fall_rule_errors_flagged"] = int(pcs_refresh["flagged"])
     return out
 
 

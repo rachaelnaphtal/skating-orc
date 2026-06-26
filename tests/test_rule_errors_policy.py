@@ -1,6 +1,8 @@
 from rule_errors_policy import (
+    should_flag_pcs_fall_rule_errors,
     segment_is_pairs_for_rule_errors,
     segment_supports_element_rule_errors,
+    segment_supports_pcs_fall_rule_errors,
 )
 
 
@@ -42,4 +44,27 @@ def test_segment_is_pairs_for_pair_skating():
     assert not segment_is_pairs_for_rule_errors("MEN_SHORT_PROGRAM")
     assert not segment_is_pairs_for_rule_errors(
         "Team_Event___Men_Single_Skating___Short_Program"
+    )
+
+
+def test_should_flag_pcs_fall_rule_errors_by_season_year():
+    assert should_flag_pcs_fall_rule_errors("2425")
+    assert should_flag_pcs_fall_rule_errors("2526")
+    assert not should_flag_pcs_fall_rule_errors("2324")
+
+
+def test_should_flag_pcs_fall_rule_errors_falls_back_to_dates():
+    assert should_flag_pcs_fall_rule_errors(None, "2024-07-01")
+    assert not should_flag_pcs_fall_rule_errors(None, "2024-01-01")
+
+
+def test_segment_supports_pcs_fall_rule_errors_dance_and_synchro():
+    assert segment_supports_pcs_fall_rule_errors("Ice_Dance___Rhythm_Dance")
+    assert segment_supports_pcs_fall_rule_errors("Junior_Solo_Dance___Free_Dance")
+    assert segment_supports_pcs_fall_rule_errors(
+        "Senior_Synchronized_Skating___Short_Program"
+    )
+    assert segment_supports_pcs_fall_rule_errors("MEN_SHORT_PROGRAM")
+    assert not segment_supports_pcs_fall_rule_errors(
+        "Senior_Artistic___Free_Skating"
     )
