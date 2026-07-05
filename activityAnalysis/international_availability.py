@@ -20,6 +20,14 @@ try:
     from activityAnalysis.international_officials_data import (
         get_international_officials_for_filters,
     )
+    from activityAnalysis.international_official_demographics import (
+        OFFICIAL_AGE_OUT_ON_JULY1,
+        age_as_of_listing,
+        load_official_birthdates,
+    )
+    from activityAnalysis.international_listing_seasons import (
+        REPORT_LISTING_SEASON_DEFAULT,
+    )
     from activityAnalysis.international_requirements import (
         DIRECTORY_LEVEL_ID_INTERNATIONAL,
         DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
@@ -36,6 +44,12 @@ try:
     )
 except ModuleNotFoundError:
     from international_officials_data import get_international_officials_for_filters
+    from international_official_demographics import (
+        OFFICIAL_AGE_OUT_ON_JULY1,
+        age_as_of_listing,
+        load_official_birthdates,
+    )
+    from international_listing_seasons import REPORT_LISTING_SEASON_DEFAULT
     from international_requirements import (
         DIRECTORY_LEVEL_ID_INTERNATIONAL,
         DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
@@ -86,6 +100,52 @@ _AVAILABILITY_DISPLAY = {
 }
 
 _REPORT_IDENTITY_COLUMNS = ("Official", "Discipline", "Level")
+
+# Age-out reference for this report: July 1, 2026 (listing season 2627).
+AVAILABILITY_AGE_LISTING_SEASON_CODE = REPORT_LISTING_SEASON_DEFAULT
+
+
+def official_is_eligible_for_availability_report(
+    date_of_birth: object,
+    *,
+    listing_season_code: int = AVAILABILITY_AGE_LISTING_SEASON_CODE,
+    age_out_at: int = OFFICIAL_AGE_OUT_ON_JULY1,
+) -> bool:
+    """
+    True when the official should appear on the availability report.
+
+    Officials aged out (≥ ``age_out_at`` on listing July 1) are excluded.
+    Unknown birthdates are kept.
+    """
+    if date_of_birth is None or (isinstance(date_of_birth, float) and pd.isna(date_of_birth)):
+        return True
+    age = age_as_of_listing(date_of_birth, listing_season_code=listing_season_code)
+    if age is None:
+        return True
+    return int(age) < int(age_out_at)
+
+
+def _filter_appointments_below_age_out(
+    appointments: pd.DataFrame,
+    *,
+    birthdates: dict[int, object] | None = None,
+    engine=None,
+) -> tuple[pd.DataFrame, int]:
+    if appointments.empty:
+        return appointments, 0
+    official_ids = appointments["official_id"].astype(int).unique().tolist()
+    if birthdates is None:
+        birthdates = load_official_birthdates(official_ids)
+    eligible_ids = {
+        oid
+        for oid in official_ids
+        if official_is_eligible_for_availability_report(birthdates.get(int(oid)))
+    }
+    filtered = appointments.loc[
+        appointments["official_id"].astype(int).isin(eligible_ids)
+    ].copy()
+    excluded = int(appointments["official_id"].astype(int).nunique()) - len(eligible_ids)
+    return filtered, excluded
 
 
 def default_availability_workbook_path() -> str:
@@ -305,6 +365,7 @@ def build_international_availability_report(
     active_appointments_only: bool = True,
     appointments: pd.DataFrame | None = None,
     layout: dict[str, Any] | None = None,
+    birthdates: dict[int, object] | None = None,
     engine=None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
@@ -319,6 +380,8 @@ def build_international_availability_report(
         "event_cols": [],
         "supplemental_cols": [],
         "availability_codes": [],
+        "excluded_age_out": 0,
+        "age_reference_listing_season": AVAILABILITY_AGE_LISTING_SEASON_CODE,
     }
     if not len(form_df.columns):
         return pd.DataFrame(), meta
@@ -364,6 +427,13 @@ def build_international_availability_report(
         .astype("Int64")
         .isin([DIRECTORY_LEVEL_ID_INTERNATIONAL, DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP])
     ]
+
+    appointments, excluded_age_out = _filter_appointments_below_age_out(
+        appointments,
+        birthdates=birthdates,
+        engine=engine,
+    )
+    meta["excluded_age_out"] = excluded_age_out
 
     if appointments.empty:
         meta["official_count"] = 0

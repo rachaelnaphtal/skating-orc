@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -17,6 +18,7 @@ from activityAnalysis.international_availability import (
     default_availability_workbook_path,
     event_column_short_label,
     load_international_availability_workbook,
+    official_is_eligible_for_availability_report,
     parse_workbook_structure,
     supplemental_column_short_label,
 )
@@ -133,6 +135,7 @@ def test_build_report_joins_directory_appointments():
         level_filter="International",
         appointments=appointments,
         layout=layout,
+        birthdates={42: date(1980, 1, 1)},
         engine=None,
     )
     assert len(report) == 1
@@ -179,3 +182,69 @@ def test_build_report_no_form_match_shows_no_response():
     assert meta["form_match_count"] == 0
     jgp_label = layout["event_short_labels"][layout["event_cols"][0]]
     assert report.loc[0, jgp_label] == "No response"
+
+
+@pytest.mark.parametrize(
+    "dob,eligible",
+    [
+        (date(1956, 6, 1), False),  # 70 on July 1, 2026
+        (date(1956, 7, 2), True),  # 69 on July 1, 2026
+        (None, True),
+    ],
+)
+def test_official_is_eligible_for_availability_report(dob, eligible):
+    assert official_is_eligible_for_availability_report(dob) is eligible
+
+
+def test_build_report_excludes_officials_age_70_plus():
+    form_df = pd.DataFrame(
+        columns=[
+            "First Name",
+            "Last Name",
+            "Email Address",
+            "JGP China - August 18-22 (Junior Grand Prix Events)",
+        ]
+    )
+    layout = parse_workbook_structure(form_df)
+    appointments = pd.DataFrame(
+        [
+            {
+                "official_id": 1,
+                "official_name": "Young Judge",
+                "mbr_number": "1",
+                "appointment_type_id": 12,
+                "appointment_type": "International Judge",
+                "appointment_level": "ISU Championship",
+                "appointment_level_id": DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
+                "discipline_id": DISC_DANCE_ID,
+                "discipline": "Ice Dance",
+            },
+            {
+                "official_id": 2,
+                "official_name": "Aged Out Judge",
+                "mbr_number": "2",
+                "appointment_type_id": 12,
+                "appointment_type": "International Judge",
+                "appointment_level": "ISU Championship",
+                "appointment_level_id": DIRECTORY_LEVEL_ID_ISU_CHAMPIONSHIP,
+                "discipline_id": DISC_DANCE_ID,
+                "discipline": "Ice Dance",
+            },
+        ]
+    )
+    birthdates = {
+        1: date(1957, 1, 1),
+        2: date(1956, 3, 15),
+    }
+    report, meta = build_international_availability_report(
+        form_df,
+        discipline_filter=DISCIPLINE_FILTER_DANCE,
+        level_filter=LEVEL_FILTER_ISU,
+        appointments=appointments,
+        layout=layout,
+        birthdates=birthdates,
+        engine=None,
+    )
+    assert meta["excluded_age_out"] == 1
+    assert len(report) == 1
+    assert report.loc[0, "Official"] == "Young Judge"

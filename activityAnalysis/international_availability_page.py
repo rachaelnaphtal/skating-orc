@@ -646,7 +646,12 @@ def render_international_availability_page(
         st.info("No International Judge appointments match the current filters.")
         st.stop()
 
-    m1, m2, m3 = st.columns(3)
+    excluded_age_out = int(meta.get("excluded_age_out") or 0)
+    if excluded_age_out:
+        m1, m2, m3, m4 = st.columns(4)
+        m4.metric("Excluded (age 70+)", excluded_age_out)
+    else:
+        m1, m2, m3 = st.columns(3)
     m1.metric("Appointment rows", meta.get("appointment_count", len(report_df)))
     m2.metric("Distinct officials", meta.get("official_count", 0))
     m3.metric("Form responses matched", meta.get("form_match_count", 0))
