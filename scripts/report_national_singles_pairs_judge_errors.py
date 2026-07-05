@@ -8,9 +8,9 @@ Singles, Pairs, or Singles/Pairs. Scores are limited to Singles and Pairs segmen
 qualifying (US domestic national) competitions over the N USFS seasons completed
 before a listing anchor (default 2627 → 2526, 2425, 2324).
 International competitions (types 15–17) are excluded from that block. The same metrics
-are also reported for US Championships (competition type 4) from the 2018–19 season
-(2018-07-01 GOE cutoff) through the present. Element (GOE) anomalies and deviation rates
-exclude competitions before 2018-07-01. Deviation marking scores use
+are also reported for US Championships (competition type 4) over the last four USFS
+seasons from 22-23 through 25-26 (same window as Sectionals). Element (GOE) anomalies
+and deviation rates exclude competitions before 2018-07-01. Deviation marking scores use
 the all-competitions sigma benchmark pool.
 
 Leading columns mirror the activity tracker qualifying report: appointment year, last
@@ -21,9 +21,9 @@ Pairs protocol segments (same discipline filter as the qualifying report; all se
 levels, not Junior/Senior only).
 
 Deviation marking scores are computed twice (all segment levels): once over qualifying
-competitions (last N seasons) and once over all championships since the GOE era, both
-using the all-competitions sigma benchmark pool over the same season span as each
-ranking scope.
+competitions (last N seasons) and once over championships in the four-season
+sectionals/champs window, both using the all-competitions sigma benchmark pool over
+the same season span as each ranking scope.
 
 Example::
 
@@ -52,6 +52,7 @@ if str(_REPO) not in sys.path:
 
 from activityAnalysis.international_listing_seasons import (  # noqa: E402
     REPORT_LISTING_SEASON_DEFAULT,
+    format_usfs_season_code,
     season_codes_preceding_listing,
 )
 from activityAnalysis.load_activity_data import (  # noqa: E402
@@ -149,6 +150,9 @@ DEFAULT_JUNIOR_SENIOR_ACTIVITY_LABEL = "Jr/Senior Activity"
 SYNCHRO_JUNIOR_SENIOR_ACTIVITY_LABEL = "Jr/Sr Segments (>3 teams)"
 # Activity Analysis columns (total comps in role, qualifying/js flags, sectionals recency).
 ACTIVITY_WINDOW_SEASONS = 2
+# Sectionals and championships performance blocks (four seasons, floor at 22-23).
+SECTIONALS_CHAMPS_WINDOW_SEASONS = 4
+SECTIONALS_CHAMPS_MIN_SEASON_CODE = 2223
 GOE_ELIGIBLE_FROM = MIN_COMPETITION_START_DATE_FOR_RULE_ERRORS
 DEFAULT_US_CHAMPS_AVAILABILITY_TITLE = (
     "2027 U.S. Figure Skating Championships (Senior level only)"
@@ -185,11 +189,11 @@ class ReportDisciplineConfig:
     # Primary (last N seasons) performance block — qualifying for SP, all activity for dance/synchro.
     activity_competition_scope: str
     activity_scope_label: str
-    performance_block_header: str
     activity_column_label: str
     performance_analysis_header: str
-    recent_period_header: str
     thresholds: ReportActivityThresholds
+    # When True, primary-period headers note "all activity" (ice dance, synchro).
+    primary_period_includes_all_activity: bool = False
     # When set, jr/sr segment counts exclude segments with team_count <= this value.
     junior_senior_min_team_count: int | None = None
     junior_senior_segment_count_header: str = DEFAULT_JUNIOR_SENIOR_SEGMENT_COUNT_HEADER
@@ -225,12 +229,8 @@ def _report_discipline_configs() -> dict[str, ReportDisciplineConfig]:
             default_output_filename="National SP Judge Analysis.xlsx",
             activity_competition_scope=COMPETITION_SCOPE_QUALIFYING,
             activity_scope_label="qualifying",
-            performance_block_header=(
-                "Qualifying Competition Performance (Past three years)"
-            ),
             activity_column_label="Qualifying Activity",
             performance_analysis_header="Qualifying Performance Analysis",
-            recent_period_header="Last 3 years",
             thresholds=SINGLES_PAIRS_THRESHOLDS,
         ),
         "ice_dance": ReportDisciplineConfig(
@@ -250,12 +250,9 @@ def _report_discipline_configs() -> dict[str, ReportDisciplineConfig]:
             default_output_filename="National Ice Dance Judge Analysis.xlsx",
             activity_competition_scope=COMPETITION_SCOPE_ALL,
             activity_scope_label="all activity",
-            performance_block_header=(
-                "Competition Performance (Past three years, all activity)"
-            ),
             activity_column_label="Competition Activity",
             performance_analysis_header="Performance Analysis",
-            recent_period_header="Last 3 years (all activity)",
+            primary_period_includes_all_activity=True,
             thresholds=ICE_DANCE_THRESHOLDS,
         ),
         "synchro": ReportDisciplineConfig(
@@ -275,12 +272,9 @@ def _report_discipline_configs() -> dict[str, ReportDisciplineConfig]:
             default_output_filename="National Synchro Judge Analysis.xlsx",
             activity_competition_scope=COMPETITION_SCOPE_ALL,
             activity_scope_label="all activity",
-            performance_block_header=(
-                "Competition Performance (Past three years, all activity)"
-            ),
             activity_column_label="Competition Activity",
             performance_analysis_header="Performance Analysis",
-            recent_period_header="Last 3 years (all activity)",
+            primary_period_includes_all_activity=True,
             thresholds=SYNCHRO_THRESHOLDS,
             junior_senior_min_team_count=SYNCHRO_JUNIOR_SENIOR_MIN_TEAM_COUNT,
             junior_senior_segment_count_header=SYNCHRO_JUNIOR_SENIOR_SEGMENT_COUNT_HEADER,
@@ -300,6 +294,52 @@ def _season_years_for_listing(listing_season: int, n: int) -> list[str]:
     """USFS season codes (newest first) for the N seasons before a listing anchor."""
     codes = season_codes_preceding_listing(int(listing_season), int(n))
     return [str(c) for c in sorted(codes, reverse=True)]
+
+
+def _sectionals_champs_season_years(listing_season: int) -> list[str]:
+    """USFS season codes for sectionals/championships performance blocks."""
+    codes = season_codes_preceding_listing(
+        int(listing_season), SECTIONALS_CHAMPS_WINDOW_SEASONS
+    )
+    min_code = SECTIONALS_CHAMPS_MIN_SEASON_CODE
+    filtered = [int(c) for c in codes if int(c) >= min_code]
+    return [str(c) for c in sorted(filtered)]
+
+
+def _performance_block_season_span_label(seasons: list[str]) -> str:
+    if not seasons:
+        return (
+            f"{format_usfs_season_code(SECTIONALS_CHAMPS_MIN_SEASON_CODE)} onward"
+        )
+    codes = sorted(int(s) for s in seasons)
+    return (
+        f"{format_usfs_season_code(codes[0])} through "
+        f"{format_usfs_season_code(codes[-1])}"
+    )
+
+
+def _season_count_label(n: int) -> str:
+    n = int(n)
+    return "1 season" if n == 1 else f"{n} seasons"
+
+
+def _primary_performance_headers(
+    config: ReportDisciplineConfig,
+    seasons: list[str],
+) -> tuple[str, str]:
+    """Workbook titles for the primary (qualifying / all-activity) performance block."""
+    span = _performance_block_season_span_label(seasons)
+    count = _season_count_label(len(seasons))
+    if config.primary_period_includes_all_activity:
+        recent = f"Last {count} ({span}, all activity)"
+        block = f"Competition Performance ({span}, all activity)"
+    elif config.activity_competition_scope == COMPETITION_SCOPE_QUALIFYING:
+        recent = f"Last {count} ({span})"
+        block = f"Qualifying Competition Performance ({span})"
+    else:
+        recent = f"Last {count} ({span})"
+        block = f"Competition Performance ({span})"
+    return recent, block
 
 
 def _competition_ids_for_seasons(
@@ -322,55 +362,27 @@ def _competition_ids_for_seasons(
     return [int(r[0]) for r in q.all()]
 
 
-def _goe_era_competition_scope(
+def _typed_competitions_for_seasons(
     analytics: JudgeAnalytics,
     *,
+    seasons: list[str],
     officials_competition_type_ids: tuple[int, ...],
 ) -> tuple[list[int], list[str]]:
-    """Competitions of given officials type(s) from the GOE era onward."""
-    years = sorted(
-        str(y)
-        for y in analytics.get_years()
-        if str(y).strip() >= MIN_ELEMENT_RANKING_SEASON_YEAR
-    )
-    if not years:
+    """Competitions of given officials type(s) within a season window."""
+    if not seasons:
         return [], []
     raw_ids = _competition_ids_for_seasons(
         analytics,
-        years,
+        seasons,
         competition_scope=COMPETITION_SCOPE_ALL,
         officials_competition_type_ids=officials_competition_type_ids,
     )
     comp_ids = sorted(_goe_eligible_competition_ids(analytics, raw_ids))
     comp_to_year = _competition_year_map(analytics, comp_ids)
-    seasons = sorted(
+    seasons_present = sorted(
         {comp_to_year[cid] for cid in comp_ids if cid in comp_to_year}
     )
-    return comp_ids, seasons
-
-
-def _championships_goe_era_scope(
-    analytics: JudgeAnalytics,
-    *,
-    championships_type_ids: tuple[int, ...],
-) -> tuple[list[int], list[str]]:
-    """
-    Championships competitions from the GOE era onward (season >= 1819, event >= 2018-07-01).
-    """
-    return _goe_era_competition_scope(
-        analytics, officials_competition_type_ids=championships_type_ids
-    )
-
-
-def _sectionals_goe_era_scope(
-    analytics: JudgeAnalytics,
-    *,
-    sectionals_type_ids: tuple[int, ...],
-) -> tuple[list[int], list[str]]:
-    """Sectional competitions for the discipline from the GOE era onward."""
-    return _goe_era_competition_scope(
-        analytics, officials_competition_type_ids=sectionals_type_ids
-    )
+    return comp_ids, seasons_present
 
 
 def _goe_eligible_competition_ids(
@@ -1818,11 +1830,19 @@ def build_report(
         competition_scope=config.activity_competition_scope,
     )
     activity_comp_id_set = frozenset(activity_comp_ids)
-    champs_comp_ids, champs_seasons = _championships_goe_era_scope(
-        analytics, championships_type_ids=config.championships_type_ids
+    sectionals_champs_seasons = _sectionals_champs_season_years(listing_season)
+    sectionals_champs_span = _performance_block_season_span_label(
+        sectionals_champs_seasons
     )
-    sectionals_comp_ids, sectionals_seasons = _sectionals_goe_era_scope(
-        analytics, sectionals_type_ids=config.sectionals_type_ids
+    champs_comp_ids, champs_seasons = _typed_competitions_for_seasons(
+        analytics,
+        seasons=sectionals_champs_seasons,
+        officials_competition_type_ids=config.championships_type_ids,
+    )
+    sectionals_comp_ids, sectionals_seasons = _typed_competitions_for_seasons(
+        analytics,
+        seasons=sectionals_champs_seasons,
+        officials_competition_type_ids=config.sectionals_type_ids,
     )
     print(
         f"Listing season {listing_season}: {config.roster_label} "
@@ -1834,11 +1854,13 @@ def build_report(
         f"({len(activity_comp_ids)} competitions)"
     )
     print(
-        f"  {config.sectionals_label} (GOE era): {len(sectionals_comp_ids)} competitions across "
+        f"  {config.sectionals_label} ({sectionals_champs_span}): "
+        f"{len(sectionals_comp_ids)} competitions across "
         f"seasons {', '.join(sectionals_seasons) or '(none)'}"
     )
     print(
-        f"  {config.championships_label} (GOE era): {len(champs_comp_ids)} competitions across "
+        f"  {config.championships_label} ({sectionals_champs_span}): "
+        f"{len(champs_comp_ids)} competitions across "
         f"seasons {', '.join(champs_seasons) or '(none)'}"
     )
     cal_years = calendar_years_for_usfs_season_codes(activity_season_year_codes)
@@ -1933,25 +1955,25 @@ def build_report(
         competition_scope=config.activity_competition_scope,
         scope_label=config.activity_scope_label,
     )
-    if champs_seasons:
+    if sectionals_champs_seasons:
         champs_pcs_marking, champs_element_marking = _deviation_marking_scores_for_scope(
             analytics,
-            champs_seasons,
+            sectionals_champs_seasons,
             seg_discipline_ids=seg_discipline_ids,
             competition_scope=COMPETITION_SCOPE_CHAMPIONSHIPS_ONLY,
-            scope_label="championships (GOE era)",
+            scope_label=f"championships ({sectionals_champs_span})",
             segment_level_preset=config.champs_segment_level_preset,
         )
     else:
         champs_pcs_marking, champs_element_marking = {}, {}
-    if sectionals_seasons:
+    if sectionals_champs_seasons:
         sectionals_pcs_marking, sectionals_element_marking = (
             _deviation_marking_scores_for_scope(
                 analytics,
-                sectionals_seasons,
+                sectionals_champs_seasons,
                 seg_discipline_ids=seg_discipline_ids,
                 competition_scope=config.sectionals_competition_scope,
-                scope_label=f"sectionals ({config.sectionals_label}, GOE era)",
+                scope_label=f"sectionals ({config.sectionals_label}, {sectionals_champs_span})",
                 segment_level_preset=config.sectionals_segment_level_preset,
             )
         )
@@ -2216,6 +2238,20 @@ def main() -> None:
     cal_years = calendar_years_for_usfs_season_codes(season_year_codes)
     sectionals_activity_min_year = min(cal_years) if cal_years else 0
 
+    sectionals_champs_span = _performance_block_season_span_label(
+        _sectionals_champs_season_years(int(args.listing_season))
+    )
+    primary_seasons = _season_years_for_listing(
+        int(args.listing_season), int(args.seasons)
+    )
+    recent_period_header, performance_block_header = _primary_performance_headers(
+        config, primary_seasons
+    )
+    sectionals_block_header = (
+        f"{config.sectionals_label} ({sectionals_champs_span})"
+    )
+    champs_block_header = f"{config.championships_label} ({sectionals_champs_span})"
+
     with get_db_session() as session:
         analytics = JudgeAnalytics(session)
         df = build_report(
@@ -2236,13 +2272,14 @@ def main() -> None:
             output_path,
             include_rule_errors=config.include_rule_errors,
             thresholds=config.thresholds,
-            performance_block_header=config.performance_block_header,
+            performance_block_header=performance_block_header,
             activity_column_label=config.activity_column_label,
             performance_analysis_header=config.performance_analysis_header,
-            recent_period_header=config.recent_period_header,
+            recent_period_header=recent_period_header,
             junior_senior_segment_count_header=config.junior_senior_segment_count_header,
             junior_senior_activity_label=config.junior_senior_activity_label,
-            sectionals_block_header=f"{config.sectionals_label} (since 2018 for GOEs and 2022 for PCS)",
+            sectionals_block_header=sectionals_block_header,
+            champs_block_header=champs_block_header,
             sectionals_performance_header=f"{config.sectionals_label} Performance Analysis",
             sectionals_activity_min_year=sectionals_activity_min_year,
         )

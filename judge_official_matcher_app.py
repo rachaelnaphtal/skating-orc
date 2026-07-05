@@ -77,14 +77,30 @@ def _embedded_matcher_layout() -> None:
     )
 
 
-def _load_unmapped(limit: int, *, include_marked_outside: bool = False) -> list[dict]:
+def _load_unmapped(
+    limit: int,
+    *,
+    include_marked_outside: bool = False,
+    protocol_name_search: str = "",
+    include_linked_in_search: bool = False,
+) -> list[dict]:
     eng = _engine()
     with eng.connect() as conn:
-        rows = core.fetch_judges_needing_link(
-            conn,
-            limit=limit,
-            include_marked_outside=include_marked_outside,
-        )
+        needle = protocol_name_search.strip()
+        if needle:
+            rows = core.fetch_judges_for_matcher(
+                conn,
+                limit=limit,
+                name_contains=needle,
+                include_marked_outside=include_marked_outside,
+                include_linked=include_linked_in_search,
+            )
+        else:
+            rows = core.fetch_judges_needing_link(
+                conn,
+                limit=limit,
+                include_marked_outside=include_marked_outside,
+            )
     return [dict(r) for r in rows]
 
 
@@ -277,15 +293,60 @@ def render_judge_official_matcher(*, embedded: bool = False) -> None:
         help="Show outside_directory rows so you can Link ISU (clears the outside mark) "
         "or clear via: python scripts/judge_official_admin.py clear JUDGE_ID",
     )
+    protocol_name_search = st.sidebar.text_input(
+        "Search protocol name",
+        value="",
+        help="Find a judge by substring (e.g. Campell). Searches the full judge table, "
+        "not only the first batch below.",
+        placeholder="e.g. Tamie",
+    )
+    include_linked_in_search = False
+    if protocol_name_search.strip():
+        include_linked_in_search = st.sidebar.checkbox(
+            "Include already-linked judges in search",
+            value=False,
+            help="Show linked judges too — useful to confirm whether a spelling already "
+            "has a link row.",
+        )
 
-    judges = _load_unmapped(int(max_rows), include_marked_outside=include_outside)
-    st.sidebar.metric("Unmapped judges (loaded)", len(judges))
+    judges = _load_unmapped(
+        int(max_rows),
+        include_marked_outside=include_outside,
+        protocol_name_search=protocol_name_search,
+        include_linked_in_search=include_linked_in_search,
+    )
+    st.sidebar.metric("Judges loaded", len(judges))
+    if not protocol_name_search.strip():
+        st.sidebar.caption(
+            f"Without a name search, only the first **{int(max_rows)}** unmapped judges "
+            "(A→Z) load. Use **Search protocol name** to find a specific spelling."
+        )
 
     if not judges:
-        st.info(
-            "No judges need linking — everyone is US **linked**, marked **outside**, "
-            "or has an ISU roster link."
-        )
+        if protocol_name_search.strip():
+            needle = protocol_name_search.strip()
+            with _engine().connect() as conn:
+                proto_hints = core.fetch_segment_official_name_hints(conn, needle)
+            st.info(
+                f"No judges matched **{needle!r}** with the current filters. "
+                "Try **Include already-linked judges in search**, or check the spelling."
+            )
+            if proto_hints:
+                st.markdown("**Matching protocol panel names** (from ``segment_official``):")
+                hint_df = pd.DataFrame(proto_hints).rename(
+                    columns={"protocol_name": "Protocol name", "panel_rows": "Panel rows"}
+                )
+                st.dataframe(hint_df, width="stretch", hide_index=True)
+                st.caption(
+                    "If the spelling appears here but not in the judge list, reload or backfill "
+                    "that competition so a ``judge`` row is created — or add "
+                    "``public.official_name_alias`` for the directory official."
+                )
+        else:
+            st.info(
+                "No judges need linking — everyone is US **linked**, marked **outside**, "
+                "or has an ISU roster link."
+            )
         st.stop()
 
     workflow = st.radio(

@@ -1,14 +1,22 @@
 import logging
 import os
+import sys
 import pandas as pd
 from functools import lru_cache
 from typing import Any, Iterable
+
+_ACTIVITY_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_ACTIVITY_DIR)
+for _path in (_REPO_ROOT, _ACTIVITY_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 logger = logging.getLogger(__name__)
 try:
     from activityAnalysis.officials_analysis_models import (
         Base,
         Officials,
+        RetiredOfficial,
         Appointments,
         Assignment,
         Disciplines,
@@ -21,6 +29,7 @@ except ModuleNotFoundError:
     from officials_analysis_models import (
         Base,
         Officials,
+        RetiredOfficial,
         Appointments,
         Assignment,
         Disciplines,
@@ -54,7 +63,145 @@ except ModuleNotFoundError:
     )
 
 appointment_codes_file = "activityAnalysis/Appointments_to_database.xlsx"
+RETIRED_OFFICIALS_PATH = "activityAnalysis/Retired_officials.xlsx"
 DEFAULT_ACTIVITY_DB_URL = "sqlite:////tmp/activity_tracker.db"
+
+
+def _normalize_retired_official_name_key(value: object) -> str:
+    try:
+        from analytics import _normalize_person_name_key
+
+        return _normalize_person_name_key(value)
+    except ImportError:
+        return " ".join(str(value or "").strip().lower().split())
+
+
+def load_retired_official_name_keys(
+    path: str = RETIRED_OFFICIALS_PATH,
+) -> set[str]:
+    """Normalized name keys from ``Retired_officials.xlsx`` (empty when file missing)."""
+    try:
+        retired_df = pd.read_excel(path)
+    except Exception:
+        return set()
+    if "Name" not in retired_df.columns:
+        return set()
+    return {
+        _normalize_retired_official_name_key(n)
+        for n in retired_df["Name"]
+        if pd.notna(n) and str(n).strip()
+    }
+
+
+def load_retired_official_name_keys_from_database(session) -> set[str]:
+    """Normalized names from ``officials_analysis.retired_official``."""
+    try:
+        rows = session.execute(
+            text(
+                """
+                SELECT name_normalized
+                FROM officials_analysis.retired_official
+                """
+            )
+        ).scalars()
+    except Exception:
+        return set()
+    return {str(key).strip() for key in rows if key}
+
+
+def is_retired_official_display_name(
+    name: object,
+    *,
+    retired_name_keys: set[str] | None = None,
+) -> bool:
+    key_set = (
+        retired_name_keys
+        if retired_name_keys is not None
+        else load_retired_official_name_keys()
+    )
+    if not key_set:
+        return False
+    return _normalize_retired_official_name_key(name) in key_set
+
+
+def sync_retired_officials_from_workbook(
+    session,
+    *,
+    path: str = RETIRED_OFFICIALS_PATH,
+    reset_unlisted: bool = True,
+) -> dict[str, int]:
+    """
+    Persist ``Retired_officials.xlsx`` to ``officials_analysis.retired_official``.
+
+    Retired officials are not in ``officials_analysis.officials``; this table holds
+    their display names for assignment loads and protocol reconciliation.
+
+    When ``reset_unlisted`` is true (default), rows not on the spreadsheet are
+    removed so the workbook remains authoritative.
+    """
+    stats = {
+        "workbook_names": 0,
+        "inserted": 0,
+        "updated": 0,
+        "deleted": 0,
+    }
+    try:
+        retired_df = pd.read_excel(path)
+    except Exception:
+        return stats
+    if "Name" not in retired_df.columns:
+        return stats
+
+    entries: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+    for raw_name in retired_df["Name"]:
+        if pd.isna(raw_name):
+            continue
+        display_name = str(raw_name).strip()
+        if not display_name:
+            continue
+        name_key = _normalize_retired_official_name_key(display_name)
+        if name_key in seen_keys:
+            continue
+        seen_keys.add(name_key)
+        entries.append((display_name, name_key))
+
+    stats["workbook_names"] = len(entries)
+    if not entries:
+        return stats
+
+    workbook_keys = {name_key for _, name_key in entries}
+    existing = {
+        row.name_normalized: row
+        for row in session.query(RetiredOfficial).all()
+    }
+
+    if reset_unlisted:
+        for name_key, row in list(existing.items()):
+            if name_key not in workbook_keys:
+                session.delete(row)
+                stats["deleted"] += 1
+                del existing[name_key]
+
+    for display_name, name_key in entries:
+        row = existing.get(name_key)
+        if row is None:
+            session.add(
+                RetiredOfficial(
+                    display_name=display_name,
+                    name_normalized=name_key,
+                    source_workbook=path,
+                )
+            )
+            stats["inserted"] += 1
+            continue
+        if row.display_name != display_name or row.source_workbook != path:
+            row.display_name = display_name
+            row.source_workbook = path
+            stats["updated"] += 1
+
+    session.commit()
+    return stats
 
 
 def _resolve_database_url():
@@ -484,10 +631,14 @@ def find_missing_officials_names_and_positions(session, officials_df):
 
     excel_names = set(officials_df["Person"])
 
-    retired_df = pd.read_excel("activityAnalysis/Retired_officials.xlsx")
-    retired_names = set(retired_df["Name"])
+    retired_names = load_retired_official_name_keys()
 
-    missing = excel_names - db_names - retired_names
+    missing = {
+        name
+        for name in excel_names
+        if not is_retired_official_display_name(name, retired_name_keys=retired_names)
+        and name not in db_names
+    }
 
     print(f"Missing ({len(missing)}):")
     for name in sorted(missing):
@@ -552,8 +703,7 @@ def insert_assignments(
     to reduce round-trips on remote PostgreSQL (the previous per-row existence
     query was one SELECT per spreadsheet row).
     """
-    retired_df = pd.read_excel("activityAnalysis/Retired_officials.xlsx")
-    retired_names = set(retired_df["Name"])
+    retired_name_keys = load_retired_official_name_keys()
 
     pending: list[dict[str, Any]] = []
     for _, row in assignments_df.iterrows():
@@ -563,7 +713,9 @@ def insert_assignments(
         official_id = officials.get(row["Person"])
 
         if not official_id:
-            if row["Person"] not in retired_names:
+            if not is_retired_official_display_name(
+                row["Person"], retired_name_keys=retired_name_keys
+            ):
                 print(f"Missing official: {row['Person']}")
             continue
 
@@ -721,6 +873,15 @@ def load_history(write_to_database=False):
         }
 
         if write_to_database:
+            retired_stats = sync_retired_officials_from_workbook(session)
+            print(
+                "Retired officials sync: "
+                f"{retired_stats['inserted']} inserted, "
+                f"{retired_stats['updated']} updated, "
+                f"{retired_stats['deleted']} deleted "
+                f"({retired_stats['workbook_names']} names in workbook).",
+                flush=True,
+            )
             insert_assignments(session, us_champs_df, officials)
             insert_assignments(session, us_synchro_champs_df, officials)
             insert_assignments(
@@ -2710,14 +2871,7 @@ def load_us_champs_referees_assignments(
     }
     missing_details = []
 
-    retired_path = "activityAnalysis/Retired_officials.xlsx"
-    try:
-        retired_df = pd.read_excel(retired_path)
-        retired_names = {
-            str(n).strip().lower() for n in retired_df["Name"] if pd.notna(n)
-        }
-    except Exception:
-        retired_names = set()
+    retired_name_keys = load_retired_official_name_keys()
 
     with Session(engine) as session:
         referee_row = (
@@ -2758,7 +2912,7 @@ def load_us_champs_referees_assignments(
                 )
                 continue
 
-            if name.lower() in retired_names:
+            if is_retired_official_display_name(name, retired_name_keys=retired_name_keys):
                 stats["skipped_retired"] += 1
                 continue
 
@@ -4224,6 +4378,14 @@ def _cli_main() -> None:
         )
     )
     parser.add_argument(
+        "--sync-retired-officials",
+        action="store_true",
+        help=(
+            "Sync activityAnalysis/Retired_officials.xlsx to officials_analysis.retired_official "
+            "(migration 040)."
+        ),
+    )
+    parser.add_argument(
         "--load-history-to-database",
         action="store_true",
         help=(
@@ -4264,6 +4426,12 @@ def _cli_main() -> None:
         with Session(engine) as session:
             session.execute(text("SELECT 1"))
         print("database_ok", flush=True)
+        return
+    if args.sync_retired_officials:
+        with Session(engine) as session:
+            stats = sync_retired_officials_from_workbook(session)
+        for key, value in stats.items():
+            print(f"{key}: {value}", flush=True)
         return
     if args.load_history_to_database:
         print(

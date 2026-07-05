@@ -104,6 +104,32 @@ class Officials(Base):
     )
 
 
+class RetiredOfficial(Base):
+    __tablename__ = 'retired_official'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='retired_official_pkey'),
+        UniqueConstraint('name_normalized', name='retired_official_name_normalized_key'),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    display_name: Mapped[str] = mapped_column(Text)
+    name_normalized: Mapped[str] = mapped_column(Text)
+    source_workbook: Mapped[str] = mapped_column(
+        Text, server_default=text("'activityAnalysis/Retired_officials.xlsx'")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+    last_modified: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+
 class IsuOfficial(Base):
     __tablename__ = 'isu_official'
     __table_args__ = (
@@ -512,3 +538,144 @@ class IsuOfficialSeminar(Base):
     official: Mapped['Officials'] = relationship('Officials', back_populates='isu_seminars')
     appointment_type: Mapped['AppointmentTypes'] = relationship('AppointmentTypes')
     discipline: Mapped[Optional['Disciplines']] = relationship('Disciplines')
+
+
+class InternationalAvailabilityForm(Base):
+    """One uploaded international judge availability workbook."""
+
+    __tablename__ = 'international_availability_form'
+    __table_args__ = (
+        PrimaryKeyConstraint('id', name='international_availability_form_pkey'),
+        UniqueConstraint('label', name='international_availability_form_label_key'),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    label: Mapped[str] = mapped_column(Text)
+    source_filename: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    loaded_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=text('now()')
+    )
+
+    events: Mapped[List['InternationalAvailabilityEvent']] = relationship(
+        'InternationalAvailabilityEvent', back_populates='form', cascade='all, delete-orphan'
+    )
+    responses: Mapped[List['InternationalFormResponse']] = relationship(
+        'InternationalFormResponse', back_populates='form', cascade='all, delete-orphan'
+    )
+
+
+class InternationalAvailabilityEvent(Base):
+    """An event or supplemental column from the availability form."""
+
+    __tablename__ = 'international_availability_event'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['form_id'],
+            ['officials_analysis.international_availability_form.id'],
+            name='international_availability_event_form_id_fkey',
+            ondelete='CASCADE',
+        ),
+        PrimaryKeyConstraint('id', name='international_availability_event_pkey'),
+        UniqueConstraint(
+            'form_id',
+            'prompt_key',
+            name='international_availability_event_form_prompt_key',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    form_id: Mapped[int] = mapped_column(Integer)
+    prompt_key: Mapped[str] = mapped_column(Text)
+    short_label: Mapped[str] = mapped_column(Text)
+    column_kind: Mapped[str] = mapped_column(Text, server_default=text("'event'"))
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text('0'))
+
+    form: Mapped['InternationalAvailabilityForm'] = relationship(
+        'InternationalAvailabilityForm', back_populates='events'
+    )
+
+
+class InternationalFormResponse(Base):
+    """Full form row for one respondent (all columns in ``response_json``)."""
+
+    __tablename__ = 'international_form_response'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['form_id'],
+            ['officials_analysis.international_availability_form.id'],
+            name='international_form_response_form_id_fkey',
+            ondelete='CASCADE',
+        ),
+        PrimaryKeyConstraint('id', name='international_form_response_pkey'),
+        UniqueConstraint(
+            'form_id',
+            'response_key',
+            name='international_form_response_form_response_key',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        Identity(always=True, start=1, increment=1, minvalue=1, maxvalue=2147483647, cycle=False, cache=1),
+        primary_key=True,
+    )
+    form_id: Mapped[int] = mapped_column(Integer)
+    response_key: Mapped[str] = mapped_column(Text)
+    email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    first_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+    form: Mapped['InternationalAvailabilityForm'] = relationship(
+        'InternationalAvailabilityForm', back_populates='responses'
+    )
+
+
+class InternationalResponseEventAvailability(Base):
+    """Per-event availability extracted from a form response."""
+
+    __tablename__ = 'international_response_event_availability'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['form_id'],
+            ['officials_analysis.international_availability_form.id'],
+            name='international_response_event_avail_form_id_fkey',
+            ondelete='CASCADE',
+        ),
+        ForeignKeyConstraint(
+            ['response_id'],
+            ['officials_analysis.international_form_response.id'],
+            name='international_response_event_avail_response_id_fkey',
+            ondelete='CASCADE',
+        ),
+        ForeignKeyConstraint(
+            ['event_id'],
+            ['officials_analysis.international_availability_event.id'],
+            name='international_response_event_avail_event_id_fkey',
+            ondelete='CASCADE',
+        ),
+        PrimaryKeyConstraint(
+            'form_id',
+            'response_id',
+            'event_id',
+            name='international_response_event_availability_pkey',
+        ),
+        {'schema': 'officials_analysis'},
+    )
+
+    form_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    response_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    availability_code: Mapped[str] = mapped_column(Text)
+    raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

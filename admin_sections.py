@@ -195,6 +195,266 @@ def render_public_competition_officials_types_breakdown() -> None:
     st.dataframe(display, width="stretch", hide_index=True)
 
 
+def render_assignment_protocol_reconciliation() -> None:
+    from activityAnalysis.assignment_protocol_reconciliation import (
+        load_assignment_protocol_reconciliation,
+    )
+    from activityAnalysis.load_activity_data import activity_database_is_postgresql
+    from officials_competition_types import (
+        OFFICIALS_COMPETITION_TYPE_IDS_SECTIONALS_AND_CHAMPIONSHIPS,
+        format_officials_competition_type_select_label,
+    )
+
+    st.subheader("Assignments ↔ protocol panels")
+    st.caption(
+        "Bulk compare **officials_analysis** assignment rosters to **public.segment_official** "
+        "panels for competitions with loaded protocol data. By default compares "
+        "**Competition Judge**, **Referee**, **Technical Controller**, and **Technical Specialist** "
+        "(Data Operator is optional — often absent on protocol). Other assignment types "
+        "such as accountants are excluded. "
+        "For each official on both sides, panel **role + discipline** must match; extra protocol "
+        "roles (e.g. Technical Controller without an assignment) are flagged as **role_mismatch**. "
+        "Assignment competitions use a **calendar year** (e.g. 2022); protocol competitions "
+        "use the **USFS season code** (e.g. 2122 for the 2021–22 season ending in 2022). "
+        "Matching uses competition type + season code, then competition name when possible. "
+        "Officials with different protocol spellings match when linked in **Judge ↔ directory matcher** "
+        "(use sidebar **Search protocol name** — the default list is only the first unmapped judges A→Z) "
+        "or via ``official_name_alias``. "
+        "**Retired officials** (``Retired_officials.xlsx`` → ``retired_official`` table) are excluded "
+        "by default."
+    )
+    if not activity_database_is_postgresql():
+        st.info(
+            "This report requires PostgreSQL with both ``officials_analysis`` and ``public`` "
+            "judging tables."
+        )
+        return
+
+    analytics = get_analytics_safe()
+    type_rows = analytics.get_officials_analysis_competition_types()
+    if not type_rows:
+        st.info("No officials competition types found.")
+        return
+
+    type_options = {
+        format_officials_competition_type_select_label(tid, name): int(tid)
+        for tid, name in type_rows
+    }
+    default_labels = [
+        label
+        for label, tid in type_options.items()
+        if tid in OFFICIALS_COMPETITION_TYPE_IDS_SECTIONALS_AND_CHAMPIONSHIPS
+    ]
+    selected_labels = st.multiselect(
+        "Competition types",
+        options=list(type_options.keys()),
+        default=default_labels,
+        key="admin_assign_proto_types",
+    )
+    only_with_protocol = st.checkbox(
+        "Only competitions with a matched protocol event",
+        value=True,
+        key="admin_assign_proto_with_protocol",
+    )
+    only_mismatches = st.checkbox(
+        "Only show mismatches (officials or match quality)",
+        value=False,
+        key="admin_assign_proto_mismatches",
+    )
+    include_data_operator = st.checkbox(
+        "Include Data Operator",
+        value=False,
+        key="admin_assign_proto_include_do",
+        help="When unchecked, Data Operator assignments are ignored (they are often "
+        "not listed on IJS protocols).",
+    )
+    exclude_retired = st.checkbox(
+        "Exclude retired officials",
+        value=True,
+        key="admin_assign_proto_exclude_retired",
+        help="Omit names listed in officials_analysis.retired_official (synced from Retired_officials.xlsx).",
+    )
+    if st.button("Run comparison", type="primary", key="admin_assign_proto_run"):
+        st.session_state["admin_assign_proto_run_requested"] = True
+
+    if not st.session_state.get("admin_assign_proto_run_requested"):
+        st.info("Choose filters and click **Run comparison**.")
+        return
+
+    type_ids = [type_options[label] for label in selected_labels] if selected_labels else None
+    with st.spinner("Comparing assignments to protocol panels..."):
+        summary, detail = load_assignment_protocol_reconciliation(
+            competition_type_ids=type_ids,
+            only_mismatches=only_mismatches,
+            only_with_protocol_match=only_with_protocol,
+            include_data_operator=include_data_operator,
+            exclude_retired=exclude_retired,
+        )
+
+    if summary.empty:
+        st.info("No assignment competitions matched the selected filters.")
+        return
+
+    st.markdown("**Official status**")
+    st.caption(
+        "**both** — same person and matching panel roles/disciplines; **role_mismatch** — on both "
+        "sides but assignment roles differ from protocol (Chief Referee counts as Referee in the "
+        "same discipline); **assignments_only** / **protocol_only** — person missing from the "
+        "other source."
+    )
+
+    st.markdown("**Competition match status**")
+    st.caption(
+        "**matched** — type, season, and strong name match; **name_partial** — one plausible "
+        "name match among season peers; **type_year_only** — only one protocol event for that "
+        "type/season; **ambiguous** — multiple protocol candidates; **no_protocol** — no loaded "
+        "protocol competition for that type/season."
+    )
+
+    show_summary = summary.copy()
+    show_summary["assignment_competition"] = show_summary.apply(
+        lambda r: f"{int(r['oa_calendar_year'])} — {r['oa_name']}", axis=1
+    )
+    show_summary["protocol_competition"] = show_summary.apply(
+        lambda r: (
+            f"{r['pub_year']} — {r['pub_name']}"
+            if pd.notna(r.get("pub_competition_id"))
+            else ""
+        ),
+        axis=1,
+    )
+    display_summary = show_summary.rename(
+        columns={
+            "match_status": "Match",
+            "competition_type_name": "Type",
+            "season_code": "Season code",
+            "assignment_officials": "Assign. officials",
+            "protocol_officials": "Protocol officials",
+            "in_both": "Roles match",
+            "role_mismatch": "Role mismatch",
+            "assignments_only": "Assign. only",
+            "protocol_only": "Protocol only",
+        }
+    )
+    display_cols = [
+        "assignment_competition",
+        "protocol_competition",
+        "Type",
+        "Season code",
+        "Match",
+        "Assign. officials",
+        "Protocol officials",
+        "Roles match",
+        "Role mismatch",
+        "Assign. only",
+        "Protocol only",
+        "oa_competition_id",
+        "pub_competition_id",
+    ]
+    st.dataframe(
+        display_summary[display_cols],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "oa_competition_id": st.column_config.NumberColumn(
+                "Assign. comp. id", width="small"
+            ),
+            "pub_competition_id": st.column_config.NumberColumn(
+                "Protocol comp. id", width="small"
+            ),
+        },
+    )
+
+    mismatch_count = int(
+        (
+            (summary["assignments_only"] > 0)
+            | (summary["protocol_only"] > 0)
+            | (summary["role_mismatch"] > 0)
+            | (summary["match_status"] != "matched")
+        ).sum()
+    )
+    st.caption(
+        f"{len(summary)} assignment competition(s); {mismatch_count} with official or match differences."
+    )
+
+    if detail.empty:
+        return
+
+    detail_only_not_both = st.checkbox(
+        "Only officials with differences (not exact role match)",
+        value=True,
+        key="admin_assign_proto_detail_not_both",
+    )
+    comp_labels = {
+        int(row["oa_competition_id"]): str(row["assignment_competition"])
+        for _, row in show_summary.iterrows()
+    }
+    detail_filter_ids = st.multiselect(
+        "Filter detail to competitions",
+        options=sorted(comp_labels.keys(), reverse=True),
+        format_func=lambda cid: comp_labels.get(int(cid), str(cid)),
+        key="admin_assign_proto_detail_filter",
+    )
+    detail_show = detail.copy()
+    if detail_only_not_both:
+        detail_show = detail_show[detail_show["status"] != "both"].copy()
+    if detail_filter_ids:
+        detail_show = detail_show[
+            detail_show["oa_competition_id"].isin([int(x) for x in detail_filter_ids])
+        ]
+    detail_show = detail_show.rename(
+        columns={
+            "official_name": "Official",
+            "status": "Status",
+            "assignments": "Assignments",
+            "protocol_roles": "Protocol roles",
+            "roles_assign_only": "Roles assign. only",
+            "roles_protocol_only": "Roles protocol only",
+        }
+    )
+    st.subheader("Official-level detail")
+    if detail_show.empty:
+        st.info("No officials match the detail filters.")
+    else:
+        st.dataframe(
+            detail_show[
+                [
+                    "oa_name",
+                    "oa_calendar_year",
+                    "pub_name",
+                    "Official",
+                    "Status",
+                    "Assignments",
+                    "Protocol roles",
+                    "Roles assign. only",
+                    "Roles protocol only",
+                ]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+    csv_summary = summary.to_csv(index=False).encode("utf-8")
+    csv_detail = detail.to_csv(index=False).encode("utf-8")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "Download summary CSV",
+            data=csv_summary,
+            file_name="assignment_protocol_summary.csv",
+            mime="text/csv",
+            key="admin_assign_proto_dl_summary",
+        )
+    with dl2:
+        st.download_button(
+            "Download detail CSV",
+            data=csv_detail,
+            file_name="assignment_protocol_detail.csv",
+            mime="text/csv",
+            key="admin_assign_proto_dl_detail",
+        )
+
+
 def render_manage_judge_emails() -> None:
     from email_reports import ensure_email_table, get_email_list, upsert_email_list, delete_email_entry
 

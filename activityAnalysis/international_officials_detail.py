@@ -286,12 +286,19 @@ def parse_appointment_detail_params() -> dict[str, Any] | None:
 
 INTL_VIEW_SUMMARY = "Summary report"
 INTL_VIEW_MAJOR_EVENTS = "Major ISU events"
+INTL_VIEW_AVAILABILITY = "Availability"
 INTL_VIEW_DETAIL = "Appointment details"
-INTL_VIEW_OPTIONS = (INTL_VIEW_SUMMARY, INTL_VIEW_MAJOR_EVENTS, INTL_VIEW_DETAIL)
+INTL_VIEW_OPTIONS = (
+    INTL_VIEW_SUMMARY,
+    INTL_VIEW_MAJOR_EVENTS,
+    INTL_VIEW_AVAILABILITY,
+    INTL_VIEW_DETAIL,
+)
 
 # ``view`` query param values (appointment detail pages use ``view=appointment``).
 INTL_VIEW_QP_SUMMARY = "summary"
 INTL_VIEW_QP_MAJOR_EVENTS = "major_events"
+INTL_VIEW_QP_AVAILABILITY = "availability"
 INTL_VIEW_QP_APPOINTMENTS = "appointments"
 INTL_VIEW_QP_APPOINTMENT = "appointment"
 
@@ -302,6 +309,8 @@ def intl_view_mode_from_query_param(view: str | None) -> str | None:
         return INTL_VIEW_DETAIL
     if view == INTL_VIEW_QP_MAJOR_EVENTS:
         return INTL_VIEW_MAJOR_EVENTS
+    if view == INTL_VIEW_QP_AVAILABILITY:
+        return INTL_VIEW_AVAILABILITY
     if view in (None, INTL_VIEW_QP_SUMMARY):
         return INTL_VIEW_SUMMARY
     return None
@@ -311,6 +320,8 @@ def intl_view_query_slug_for_mode(view_mode: str) -> str:
     """Sidebar view label → ``?view=`` token (appointment reports use ``appointment``)."""
     if view_mode == INTL_VIEW_MAJOR_EVENTS:
         return INTL_VIEW_QP_MAJOR_EVENTS
+    if view_mode == INTL_VIEW_AVAILABILITY:
+        return INTL_VIEW_QP_AVAILABILITY
     if view_mode == INTL_VIEW_DETAIL:
         return INTL_VIEW_QP_APPOINTMENTS
     return INTL_VIEW_QP_SUMMARY

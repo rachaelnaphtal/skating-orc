@@ -597,23 +597,22 @@ def _set_analysis_headers(
     ws,
     *,
     include_rule_errors: bool = True,
-    performance_block_header: str = (
-        "Qualifying Competition Performance (Past three years)"
-    ),
+    performance_block_header: str = "Qualifying Competition Performance",
     activity_column_label: str = "Qualifying Activity",
     performance_analysis_header: str = "Qualifying Performance Analysis",
-    recent_period_header: str = "Last 3 years",
+    recent_period_header: str = "Recent seasons",
     junior_senior_segment_count_header: str = "# Junior/Senior Segments",
     junior_senior_activity_label: str = "Jr/Senior Activity",
-    sectionals_block_header: str = "Sectionals (since 2018 for GOEs and 2022 for PCS)",
+    sectionals_block_header: str = "Sectionals (22-23 through 25-26)",
     sectionals_performance_header: str = "Sectionals Performance Analysis",
+    champs_block_header: str = "Champs (22-23 through 25-26)",
 ) -> None:
     ws[f"{_col(C_RECENT_BLOCK_START)}1"] = "Raw Data"
     ws[f"{_col(C_ACT_TOTAL)}1"] = "Analysis"
     ws[f"{_col(C_RECENT_BLOCK_START)}2"] = recent_period_header
     ws[f"{_col(C_RECENT_COMP)}2"] = performance_block_header
     ws[f"{_col(C_SECT_COMP)}2"] = sectionals_block_header
-    ws[f"{_col(C_CHAMPS_COMP)}2"] = "Champs (since 2018 for GOEs and 2022 for PCS)"
+    ws[f"{_col(C_CHAMPS_COMP)}2"] = champs_block_header
     ws[f"{_col(C_ACT_TOTAL)}2"] = "Activity Analysis"
     ws[f"{_col(C_QUAL_RULE)}2"] = performance_analysis_header
     ws[f"{_col(C_SECT_PERF_RULE)}2"] = sectionals_performance_header
@@ -1266,16 +1265,15 @@ def write_national_sp_judge_analysis_xlsx(
     *,
     include_rule_errors: bool = True,
     thresholds: ReportActivityThresholds = SINGLES_PAIRS_THRESHOLDS,
-    performance_block_header: str = (
-        "Qualifying Competition Performance (Past three years)"
-    ),
+    performance_block_header: str = "Qualifying Competition Performance",
     activity_column_label: str = "Qualifying Activity",
     performance_analysis_header: str = "Qualifying Performance Analysis",
-    recent_period_header: str = "Last 3 years",
+    recent_period_header: str = "Recent seasons",
     junior_senior_segment_count_header: str = "# Junior/Senior Segments",
     junior_senior_activity_label: str = "Jr/Senior Activity",
-    sectionals_block_header: str = "Sectionals (since 2018 for GOEs and 2022 for PCS)",
+    sectionals_block_header: str = "Sectionals (22-23 through 25-26)",
     sectionals_performance_header: str = "Sectionals Performance Analysis",
+    champs_block_header: str = "Champs (22-23 through 25-26)",
     sectionals_activity_min_year: int = 0,
 ) -> None:
     """Write formatted workbook with analysis, raw data, and lookup sheets."""
@@ -1297,6 +1295,7 @@ def write_national_sp_judge_analysis_xlsx(
         junior_senior_activity_label=junior_senior_activity_label,
         sectionals_block_header=sectionals_block_header,
         sectionals_performance_header=sectionals_performance_header,
+        champs_block_header=champs_block_header,
     )
 
     _write_raw_sheet(wb, raw_df)

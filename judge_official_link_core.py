@@ -322,6 +322,101 @@ def fetch_unmapped_judges(conn: Connection, limit: int | None = None) -> list[Ro
     return list(conn.execute(q, params).mappings().all())
 
 
+def _matcher_status_clause(*, include_marked_outside: bool, include_linked: bool) -> str:
+    if include_linked:
+        return "1=1"
+    if include_marked_outside:
+        return "COALESCE(l.status, '') <> 'linked'"
+    return "COALESCE(l.status, '') NOT IN ('linked', 'outside_directory')"
+
+
+def fetch_judges_for_matcher(
+    conn: Connection,
+    limit: int | None = None,
+    *,
+    name_contains: str | None = None,
+    include_marked_outside: bool = False,
+    include_linked: bool = False,
+) -> list[RowMapping]:
+    """
+    Judges for the matcher UI.
+
+    When ``name_contains`` is set, returns name matches across the full table (not only
+    the first N alphabetically). Set ``include_linked`` with a name search to inspect or
+    relink judges that already have a ``judge_official_link`` row.
+    """
+    lim_sql = " LIMIT :lim" if limit is not None else ""
+    status_clause = _matcher_status_clause(
+        include_marked_outside=include_marked_outside,
+        include_linked=include_linked,
+    )
+    isu_clause = (
+        "1=1"
+        if include_linked
+        else """
+        NOT EXISTS (
+            SELECT 1
+            FROM judge_isu_official_link il
+            WHERE il.judge_id = j.id
+        )
+        """
+    )
+    name_clause = ""
+    params: dict[str, Any] = {}
+    needle = (name_contains or "").strip()
+    if needle:
+        name_clause = "AND lower(j.name) LIKE :name_pat"
+        params["name_pat"] = f"%{needle.lower()}%"
+    q = text(
+        f"""
+        SELECT j.id, j.name, j.location,
+               l.status AS link_status,
+               l.official_id AS linked_official_id
+        FROM judge j
+        LEFT JOIN judge_official_link l ON l.judge_id = j.id
+        WHERE {isu_clause}
+          AND {status_clause}
+          {name_clause}
+        ORDER BY lower(j.name), j.id
+        {lim_sql}
+        """
+    )
+    if limit is not None:
+        params["lim"] = limit
+    return list(conn.execute(q, params).mappings().all())
+
+
+def fetch_segment_official_name_hints(
+    conn: Connection,
+    name_contains: str,
+    *,
+    limit: int = 15,
+) -> list[RowMapping]:
+    """Distinct ``segment_official.official_name`` values matching a substring."""
+    needle = (name_contains or "").strip()
+    if not needle:
+        return []
+    q = text(
+        """
+        SELECT DISTINCT btrim(so.official_name) AS protocol_name,
+               COUNT(*)::int AS panel_rows
+        FROM public.segment_official so
+        WHERE so.official_name IS NOT NULL
+          AND btrim(so.official_name) <> ''
+          AND lower(so.official_name) LIKE :name_pat
+        GROUP BY btrim(so.official_name)
+        ORDER BY lower(btrim(so.official_name))
+        LIMIT :lim
+        """
+    )
+    return list(
+        conn.execute(
+            q,
+            {"name_pat": f"%{needle.lower()}%", "lim": int(limit)},
+        ).mappings().all()
+    )
+
+
 def fetch_judges_needing_link(
     conn: Connection,
     limit: int | None = None,
@@ -335,10 +430,10 @@ def fetch_judges_needing_link(
     Set ``include_marked_outside`` to list outside-marked judges (e.g. to link ISU).
     """
     lim_sql = " LIMIT :lim" if limit is not None else ""
-    if include_marked_outside:
-        status_clause = "COALESCE(l.status, '') <> 'linked'"
-    else:
-        status_clause = "COALESCE(l.status, '') NOT IN ('linked', 'outside_directory')"
+    status_clause = _matcher_status_clause(
+        include_marked_outside=include_marked_outside,
+        include_linked=False,
+    )
     q = text(
         f"""
         SELECT j.id, j.name, j.location

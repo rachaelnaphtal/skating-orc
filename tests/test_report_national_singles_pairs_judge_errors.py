@@ -28,12 +28,15 @@ from scripts.national_sp_judge_analysis_xlsx import (  # noqa: E402
 from scripts.report_national_singles_pairs_judge_errors import (  # noqa: E402
     ACTIVITY_WINDOW_SEASONS,
     REPORT_DISCIPLINE_CONFIGS,
+    SECTIONALS_CHAMPS_WINDOW_SEASONS,
     SYNCHRO_JUNIOR_SENIOR_MIN_TEAM_COUNT,
     SYNCHRO_JUNIOR_SENIOR_SEGMENT_COUNT_HEADER,
     SYNCHRO_JUNIOR_SENIOR_ACTIVITY_LABEL,
     _deviation_benchmark_kwargs,
     _official_candidate_judge_ids,
     _pool_judge_stats,
+    _primary_performance_headers,
+    _sectionals_champs_season_years,
     _segment_counts_for_judge_ids,
     _season_years_for_listing,
 )
@@ -54,6 +57,33 @@ from officials_competition_types import (  # noqa: E402
 
 def test_season_years_for_listing_2627_default_window():
     assert _season_years_for_listing(2627, 3) == ["2526", "2425", "2324"]
+
+
+def test_sectionals_champs_season_years_last_four_from_2223():
+    assert _sectionals_champs_season_years(2627) == [
+        "2223",
+        "2324",
+        "2425",
+        "2526",
+    ]
+    assert SECTIONALS_CHAMPS_WINDOW_SEASONS == 4
+
+
+def test_primary_performance_headers_reflect_season_window():
+    sp = REPORT_DISCIPLINE_CONFIGS["singles_pairs"]
+    dance = REPORT_DISCIPLINE_CONFIGS["ice_dance"]
+    seasons = _season_years_for_listing(2627, 3)
+    recent, block = _primary_performance_headers(sp, seasons)
+    assert recent == "Last 3 seasons (23-24 through 25-26)"
+    assert block == "Qualifying Competition Performance (23-24 through 25-26)"
+
+    dance_recent, dance_block = _primary_performance_headers(dance, seasons)
+    assert "all activity" in dance_recent
+    assert "all activity" in dance_block
+
+    seasons4 = _season_years_for_listing(2627, 4)
+    recent4, _ = _primary_performance_headers(sp, seasons4)
+    assert recent4 == "Last 4 seasons (22-23 through 25-26)"
 
 
 def test_discipline_configs():
@@ -79,8 +109,9 @@ def test_discipline_configs():
     assert synchro.thresholds is SYNCHRO_THRESHOLDS
     assert dance.thresholds.anomaly_pct_fair == 1.1
     assert synchro.thresholds.anomaly_pct_fair == SYNCHRO_THRESHOLDS.anomaly_pct_fair
-    assert "all activity" in dance.performance_block_header
-    assert dance.recent_period_header == "Last 3 years (all activity)"
+    assert dance.primary_period_includes_all_activity is True
+    assert synchro.primary_period_includes_all_activity is True
+    assert sp.primary_period_includes_all_activity is False
     assert synchro.junior_senior_min_team_count == SYNCHRO_JUNIOR_SENIOR_MIN_TEAM_COUNT
     assert (
         synchro.junior_senior_segment_count_header
@@ -211,14 +242,25 @@ def test_write_workbook_layout(tmp_path: Path):
         ]
     )
     out = tmp_path / "report.xlsx"
-    write_national_sp_judge_analysis_xlsx(df, out, sectionals_activity_min_year=2023)
+    sp = REPORT_DISCIPLINE_CONFIGS["singles_pairs"]
+    primary_seasons = _season_years_for_listing(2627, 3)
+    recent_header, performance_header = _primary_performance_headers(
+        sp, primary_seasons
+    )
+    write_national_sp_judge_analysis_xlsx(
+        df,
+        out,
+        recent_period_header=recent_header,
+        performance_block_header=performance_header,
+        sectionals_activity_min_year=2023,
+    )
 
     wb = load_workbook(out, data_only=False)
     assert wb.sheetnames == [ANALYSIS_SHEET, RAW_SHEET, LOOKUP_SHEET]
 
     ws = wb[ANALYSIS_SHEET]
     assert ws["A3"].value == "Name"
-    assert ws["H2"].value == "Last 3 years"
+    assert ws["H2"].value == "Last 3 seasons (23-24 through 25-26)"
     assert ws["G3"].value == "Last Sectionals in Role"
     assert ws["G4"].value == 2024
     assert ws["A4"].value == "Example Judge"
@@ -244,7 +286,7 @@ def test_write_workbook_layout(tmp_path: Path):
     assert ws["AM3"].value == "Total Activity"
     assert ws["AN3"].value == "Qualifying Activity"
     assert ws["AP3"].value == "Sectionals Activity"
-    assert ws["R2"].value == "Sectionals (since 2018 for GOEs and 2022 for PCS)"
+    assert ws["R2"].value == "Sectionals (22-23 through 25-26)"
     assert ws["AW2"].value == "Sectionals Performance Analysis"
     assert ws.freeze_panes == ANALYSIS_FREEZE_PANES
     assert ws.row_dimensions[3].height == 51
@@ -353,21 +395,24 @@ def test_write_workbook_dance_layout_labels(tmp_path: Path):
         ]
     )
     out = tmp_path / "dance_layout.xlsx"
+    dance = REPORT_DISCIPLINE_CONFIGS["ice_dance"]
+    primary_seasons = _season_years_for_listing(2627, 3)
+    recent_header, performance_header = _primary_performance_headers(
+        dance, primary_seasons
+    )
     write_national_sp_judge_analysis_xlsx(
         df,
         out,
         include_rule_errors=False,
         thresholds=ICE_DANCE_THRESHOLDS,
-        performance_block_header=(
-            "Competition Performance (Past three years, all activity)"
-        ),
+        performance_block_header=performance_header,
         activity_column_label="Competition Activity",
         performance_analysis_header="Performance Analysis",
-        recent_period_header="Last 3 years (all activity)",
+        recent_period_header=recent_header,
     )
     ws = load_workbook(out)["analysis"]
     assert "all activity" in str(ws["I2"].value)
-    assert ws["H2"].value == "Last 3 years (all activity)"
+    assert ws["H2"].value == "Last 3 seasons (23-24 through 25-26, all activity)"
     assert ws["AN3"].value == "Competition Activity"
     assert ws["AR2"].value == "Performance Analysis"
     assert f"<={ICE_DANCE_THRESHOLDS.total_comps_in_role_low}" in str(
@@ -455,19 +500,23 @@ def test_write_workbook_synchro_layout_labels(tmp_path: Path):
         ]
     )
     synchro = REPORT_DISCIPLINE_CONFIGS["synchro"]
+    primary_seasons = _season_years_for_listing(2627, 3)
+    recent_header, performance_header = _primary_performance_headers(
+        synchro, primary_seasons
+    )
     out = tmp_path / "synchro_layout.xlsx"
     write_national_sp_judge_analysis_xlsx(
         df,
         out,
         include_rule_errors=False,
         thresholds=synchro.thresholds,
-        performance_block_header=synchro.performance_block_header,
+        performance_block_header=performance_header,
         activity_column_label=synchro.activity_column_label,
         performance_analysis_header=synchro.performance_analysis_header,
-        recent_period_header=synchro.recent_period_header,
+        recent_period_header=recent_header,
         junior_senior_segment_count_header=synchro.junior_senior_segment_count_header,
         junior_senior_activity_label=synchro.junior_senior_activity_label,
-        sectionals_block_header=f"{synchro.sectionals_label} (since 2018 for GOEs and 2022 for PCS)",
+        sectionals_block_header=f"{synchro.sectionals_label} (22-23 through 25-26)",
         sectionals_performance_header=f"{synchro.sectionals_label} Performance Analysis",
     )
     ws = load_workbook(out)["analysis"]

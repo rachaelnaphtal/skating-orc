@@ -79,6 +79,7 @@ from activityAnalysis.international_major_events import (
 from activityAnalysis.isu_major_event_classification import is_synchro_major_event
 from activityAnalysis.load_activity_data import DISC_SYNCHRO_ID
 from activityAnalysis.international_officials_detail import (
+    INTL_VIEW_AVAILABILITY,
     INTL_VIEW_DETAIL,
     INTL_VIEW_MAJOR_EVENTS,
     INTL_VIEW_OPTIONS,
@@ -99,6 +100,9 @@ from activityAnalysis.international_officials_detail import (
 from activityAnalysis.international_officials_report import (
     build_bulk_appointment_reports_zip,
     bulk_reports_zip_filename,
+)
+from activityAnalysis.international_availability_page import (
+    render_international_availability_page,
 )
 from activityAnalysis.international_segment_eligibility import (
     enrich_panel_with_rule411_eligibility,
@@ -639,7 +643,7 @@ active_only = st.sidebar.checkbox(
     help="When checked, only directory appointments with active = true are included.",
 )
 
-if view_mode != INTL_VIEW_MAJOR_EVENTS:
+if view_mode != INTL_VIEW_MAJOR_EVENTS and view_mode != INTL_VIEW_AVAILABILITY:
     include_requirements = st.sidebar.checkbox(
         "Include ISU maintain / promote checks",
         key="intl_include_requirements",
@@ -706,7 +710,7 @@ else:
     show_seminar_promote = False
     filter_maintain_no = False
 
-if view_mode != INTL_VIEW_MAJOR_EVENTS:
+if view_mode != INTL_VIEW_MAJOR_EVENTS and view_mode != INTL_VIEW_AVAILABILITY:
     listing_season_code = st.sidebar.selectbox(
         "Listing season",
         options=list(REPORT_LISTING_SEASON_OPTIONS),
@@ -1016,6 +1020,31 @@ if view_mode == INTL_VIEW_MAJOR_EVENTS:
         st.caption(
             f"Directory appointment data current as of {pd.Timestamp(appt_date):%-m/%-d/%Y}"
         )
+    st.stop()
+
+if view_mode == INTL_VIEW_AVAILABILITY:
+    _sync_intl_query_params(
+        view=intl_view_query_slug_for_mode(INTL_VIEW_AVAILABILITY),
+        active="1" if active_only else "0",
+        oid=None,
+        atid=None,
+        did=None,
+        listing=None,
+        seasons=None,
+        req=None,
+        maint_fail=None,
+        event=None,
+        appt=None,
+        level=None,
+        activity_detail=None,
+        scope_counts=None,
+        sem_maintain=None,
+        sem_promote=None,
+    )
+    render_international_availability_page(
+        cache_ttl_sec=_CACHE_TTL_SEC,
+        active_only=active_only,
+    )
     st.stop()
 
 st.title("International Officials Activity")
