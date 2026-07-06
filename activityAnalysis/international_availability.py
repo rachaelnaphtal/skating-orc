@@ -233,6 +233,24 @@ def availability_cell_code(value: object) -> str:
     return normalize_qualifying_availability_cell(value)
 
 
+def format_form_text_display(value: object) -> str:
+    """
+    Human-readable free-text from the form export.
+
+    Google Form / Excel exports often encode line breaks as ``_x000D_`` (carriage
+    return) instead of actual newlines.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = re.sub(r"_x000D_", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"_x000A_", "\n", text, flags=re.IGNORECASE)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip()
+
+
 def _normalize_email(value: object) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
@@ -485,7 +503,7 @@ def build_international_availability_report(
                 if val is None or (isinstance(val, float) and pd.isna(val)):
                     out_row[label] = ""
                 else:
-                    out_row[label] = str(val).strip()
+                    out_row[label] = format_form_text_display(form_row.get(col))
 
         rows.append(out_row)
         codes_grid.append(row_codes)

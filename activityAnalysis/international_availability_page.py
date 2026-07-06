@@ -480,6 +480,31 @@ def _render_sortable_availability_table(
     st.iframe(payload, height=iframe_h)
 
 
+def _upload_fingerprint(uploaded) -> tuple[str, int, int]:
+    data = uploaded.getvalue()
+    return (str(uploaded.name), len(data), hash(data))
+
+
+def _save_uploaded_workbook(
+    uploaded,
+    *,
+    form_label: str,
+) -> dict:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    try:
+        tmp.write(uploaded.getvalue())
+        tmp.close()
+        return load_international_availability_form_workbook(
+            tmp.name,
+            label=form_label.strip() or DEFAULT_INTERNATIONAL_AVAILABILITY_LABEL,
+        )
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 def render_international_availability_page(
     *,
     cache_ttl_sec: int,
@@ -520,21 +545,10 @@ def render_international_availability_page(
         )
         forms_df = pd.DataFrame()
 
-    form_options: list[int] = []
-    form_labels: dict[int, str] = {}
-    if not forms_df.empty:
-        for row in forms_df.itertuples(index=False):
-            fid = int(row.form_id)
-            form_options.append(fid)
-            loaded = pd.Timestamp(row.loaded_at)
-            form_labels[fid] = (
-                f"{row.label} (loaded {loaded:%Y-%m-%d %H:%M}, "
-                f"{row.source_filename or 'unknown file'})"
-            )
-
     with st.expander("Load workbook", expanded=forms_df.empty):
         st.markdown(
-            "Upload an updated form export (``.xlsx``). "
+            "Choose an updated form export (``.xlsx``). The file is saved to the database "
+            "automatically when selected. "
             f"Reloading label **{DEFAULT_INTERNATIONAL_AVAILABILITY_LABEL}** "
             "replaces stored responses for that form."
         )
@@ -548,33 +562,52 @@ def render_international_availability_page(
             type=["xlsx"],
             key="intl_avail_workbook_upload",
         )
-        if uploaded is not None and st.button(
-            "Save workbook to database",
-            type="primary",
-            key="intl_avail_save_workbook",
-        ):
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-            tmp.write(uploaded.getvalue())
-            tmp.close()
-            try:
-                stats = load_international_availability_form_workbook(
-                    tmp.name,
-                    label=form_label.strip() or DEFAULT_INTERNATIONAL_AVAILABILITY_LABEL,
-                )
-            except Exception as exc:
-                st.error(f"Could not load workbook: {exc}")
-            else:
-                _clear_caches()
-                st.success(
-                    f"Stored **{stats['responses_stored']}** responses "
-                    f"({stats['events']} events) for form id {stats['form_id']}."
-                )
-                if stats.get("duplicate_rows_dropped"):
-                    st.caption(
-                        f"Dropped {stats['duplicate_rows_dropped']} duplicate row(s) "
-                        "with the same email or name."
+        if uploaded is not None:
+            fp = _upload_fingerprint(uploaded)
+            st.caption(f"Selected: **{uploaded.name}** ({fp[1]:,} bytes)")
+            if st.session_state.get("intl_avail_saved_upload_fp") != fp:
+                try:
+                    with st.spinner("Saving workbook to database…"):
+                        stats = _save_uploaded_workbook(
+                            uploaded,
+                            form_label=form_label,
+                        )
+                except Exception as exc:
+                    st.error(f"Could not load workbook: {exc}")
+                else:
+                    st.session_state["intl_avail_saved_upload_fp"] = fp
+                    _clear_caches()
+                    st.success(
+                        f"Saved **{stats['responses_stored']}** responses "
+                        f"from **{uploaded.name}** "
+                        f"({stats['rows_read']} rows read, {stats['events']} events)."
                     )
-                st.rerun()
+                    if stats.get("duplicate_rows_dropped"):
+                        st.caption(
+                            f"Dropped {stats['duplicate_rows_dropped']} duplicate row(s) "
+                            "with the same email or name."
+                        )
+                    st.rerun()
+            elif st.button(
+                "Save again (same file)",
+                type="secondary",
+                key="intl_avail_resave_workbook",
+            ):
+                try:
+                    with st.spinner("Saving workbook to database…"):
+                        stats = _save_uploaded_workbook(
+                            uploaded,
+                            form_label=form_label,
+                        )
+                except Exception as exc:
+                    st.error(f"Could not load workbook: {exc}")
+                else:
+                    _clear_caches()
+                    st.success(
+                        f"Saved **{stats['responses_stored']}** responses "
+                        f"from **{uploaded.name}**."
+                    )
+                    st.rerun()
 
         bundled_path = default_availability_workbook_path()
         if forms_df.empty and os.path.isfile(bundled_path):
@@ -592,6 +625,23 @@ def render_international_availability_page(
                         f"Loaded bundled workbook: {stats['responses_stored']} responses."
                     )
                     st.rerun()
+
+    # Refresh after a possible upload in the expander above.
+    try:
+        forms_df = _forms()
+    except Exception:
+        forms_df = pd.DataFrame()
+
+    form_options: list[int] = []
+    form_labels: dict[int, str] = {}
+    for row in forms_df.itertuples(index=False):
+        fid = int(row.form_id)
+        form_options.append(fid)
+        loaded = pd.Timestamp(row.loaded_at)
+        form_labels[fid] = (
+            f"{row.label} (loaded {loaded:%Y-%m-%d %H:%M}, "
+            f"{row.source_filename or 'unknown file'})"
+        )
 
     if not form_options:
         st.info(

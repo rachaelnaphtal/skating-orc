@@ -19,6 +19,7 @@ try:
     from activityAnalysis.international_availability import (
         availability_cell_code,
         event_column_short_label,
+        format_form_text_display,
         load_international_availability_workbook,
         parse_workbook_structure,
         supplemental_column_short_label,
@@ -36,6 +37,7 @@ except ModuleNotFoundError:
     from international_availability import (
         availability_cell_code,
         event_column_short_label,
+        format_form_text_display,
         load_international_availability_workbook,
         parse_workbook_structure,
         supplemental_column_short_label,
@@ -69,7 +71,10 @@ def _row_to_response_json(row: pd.Series) -> dict[str, Any]:
     for col in row.index:
         if not isinstance(col, str):
             continue
-        out[col] = _json_safe_qualifying_value(row[col])
+        val = _json_safe_qualifying_value(row[col])
+        if isinstance(val, str):
+            val = format_form_text_display(val) or None
+        out[col] = val
     return out
 
 

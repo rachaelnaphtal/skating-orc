@@ -17,6 +17,7 @@ from activityAnalysis.international_availability import (
     build_international_availability_report,
     default_availability_workbook_path,
     event_column_short_label,
+    format_form_text_display,
     load_international_availability_workbook,
     official_is_eligible_for_availability_report,
     parse_workbook_structure,
@@ -53,6 +54,19 @@ def test_supplemental_column_short_label():
         supplemental_column_short_label("Do you have a valid passport?")
         == "Valid passport"
     )
+
+
+def test_format_form_text_display_decodes_excel_line_breaks():
+    raw = (
+        "availability pending exam results at Nebelhorn.  _x000D_\n"
+        "_x000D_\n"
+        "I would prefer not to go to an OAC event prior to testing - hence no JGP availability."
+    )
+    out = format_form_text_display(raw)
+    assert "_x000D_" not in out
+    assert "availability pending exam results at Nebelhorn." in out
+    assert "hence no JGP availability." in out
+    assert "\n\n" in out or out.count("\n") >= 2
 
 
 @pytest.mark.parametrize(
