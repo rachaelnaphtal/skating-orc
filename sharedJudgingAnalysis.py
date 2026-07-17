@@ -60,6 +60,8 @@ def categorizeElement(element):
         element = element.replace("+fm", "")
         element = element.replace("+d", "")
         # element = element.replace("+SeEe", "")
+        # Woman/man codes leave the woman's level (e.g. MiStW1 after +MiStM is removed).
+        element = strip_element_level_suffix(element)
     if not element:
         return ""
     if element[-1] == "V" or element[-1] == "v":
@@ -106,6 +108,7 @@ def categorizeElement(element):
         "ChAJ": "Choreo Element",
         "ChRS": "Choreo Element",
         "ChHy": "Choreo Element",
+        "CDE": "Creative Dance Element",
         "SyTwW": "Twizzle",
         "SeStW": "Step Sequence",
         "DiStW": "Step Sequence",
