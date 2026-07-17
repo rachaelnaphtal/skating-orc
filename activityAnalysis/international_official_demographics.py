@@ -132,6 +132,52 @@ def age_as_of_listing(
     return years
 
 
+def official_is_below_age_out(
+    date_of_birth: object,
+    *,
+    listing_season_code: int,
+    age_out_at: int = OFFICIAL_AGE_OUT_ON_JULY1,
+) -> bool:
+    """
+    True when the official should appear on listing reports for this season.
+
+    Officials aged out (≥ ``age_out_at`` on listing July 1) are excluded.
+    Unknown birthdates are kept.
+    """
+    if date_of_birth is None or (
+        isinstance(date_of_birth, float) and pd.isna(date_of_birth)
+    ):
+        return True
+    if not isinstance(date_of_birth, date):
+        try:
+            date_of_birth = pd.Timestamp(date_of_birth).date()
+        except (TypeError, ValueError):
+            return True
+    age = age_as_of_listing(date_of_birth, listing_season_code=listing_season_code)
+    if age is None:
+        return True
+    return int(age) < int(age_out_at)
+
+
+def filter_summary_below_age_out(
+    summary: pd.DataFrame,
+    *,
+    age_out_at: int = OFFICIAL_AGE_OUT_ON_JULY1,
+) -> pd.DataFrame:
+    """
+    Drop summary rows for officials aged out on the listing July 1.
+
+    Requires an ``age_as_of_listing`` column (from
+    :func:`enrich_summary_with_listing_demographics`). Rows with unknown age
+    are kept.
+    """
+    if summary.empty or "age_as_of_listing" not in summary.columns:
+        return summary
+    ages = summary["age_as_of_listing"]
+    keep = ages.isna() | (ages < int(age_out_at))
+    return summary.loc[keep].copy()
+
+
 def july1_calendar_year_when_age_reaches(
     date_of_birth: date,
     min_age: int,

@@ -22,8 +22,8 @@ try:
     )
     from activityAnalysis.international_official_demographics import (
         OFFICIAL_AGE_OUT_ON_JULY1,
-        age_as_of_listing,
         load_official_birthdates,
+        official_is_below_age_out,
     )
     from activityAnalysis.international_listing_seasons import (
         REPORT_LISTING_SEASON_DEFAULT,
@@ -46,8 +46,8 @@ except ModuleNotFoundError:
     from international_officials_data import get_international_officials_for_filters
     from international_official_demographics import (
         OFFICIAL_AGE_OUT_ON_JULY1,
-        age_as_of_listing,
         load_official_birthdates,
+        official_is_below_age_out,
     )
     from international_listing_seasons import REPORT_LISTING_SEASON_DEFAULT
     from international_requirements import (
@@ -117,12 +117,11 @@ def official_is_eligible_for_availability_report(
     Officials aged out (≥ ``age_out_at`` on listing July 1) are excluded.
     Unknown birthdates are kept.
     """
-    if date_of_birth is None or (isinstance(date_of_birth, float) and pd.isna(date_of_birth)):
-        return True
-    age = age_as_of_listing(date_of_birth, listing_season_code=listing_season_code)
-    if age is None:
-        return True
-    return int(age) < int(age_out_at)
+    return official_is_below_age_out(
+        date_of_birth,
+        listing_season_code=listing_season_code,
+        age_out_at=age_out_at,
+    )
 
 
 def _filter_appointments_below_age_out(

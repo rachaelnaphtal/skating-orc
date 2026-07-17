@@ -64,9 +64,10 @@ from activityAnalysis.international_listing_seasons import (
     years_in_grade_listing_column_label,
     season_codes_preceding_listing,
 )
-from activityAnalysis.international_official_demographics import OFFICIAL_AGE_OUT_ON_JULY1
 from activityAnalysis.international_official_demographics import (
+    OFFICIAL_AGE_OUT_ON_JULY1,
     enrich_summary_with_listing_demographics,
+    filter_summary_below_age_out,
 )
 from activityAnalysis.international_major_events import (
     MAJOR_ISU_EVENT_KEYS,
@@ -242,6 +243,7 @@ def _load_summary(
         summary = enrich_summary_with_listing_demographics(
             summary, listing_season_code=listing_season_code
         )
+        summary = filter_summary_below_age_out(summary)
         need_requirement_ctx = (
             include_maintain_promote or include_seminar_columns
         )

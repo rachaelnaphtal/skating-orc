@@ -6,14 +6,18 @@ from activityAnalysis.international_listing_seasons import (
     format_listing_reference_july1,
     listing_reference_july1,
 )
+import pandas as pd
+
 from activityAnalysis.international_official_demographics import (
     OFFICIAL_AGE_OUT_ON_JULY1,
     age_as_of_listing,
+    filter_summary_below_age_out,
     first_listing_season_at_least_age,
     first_year_credit_july1,
     grade_date_for_tc_prerequisite_tenure,
     grade_date_from_appointment_contexts,
     max_years_for_tc_prerequisite_role,
+    official_is_below_age_out,
     years_in_grade_at_listing,
 )
 
@@ -40,6 +44,30 @@ def test_first_listing_season_at_least_age_70():
     assert first_listing_season_at_least_age(None, 70) is None
     # Young official: age-out is far in the future, not limited by projection window.
     assert first_listing_season_at_least_age(date(1990, 3, 15), 70) == 6061
+
+
+def test_official_is_below_age_out():
+    # Born June 1956 → age 70 on July 1, 2026 (listing 2627): excluded that season.
+    assert official_is_below_age_out(date(1956, 6, 1), listing_season_code=2627) is False
+    # Still under 70 for listing 2526 (July 1, 2025).
+    assert official_is_below_age_out(date(1956, 6, 1), listing_season_code=2526) is True
+    # Born August 1956 → age 69 on July 1, 2026; ages out listing 2728.
+    assert official_is_below_age_out(date(1956, 8, 1), listing_season_code=2627) is True
+    assert official_is_below_age_out(date(1956, 8, 1), listing_season_code=2728) is False
+    assert official_is_below_age_out(None, listing_season_code=2627) is True
+
+
+def test_filter_summary_below_age_out():
+    summary = pd.DataFrame(
+        [
+            {"official_id": 1, "age_as_of_listing": 69},
+            {"official_id": 2, "age_as_of_listing": 70},
+            {"official_id": 3, "age_as_of_listing": 72},
+            {"official_id": 4, "age_as_of_listing": None},
+        ]
+    )
+    filtered = filter_summary_below_age_out(summary)
+    assert list(filtered["official_id"]) == [1, 4]
 
 
 def test_years_in_grade_user_examples():
