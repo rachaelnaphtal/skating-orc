@@ -2739,7 +2739,7 @@ PCS scores are not part of this model.
     benchmark_start_season_year = None
     benchmark_end_season_year = None
     benchmark_scope_key = COMPETITION_SCOPE_ALL
-    benchmark_segment_level_preset = None
+    bench_segment_level_preset = None
     with st.expander("σ̂ benchmark pool", expanded=False):
         st.caption(
             "Seasons, competition scope, and segment levels used only to fit "
@@ -2788,9 +2788,9 @@ PCS scores are not part of this model.
             on_change=_mark_element_ranking_benchmark_customized,
         )
         if bench_segment_level_pick == ELEMENT_RANKING_LEVEL_FILTER_ALL:
-            benchmark_segment_level_preset = None
+            bench_segment_level_preset = None
         else:
-            benchmark_segment_level_preset = bench_segment_level_pick
+            bench_segment_level_preset = bench_segment_level_pick
 
     st.subheader("Model parameters")
     p1, p2, p3 = st.columns(3)
@@ -2858,7 +2858,7 @@ PCS scores are not part of this model.
         benchmark_end_season_year,
         benchmark_scope_key,
         segment_level_preset,
-        benchmark_segment_level_preset,
+        bench_segment_level_preset,
     )
     _finalize_element_ranking_job()
     job_status = st.session_state.get("element_ranking_status", "idle")
@@ -3861,7 +3861,7 @@ Discrete: σ̂ per bin from sample stdev. Quadratic: fit sample variance vs cont
     benchmark_start_season_year = None
     benchmark_end_season_year = None
     benchmark_scope_key = COMPETITION_SCOPE_ALL
-    benchmark_segment_level_preset = None
+    bench_segment_level_preset = None
     with st.expander("σ̂ benchmark pool", expanded=False):
         st.caption(
             "Seasons, competition scope, and segment levels used only to fit "
@@ -3904,9 +3904,9 @@ Discrete: σ̂ per bin from sample stdev. Quadratic: fit sample variance vs cont
             on_change=_mark_pcs_deviation_benchmark_customized,
         )
         if bench_segment_level_pick == ELEMENT_RANKING_LEVEL_FILTER_ALL:
-            benchmark_segment_level_preset = None
+            bench_segment_level_preset = None
         else:
-            benchmark_segment_level_preset = bench_segment_level_pick
+            bench_segment_level_preset = bench_segment_level_pick
 
     st.subheader("Model parameters")
     _sigma_model_options = list(PCS_SIGMA_MODEL_LABELS)
@@ -3967,7 +3967,7 @@ Discrete: σ̂ per bin from sample stdev. Quadratic: fit sample variance vs cont
         benchmark_end_season_year,
         benchmark_scope_key,
         segment_level_preset,
-        benchmark_segment_level_preset,
+        bench_segment_level_preset,
         sigma_model,
     )
 
@@ -4114,7 +4114,7 @@ Discrete: σ̂ per bin from sample stdev. Quadratic: fit sample variance vs cont
 
         st.caption(
             f"σ̂ benchmark pool: seasons **{bench_start or 'Any'}**–**{bench_end or 'Any'}**, "
-            f"scope **{bench_scope_label}**, levels **{_level_label(benchmark_segment_level_preset)}**. "
+            f"scope **{bench_scope_label}**, levels **{_level_label(bench_segment_level_preset)}**. "
             f"Rankings: seasons **{start_season_year or 'Any'}**–**{end_season_year or 'Any'}**, "
             f"scope **{rank_scope_label}**, levels **{_level_label(segment_level_preset)}**"
             + (
