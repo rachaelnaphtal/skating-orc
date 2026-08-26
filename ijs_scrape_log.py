@@ -28,7 +28,7 @@ _parsing_issues_var: ContextVar[dict[str, dict[str, list[tuple[str, int]]]] | No
 _ISSUE_LABELS = {
     "missing_element_score": "missing element judge scores",
     "missing_pcs_score": "missing PCS judge scores",
-    "missing_pcs_columns": "skaters with fewer than 3 PCS components",
+    "missing_pcs_columns": "skaters with fewer than expected PCS components",
 }
 
 _configured = False

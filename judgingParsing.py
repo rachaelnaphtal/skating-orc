@@ -37,6 +37,22 @@ from rule_errors_policy import (
 USING_ISU_COMPONENT_METHOD = False
 
 
+def expected_pcs_component_count(event_name: str) -> int:
+    """
+    Most segments use 3 PCS. Compulsory moves and athlete-development
+    (jump / spin) segments use 2.
+    """
+    normalized = (event_name or "").lower().replace("_", " ")
+    if (
+        "compulsory move" in normalized
+        or "athlete development" in normalized
+        or "jump" in normalized
+        or "spin" in normalized
+    ):
+        return 2
+    return 3
+
+
 def infer_panel_judge_names_from_parsed_scores(
     elements_per_skater: dict,
     pcs_per_skater: dict,
@@ -507,7 +523,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                 issue=True,
             )
 
-        if len(pcs_per_skater[skater]) < 3:
+        if len(pcs_per_skater[skater]) < expected_pcs_component_count(event_name):
             _parsing_log(f"Missing PCS for {skater} in {event_name}", issue=True)
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
@@ -727,14 +743,12 @@ def process_scores(pdf, event_regex="", use_gcp=False):
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
         pcs = pcs_per_skater[skater]
-        if len(pcs) < 3:
-            athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
-            if not athlete_dev_event:
-                from ijs_scrape_log import record_parsing_issue
+        if len(pcs) < expected_pcs_component_count(event_name):
+            from ijs_scrape_log import record_parsing_issue
 
-                record_parsing_issue(
-                    "missing_pcs_columns", event_name, skater=skater
-                )
+            record_parsing_issue(
+                "missing_pcs_columns", event_name, skater=skater
+            )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 
@@ -1018,14 +1032,12 @@ def process_scores_html(soup, event_regex="", use_gcp=False):
                 f"Elements for skater {skater} do not match. Expected TES:{expected}, Sum of elements:{foundElements}"
             )
         pcs = pcs_per_skater[skater]
-        if len(pcs) < 3:
-            athlete_dev_event = "jump" in event_name.lower() or "spin" in event_name.lower()
-            if not athlete_dev_event:
-                from ijs_scrape_log import record_parsing_issue
+        if len(pcs) < expected_pcs_component_count(event_name):
+            from ijs_scrape_log import record_parsing_issue
 
-                record_parsing_issue(
-                    "missing_pcs_columns", event_name, skater=skater
-                )
+            record_parsing_issue(
+                "missing_pcs_columns", event_name, skater=skater
+            )
 
     return (elements_per_skater, pcs_per_skater, skater_details, event_name)
 

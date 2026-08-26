@@ -5,14 +5,56 @@ import re
 # ISU spin codes: level/position suffixes include ``3p4``, ``3pB``, ``1B``, ``3V1`` (reduced value).
 _SPIN_CODE_RE = re.compile(
     r"^(?P<base>"
-    r"FCCoSp|FCSSp|FCoSp|CCoSp|CoSp|PCoSp|"
+    # Longer flying + change-of-foot bases before shorter FCSp / FLSp / etc.
+    r"FCCoSp|FCSSp|FCCSp|FCUSp|FCLSp|FCoSp|CCoSp|CoSp|PCoSp|"
     r"FCSp|FLSp|FUSp|FSSp|CSSp|CCSp|CLSp|CUSp|"
     r"USp|LSp|CSp|SSp|DSp|PSp"
     r")"
-    r"(?:\d+p(?:\d+|B)|\d+B|\d+(?:V\d*)?)?"
+    # Level / position / base-level ``B`` (also bare ``b`` with no digit, e.g. ``SSpb``).
+    r"(?:\d+p(?:\d+|B)|(?:\d+)?B|\d+(?:V\d*)?)?"
     r"$",
     re.IGNORECASE,
 )
+
+# Solo / combo jump takeoffs; revolution count optional (``F+1Lo``, ``A+2T``, ``Eu+1F``).
+# ``H*`` = half-jumps (e.g. ``1HF``, ``1HLz``).
+_JUMP_TOKEN_RE = re.compile(
+    r"^(?:[1-4])?(?:HLz|HLo|HF|HS|HT|HA|A|T|S|Lo|F|Lz|Eu|Wz)$",
+    re.IGNORECASE,
+)
+
+
+def _is_jump_token(part: str) -> bool:
+    p = (part or "").strip().rstrip("*!")
+    # Strip protocol call tails: edge (e), quarter (q), optional ``b`` / ``b1``.
+    changed = True
+    while p and changed:
+        changed = False
+        if p[-1] in "eEqQ":
+            p = p[:-1]
+            changed = True
+        elif len(p) >= 2 and p[-1].isdigit() and p[-2].lower() == "b":
+            p = p[:-2]
+            changed = True
+        elif p[-1].lower() == "b":
+            p = p[:-1]
+            changed = True
+    return bool(_JUMP_TOKEN_RE.match(p))
+
+
+def _is_jump_sequence_marker(part: str) -> bool:
+    """True for non-takeoff combo/sequence/repeat tags."""
+    return (part or "").strip().rstrip("*!").upper() in {"SEQ", "COMBO", "REP"}
+
+
+def _is_jump_element_code(element: str) -> bool:
+    """True for solo jumps and jump combos/sequences (parts separated by ``+``).
+
+    ``+SEQ`` / ``+COMBO`` / ``+REP`` markers are ignored for typing.
+    """
+    parts = [p for p in (element or "").split("+") if p]
+    jump_parts = [p for p in parts if not _is_jump_sequence_marker(p)]
+    return bool(jump_parts) and all(_is_jump_token(p) for p in jump_parts)
 
 
 def strip_element_level_suffix(element: str) -> str:
@@ -70,7 +112,7 @@ def categorizeElement(element):
         return ""
     if element == "PB":
         return "Pivoting Block"
-    if element[-1] == "B":
+    if element[-1].lower() == "b":
         element = element[:-1]
     if not element:
         return ""
@@ -193,7 +235,7 @@ def categorizeElement(element):
         return "Spin"
     elif element.endswith("Th"):
         return "Throw Jump"
-    elif len(element) >= 2 and element[0] in ["1", "2", "3", "4"] and element[1].lower() in ["a", "s", "t", "l", "f", "h"]:
+    elif _is_jump_element_code(element):
         return "Jump"
     elif element.endswith("+pi") or element == "I":
         return "Intersection"
@@ -205,8 +247,6 @@ def categorizeElement(element):
         return "Pattern dance"
     elif element.strip().endswith("Ee"):
         return "Edge Element"
-    elif element.strip().startswith("A+"):
-        return "Jump"
     elif "wz" in element.lower():
         return "Jump"
     elif "pchsq" in element.lower():

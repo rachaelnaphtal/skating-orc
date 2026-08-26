@@ -36,6 +36,16 @@ def test_categorize_element_new_position_level_spins():
     assert categorizeElement("FSSp3V1") == "Spin"
     assert categorizeElement("CSSp2V1") == "Spin"
     assert categorizeElement("FCSSp4") == "Spin"
+    # Flying + change of foot (FCCSp / FCUSp / FCLSp) with V/B suffixes
+    assert categorizeElement("FCCSp2") == "Spin"
+    assert categorizeElement("FCCSp2V") == "Spin"
+    assert categorizeElement("FCCSp4B") == "Spin"
+    assert categorizeElement("FCCSp3V1") == "Spin"
+    assert categorizeElement("FCUSp2V") == "Spin"
+    assert categorizeElement("FCLSp3B") == "Spin"
+    assert categorizeElement("SSpb") == "Spin"
+    assert categorizeElement("CCoSpb") == "Spin"
+    assert categorizeElement("SSpB") == "Spin"
 
 
 def test_categorize_element_legacy_and_other_types_unchanged():
@@ -43,6 +53,29 @@ def test_categorize_element_legacy_and_other_types_unchanged():
     assert categorizeElement("StSq4") == "Step Sequence"
     assert categorizeElement("3Lz") == "Jump"
     assert categorizeElement("PCoSp4") == "Pairs Spin"
+
+
+def test_categorize_element_jumps_without_revolution_prefix():
+    assert categorizeElement("F+1Lo") == "Jump"
+    assert categorizeElement("A+2T") == "Jump"
+    assert categorizeElement("Eu+1Lo") == "Jump"
+    assert categorizeElement("1Eu+1F") == "Jump"
+    assert categorizeElement("F+1Lo+2T") == "Jump"
+    assert categorizeElement("1Lz+1A+SEQ") == "Jump"
+    assert categorizeElement("2A+2T+SEQ") == "Jump"
+    assert categorizeElement("3T+1A+SEQ") == "Jump"
+    assert categorizeElement("2S+COMBO") == "Jump"
+    assert categorizeElement("3T+COMBO") == "Jump"
+    assert categorizeElement("2Aq") == "Jump"
+    assert categorizeElement("2Fq+REP") == "Jump"
+    assert categorizeElement("2S+REP") == "Jump"
+    assert categorizeElement("1S+1A*+SEQ+REP") == "Jump"
+    assert categorizeElement("2F+1A+2Tq+SEQ") == "Jump"
+    assert categorizeElement("2Aqb1+REP") == "Jump"
+    assert categorizeElement("2Lz<<+REP") == "Jump"
+    assert categorizeElement("1HF") == "Jump"
+    assert categorizeElement("1HLze") == "Jump"
+    assert categorizeElement("1HLz!") == "Jump"
 
 
 @pytest.mark.parametrize(

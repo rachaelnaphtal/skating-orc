@@ -512,13 +512,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.quiet:
                 print(
                     f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} start "
-                    f"{base_url} | {name[:70]!r}",
+                    f"{stored_url} | {name[:70]!r}",
                     file=sys.stderr,
                     flush=True,
                 )
             else:
                 print(
-                    f"[{i}/{len(eligible)}] scrape {base_url} | {name[:70]!r}",
+                    f"[{i}/{len(eligible)}] scrape {stored_url} | {name[:70]!r}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -527,21 +527,21 @@ def main(argv: list[str] | None = None) -> int:
                 ok += 1
                 w = pop_warnings()
                 if w:
-                    warn_by_url[base_url] = w
+                    warn_by_url[stored_url] = w
                 if args.quiet:
                     print(
                         f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} done "
-                        f"({_fmt_elapsed(time.time() - started_at)}) {base_url}",
+                        f"({_fmt_elapsed(time.time() - started_at)}) {stored_url}",
                         file=sys.stderr,
                         flush=True,
                     )
             except Exception as ex:  # noqa: BLE001
-                errors.append((base_url, str(ex)))
+                errors.append((stored_url, str(ex)))
                 pop_warnings()
                 if args.quiet:
                     print(
                         f"[{i}/{len(eligible)}] {datetime.now():%H:%M:%S} failed "
-                        f"({_fmt_elapsed(time.time() - started_at)}) {base_url}: {ex}",
+                        f"({_fmt_elapsed(time.time() - started_at)}) {stored_url}: {ex}",
                         file=sys.stderr,
                         flush=True,
                     )
