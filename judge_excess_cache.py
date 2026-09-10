@@ -75,7 +75,7 @@ def _anomaly_counts_for_segments(
         .where(SkaterSegment.segment_id.in_(segment_ids))
         .where(
             or_(
-                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                func.abs(PcsScorePerJudge.deviation) > 1.5,
                 PcsScorePerJudge.is_rule_error,
             )
         )
@@ -94,7 +94,7 @@ def _anomaly_counts_for_segments(
         .where(SkaterSegment.segment_id.in_(segment_ids))
         .where(
             or_(
-                func.abs(ElementScorePerJudge.deviation) >= 2,
+                func.abs(ElementScorePerJudge.deviation) > 2,
                 ElementScorePerJudge.is_rule_error,
             )
         )

@@ -145,7 +145,7 @@ def analyze_trial_judges(
                     raise Exception(err)
                 deviation = goe - avg
                 deviation_totals[judge] += abs(deviation)
-                if abs(deviation) >= 2:
+                if abs(deviation) > 2:
                     element_errors.append(
                         {
                             "Skater": skater,
@@ -290,7 +290,7 @@ def add_pcs_errors(pcs_per_skater, tj_pcs_scores, tj_filter, event_name):
                         ),
                     }
                 )
-                if abs(deviation) >= 1.5:
+                if abs(deviation) > 1.5:
                     errors.append(
                         {
                             "Skater": skater,

@@ -981,7 +981,7 @@ class JudgeAnalytics:
             .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(all_segment_ids))
             .filter(PcsScorePerJudge.judge_id.in_(ids))
-            .filter(or_(func.abs(PcsScorePerJudge.deviation) >= 1.5, PcsScorePerJudge.is_rule_error))
+            .filter(or_(func.abs(PcsScorePerJudge.deviation) > 1.5, PcsScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id)
         ).all()
 
@@ -999,7 +999,7 @@ class JudgeAnalytics:
             .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(all_segment_ids))
             .filter(ElementScorePerJudge.judge_id.in_(ids))
-            .filter(or_(func.abs(ElementScorePerJudge.deviation) >= 2, ElementScorePerJudge.is_rule_error))
+            .filter(or_(func.abs(ElementScorePerJudge.deviation) > 2, ElementScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id)
         ).all()
 
@@ -1165,7 +1165,7 @@ class JudgeAnalytics:
             )
             .join(SkaterSegment, PcsScorePerJudge.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(segment_ids))
-            .filter(or_(func.abs(PcsScorePerJudge.deviation) >= 1.5, PcsScorePerJudge.is_rule_error))
+            .filter(or_(func.abs(PcsScorePerJudge.deviation) > 1.5, PcsScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id, PcsScorePerJudge.judge_id)
         ).all()
 
@@ -1183,7 +1183,7 @@ class JudgeAnalytics:
             .join(Element, ElementScorePerJudge.element_id == Element.id)
             .join(SkaterSegment, Element.skater_segment_id == SkaterSegment.id)
             .filter(SkaterSegment.segment_id.in_(segment_ids))
-            .filter(or_(func.abs(ElementScorePerJudge.deviation) >= 2, ElementScorePerJudge.is_rule_error))
+            .filter(or_(func.abs(ElementScorePerJudge.deviation) > 2, ElementScorePerJudge.is_rule_error))
             .group_by(SkaterSegment.segment_id, ElementScorePerJudge.judge_id)
         ).all()
 
@@ -1460,8 +1460,8 @@ class JudgeAnalytics:
         **Metrics**:
 
         - ``throwout``: stored ``thrown_out`` flag (IJS trim at ingest).
-        - ``anomaly``: PCS if ``|deviation| >= 1.5`` or rule error; element if
-          ``|deviation| >= 2.0`` or rule error (same as judge summary / HTML report).
+        - ``anomaly``: PCS if ``|deviation| > 1.5`` or rule error; element if
+          ``|deviation| > 2.0`` or rule error (same as judge summary / HTML report).
 
         Returns columns:
         ``discipline``, ``panel_size``, ``score_type`` (Element / PCS),
@@ -1536,7 +1536,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(ElementScorePerJudge.deviation) >= 2.0,
+                                func.abs(ElementScorePerJudge.deviation) > 2.0,
                                 ElementScorePerJudge.is_rule_error.is_(True),
                             ),
                             1,
@@ -1548,7 +1548,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                func.abs(PcsScorePerJudge.deviation) > 1.5,
                                 PcsScorePerJudge.is_rule_error.is_(True),
                             ),
                             1,
@@ -1739,7 +1739,7 @@ class JudgeAnalytics:
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
             'skater_name': r.skater_name,
-            'anomaly': abs(float(r.deviation)) >= 1.5 or r.is_rule_error
+            'anomaly': abs(float(r.deviation)) > 1.5 or r.is_rule_error
         } for r in results])
 
         return df
@@ -1817,7 +1817,7 @@ class JudgeAnalytics:
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
             'skater_name': r.skater_name,
-            'anomaly': abs(float(r.deviation)) >= 2.0 or r.is_rule_error
+            'anomaly': abs(float(r.deviation)) > 2.0 or r.is_rule_error
         } for r in results])
 
         return df
@@ -1867,7 +1867,7 @@ class JudgeAnalytics:
             'competition_name': r.competition_name,
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
-            'anomaly': abs(float(r.deviation)) >= 1.5 or r.is_rule_error
+            'anomaly': abs(float(r.deviation)) > 1.5 or r.is_rule_error
         } for r in results])
 
         return df
@@ -1920,7 +1920,7 @@ class JudgeAnalytics:
             'competition_name': r.competition_name,
             'segment_name': r.segment_name,
             'discipline_name': r.discipline_name or 'Unknown',
-            'anomaly': abs(float(r.deviation)) >= 2.0 or r.is_rule_error
+            'anomaly': abs(float(r.deviation)) > 2.0 or r.is_rule_error
         } for r in results])
 
         return df
@@ -2002,7 +2002,7 @@ class JudgeAnalytics:
             PcsScorePerJudge.judge_id,
             func.count().label("pcs_total_scores"),
             func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
-            func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
+            func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) > 1.5,
                             PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
             func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors"),
             func.avg(PcsScorePerJudge.deviation).label("pcs_avg_deviation"),
@@ -2043,7 +2043,7 @@ class JudgeAnalytics:
             ElementScorePerJudge.judge_id,
             func.count().label("elem_total_scores"),
             func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
-            func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
+            func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) > 2,
                             ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
             func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors"),
             func.avg(ElementScorePerJudge.deviation).label("elem_avg_deviation"),
@@ -2241,7 +2241,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                func.abs(PcsScorePerJudge.deviation) > 1.5,
                                 PcsScorePerJudge.is_rule_error,
                             ),
                             1,
@@ -2272,7 +2272,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(ElementScorePerJudge.deviation) >= 2,
+                                func.abs(ElementScorePerJudge.deviation) > 2,
                                 ElementScorePerJudge.is_rule_error,
                             ),
                             1,
@@ -2585,7 +2585,7 @@ class JudgeAnalytics:
                 PcsScorePerJudge.judge_id,
                 func.count().label("pcs_total_scores"),
                 func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label("pcs_throwouts"),
-                func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                func.sum(case((or_(func.abs(PcsScorePerJudge.deviation) > 1.5,
                                 PcsScorePerJudge.is_rule_error), 1), else_=0)).label("pcs_anomalies"),
                 func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label("pcs_rule_errors"),
                 func.avg(PcsScorePerJudge.deviation).label("pcs_avg_deviation"),
@@ -2622,7 +2622,7 @@ class JudgeAnalytics:
                 ElementScorePerJudge.judge_id,
                 func.count().label("elem_total_scores"),
                 func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label("elem_throwouts"),
-                func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) >= 2,
+                func.sum(case((or_(func.abs(ElementScorePerJudge.deviation) > 2,
                                 ElementScorePerJudge.is_rule_error), 1), else_=0)).label("elem_anomalies"),
                 func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label("elem_rule_errors"),
                 func.avg(ElementScorePerJudge.deviation).label("elem_avg_deviation"),
@@ -3038,7 +3038,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                                func.abs(PcsScorePerJudge.deviation) > 1.5,
                                 PcsScorePerJudge.is_rule_error,
                             ),
                             1,
@@ -3075,7 +3075,7 @@ class JudgeAnalytics:
                     case(
                         (
                             or_(
-                                func.abs(ElementScorePerJudge.deviation) >= 2,
+                                func.abs(ElementScorePerJudge.deviation) > 2,
                                 ElementScorePerJudge.is_rule_error,
                             ),
                             1,

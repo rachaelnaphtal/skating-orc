@@ -5931,7 +5931,7 @@ elif page == "Competition Analysis":
                     if not filtered_pcs.empty:
                         def get_issue_type_pcs(row):
                             issues = []
-                            if row['anomaly'] and abs(row['deviation']) >= 1.5:
+                            if row['anomaly'] and abs(row['deviation']) > 1.5:
                                 direction = 'High' if row['deviation'] > 0 else 'Low'
                                 issues.append(f'Anomaly ({direction})')
                             if row['is_rule_error']:
@@ -5964,7 +5964,7 @@ elif page == "Competition Analysis":
                     if not filtered_elements.empty:
                         def get_issue_type_elem(row):
                             issues = []
-                            if row['anomaly'] and abs(row['deviation']) >= 2.0:
+                            if row['anomaly'] and abs(row['deviation']) > 2.0:
                                 direction = 'High' if row['deviation'] > 0 else 'Low'
                                 issues.append(f'Anomaly ({direction})')
                             if row['is_rule_error']:
@@ -6017,9 +6017,9 @@ elif page == "Competition Analysis":
                     func.sum(case((PcsScorePerJudge.thrown_out, 1), else_=0)).label('pcs_throwouts'),
                     func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation > 0), 1), else_=0)).label('pcs_throwouts_high'),
                     func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation < 0), 1), else_=0)).label('pcs_throwouts_low'),
-                    func.sum(case((func.abs(PcsScorePerJudge.deviation) >= 1.5, 1), else_=0)).label('pcs_anomalies'),
-                    func.sum(case((PcsScorePerJudge.deviation >= 1.5, 1), else_=0)).label('pcs_anomalies_high'),
-                    func.sum(case((PcsScorePerJudge.deviation <= -1.5, 1), else_=0)).label('pcs_anomalies_low'),
+                    func.sum(case((func.abs(PcsScorePerJudge.deviation) > 1.5, 1), else_=0)).label('pcs_anomalies'),
+                    func.sum(case((PcsScorePerJudge.deviation > 1.5, 1), else_=0)).label('pcs_anomalies_high'),
+                    func.sum(case((PcsScorePerJudge.deviation < -1.5, 1), else_=0)).label('pcs_anomalies_low'),
                     func.sum(case((PcsScorePerJudge.is_rule_error, 1), else_=0)).label('pcs_rule_errors')
                 ).join(
                     Judge, PcsScorePerJudge.judge_id == Judge.id
@@ -6039,9 +6039,9 @@ elif page == "Competition Analysis":
                     func.sum(case((ElementScorePerJudge.thrown_out, 1), else_=0)).label('element_throwouts'),
                     func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation > 0), 1), else_=0)).label('element_throwouts_high'),
                     func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation < 0), 1), else_=0)).label('element_throwouts_low'),
-                    func.sum(case((func.abs(ElementScorePerJudge.deviation) >= 2.0, 1), else_=0)).label('element_anomalies'),
-                    func.sum(case((ElementScorePerJudge.deviation >= 2.0, 1), else_=0)).label('element_anomalies_high'),
-                    func.sum(case((ElementScorePerJudge.deviation <= -2.0, 1), else_=0)).label('element_anomalies_low'),
+                    func.sum(case((func.abs(ElementScorePerJudge.deviation) > 2.0, 1), else_=0)).label('element_anomalies'),
+                    func.sum(case((ElementScorePerJudge.deviation > 2.0, 1), else_=0)).label('element_anomalies_high'),
+                    func.sum(case((ElementScorePerJudge.deviation < -2.0, 1), else_=0)).label('element_anomalies_low'),
                     func.sum(case((ElementScorePerJudge.is_rule_error, 1), else_=0)).label('element_rule_errors')
                 ).join(
                     Judge, ElementScorePerJudge.judge_id == Judge.id
@@ -6119,8 +6119,8 @@ elif page == "Competition Analysis":
                                     func.count().label('total'),
                                     func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation > 0), 1), else_=0)).label('throw_high'),
                                     func.sum(case((and_(PcsScorePerJudge.thrown_out, PcsScorePerJudge.deviation < 0), 1), else_=0)).label('throw_low'),
-                                    func.sum(case((PcsScorePerJudge.deviation >= 1.5, 1), else_=0)).label('anom_high'),
-                                    func.sum(case((PcsScorePerJudge.deviation <= -1.5, 1), else_=0)).label('anom_low')
+                                    func.sum(case((PcsScorePerJudge.deviation > 1.5, 1), else_=0)).label('anom_high'),
+                                    func.sum(case((PcsScorePerJudge.deviation < -1.5, 1), else_=0)).label('anom_low')
                                 ).join(
                                     Judge, PcsScorePerJudge.judge_id == Judge.id
                                 ).join(
@@ -6135,8 +6135,8 @@ elif page == "Competition Analysis":
                                     func.count().label('total'),
                                     func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation > 0), 1), else_=0)).label('throw_high'),
                                     func.sum(case((and_(ElementScorePerJudge.thrown_out, ElementScorePerJudge.deviation < 0), 1), else_=0)).label('throw_low'),
-                                    func.sum(case((ElementScorePerJudge.deviation >= 2.0, 1), else_=0)).label('anom_high'),
-                                    func.sum(case((ElementScorePerJudge.deviation <= -2.0, 1), else_=0)).label('anom_low')
+                                    func.sum(case((ElementScorePerJudge.deviation > 2.0, 1), else_=0)).label('anom_high'),
+                                    func.sum(case((ElementScorePerJudge.deviation < -2.0, 1), else_=0)).label('anom_low')
                                 ).join(
                                     Judge, ElementScorePerJudge.judge_id == Judge.id
                                 ).join(
@@ -6219,7 +6219,7 @@ elif page == "Panel size benchmarks":
         "Rates by **discipline** (segment ``discipline_type``) and **panel size** "
         "(number of judges on that element or PCS line). Competitions are filtered by **linked "
         "officials competition type** (same scopes as Cross-Judge benchmarks). **Anomalies**: PCS uses "
-        "|deviation| ≥ 1.5 or rule error; elements use |deviation| ≥ 2.0 or rule error "
+        "|deviation| > 1.5 or rule error; elements use |deviation| > 2.0 or rule error "
         "(same thresholds as judge reports)."
     )
     analytics_bm = get_analytics_safe()
@@ -6577,8 +6577,8 @@ st.sidebar.markdown("""
 This dashboard analyzes figure skating judge performance by examining:
 - **Throwout rates**: How often judges' scores are excluded from final calculations
 - **Deviation rates**: How often judges score significantly differently from the panel average
-- **PCS thresholds**: Deviations >=1.5 points
-- **Element thresholds**: Deviations >=2.0 points
+- **PCS thresholds**: Deviations >1.5 points
+- **Element thresholds**: Deviations >2.0 points
 
 Use the filters to focus your analysis on specific years, competitions, or discipline types.
 """)

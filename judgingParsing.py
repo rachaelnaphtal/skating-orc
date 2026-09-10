@@ -34,7 +34,9 @@ from rule_errors_policy import (
     should_flag_rule_errors,
 )
 
-USING_ISU_COMPONENT_METHOD = False
+# Competition ORC PCS anomalies use the signed sum of component deviations
+# for a judge/skater. Opposite directions cancel; flag when |sum| > 4.5.
+ORC_PCS_SUM_DEVIATION_THRESHOLD = 4.5
 
 
 def expected_pcs_component_count(event_name: str) -> int:
@@ -1636,7 +1638,7 @@ def findElementDeviations(
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
                 deviation = allScores[judgeNumber - 1] - avg
-                if abs(deviation) >= 2:
+                if abs(deviation) > 2:
                     # print (f"Deviation found for judge {judgeNumber} on skater {skater}, element {element["Element"]}")
                     errors.append(
                         {
@@ -1656,11 +1658,16 @@ def findElementDeviations(
 def findPCSDeviations(
     skater_scores, judges, judge_filter="", event_name: str = ""
 ):
+    """Competition ORC PCS anomalies: one row per judge/skater.
+
+    Sum each judge's signed component deviations (opposite directions cancel).
+    Flag when the absolute net is strictly greater than 4.5.
+    """
     errors = []
     for skater in skater_scores:
-        deviation_points = [float(0)] * (len(judges) + 1)
         if len(skater_scores[skater]) == 0:
             continue
+        deviation_points = [float(0)] * (len(judges) + 1)
         for component in skater_scores[skater]:
             allScores = component["Scores"]
             filtered_scores = [
@@ -1687,39 +1694,25 @@ def findPCSDeviations(
                     continue
                 if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
                     continue
-                deviation = allScores[judgeNumber - 1] - avg
-                if not USING_ISU_COMPONENT_METHOD and abs(deviation) >= 1.5:
-                    errors.append(
-                        {
-                            "Skater": skater,
-                            "Judge Number": judgeNumber,
-                            "Judge Name": judges[judgeNumber - 1],
-                            "Judge Score": allScores[judgeNumber - 1],
-                            "Deviation": deviation,
-                            "Component": component["Component"],
-                            "Type": "Deviation",
-                        }
-                    )
-                deviation_points[judgeNumber] = (
-                    deviation_points[judgeNumber] + deviation
-                )
+                deviation_points[judgeNumber] += allScores[judgeNumber - 1] - avg
 
-        for judgeNumber in range(1, len(allScores) + 1):
-            if USING_ISU_COMPONENT_METHOD and deviation_points[judgeNumber] > 4.5:
-                if not judge_name_allowed_by_filter(
-                    judges[judgeNumber - 1], judge_filter
-                ):
-                    continue
-                # Add errors here if using ISU method
-                errors.append(
-                    {
-                        "Skater": skater,
-                        "Judge Number": judgeNumber,
-                        "Judge Name": judges[judgeNumber - 1],
-                        "Judge Score": "",
-                        "Deviation": deviation_points[judgeNumber],
-                    }
-                )
+        for judgeNumber in range(1, len(judges) + 1):
+            net = deviation_points[judgeNumber]
+            if abs(net) <= ORC_PCS_SUM_DEVIATION_THRESHOLD:
+                continue
+            if not judge_name_allowed_by_filter(judges[judgeNumber - 1], judge_filter):
+                continue
+            errors.append(
+                {
+                    "Skater": skater,
+                    "Judge Number": judgeNumber,
+                    "Judge Name": judges[judgeNumber - 1],
+                    "Judge Score": "",
+                    "Deviation": net,
+                    "Component": "All Components",
+                    "Type": "Deviation",
+                }
+            )
     return errors
 
 
@@ -1830,7 +1823,7 @@ def printToExcel(
             value=str(f"J{error['Judge Number']}- {error['Judge Name']}"),
         )
         sheet.cell(current_row, 2, value=error["Judge Score"])
-        sheet.cell(current_row, 3, value=str(error["Deviation"]))
+        sheet.cell(current_row, 3, value=error["Deviation"])
         sheet.cell(current_row, 4, value=error["Skater"])
         sheet.cell(current_row, 5, value=error["Component"])
         yes_no.add(sheet.cell(current_row, 7))

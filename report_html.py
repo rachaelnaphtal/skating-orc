@@ -12,8 +12,8 @@ TOOLTIP_THROWOUT_RATE = html_module.escape(
     "Most judges overall tend to average between about 25% and 35%..",
 )
 TOOLTIP_ANOMALY_RATE = html_module.escape(
-    "Anomalies are scores that are >=2 away from the panel average for GOEs "
-    "and >=1.5 away from the panel average for PCS. "
+    "Anomalies are scores that are >2 away from the panel average for GOEs "
+    "and >1.5 away from the panel average for PCS. "
     "Across judges, typical anomaly rates average under 1%.",
 )
 TOOLTIP_RULE_ERROR_RATE = html_module.escape(

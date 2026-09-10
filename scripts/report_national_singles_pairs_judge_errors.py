@@ -1250,7 +1250,7 @@ def _judge_aggregates_from_segments(
                 case(
                     (
                         or_(
-                            func.abs(PcsScorePerJudge.deviation) >= 1.5,
+                            func.abs(PcsScorePerJudge.deviation) > 1.5,
                             PcsScorePerJudge.is_rule_error,
                         ),
                         1,
@@ -1300,7 +1300,7 @@ def _judge_aggregates_from_segments(
                     case(
                         (
                             or_(
-                                func.abs(ElementScorePerJudge.deviation) >= 2,
+                                func.abs(ElementScorePerJudge.deviation) > 2,
                                 ElementScorePerJudge.is_rule_error,
                             ),
                             1,
