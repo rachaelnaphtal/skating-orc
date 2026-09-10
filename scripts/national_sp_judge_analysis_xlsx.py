@@ -95,6 +95,11 @@ HIDDEN_ANALYSIS_COLUMNS = (
     _col(C_ACTIVITY_SEG),
     _col(C_ACTIVITY_JS),
 )
+HIDDEN_CHAMPIONSHIPS_COLUMNS = (
+    _col(C_LAST_CHAMPS),
+    *(_col(n) for n in range(C_CHAMPS_COMP, C_CHAMPS_PCS_MARK + 1)),
+    *(_col(n) for n in range(C_CHAMPS_PERF_RULE, C_CHAMPS_PERF_OVERALL + 1)),
+)
 HIDDEN_ANALYSIS_COLUMNS_NO_RULE_ERRORS = HIDDEN_ANALYSIS_COLUMNS + (
     _col(C_RECENT_RULE),
     _col(C_SECT_RULE),
@@ -597,6 +602,9 @@ def _set_analysis_headers(
     ws,
     *,
     include_rule_errors: bool = True,
+    include_championships: bool = True,
+    identity_layout: str = "national",
+    total_comps_header: str = "Total Comps (2 years) in Role",
     performance_block_header: str = "Qualifying Competition Performance",
     activity_column_label: str = "Qualifying Activity",
     performance_analysis_header: str = "Qualifying Performance Analysis",
@@ -618,15 +626,29 @@ def _set_analysis_headers(
     ws[f"{_col(C_SECT_PERF_RULE)}2"] = sectionals_performance_header
     ws[f"{_col(C_CHAMPS_PERF_RULE)}2"] = "Champs Performance Analysis"
 
+    if identity_layout == "sectional_roster":
+        identity_headers = [
+            "Name",
+            "Section",
+            "Group",
+            "Status",
+            "Appointment Year",
+            "Last Champs in Role",
+            "Last Sectionals in Role",
+        ]
+    else:
+        identity_headers = [
+            "Name",
+            "Int? (current or recent)",
+            "USFS #",
+            "US Champs (Senior) Availability",
+            "Appointment Year",
+            "Last Champs in Role",
+            "Last Sectionals in Role",
+        ]
     headers: list[str | None] = [
-        "Name",
-        "Int? (current or recent)",
-        "USFS #",
-        "US Champs (Senior) Availability",
-        "Appointment Year",
-        "Last Champs in Role",
-        "Last Sectionals in Role",
-        "Total Comps (2 years) in Role",
+        *identity_headers,
+        total_comps_header,
         "# Competitions",
         "# Segments",
         junior_senior_segment_count_header,
@@ -702,11 +724,14 @@ def _set_analysis_headers(
     ws.merge_cells(f"{_col(C_SECT_PERF_RULE)}2:{_col(C_SECT_PERF_OVERALL)}2")
     ws.merge_cells(f"{_col(C_CHAMPS_PERF_RULE)}2:{_col(C_CHAMPS_PERF_OVERALL)}2")
 
-    for letter in (
+    hidden = (
         HIDDEN_ANALYSIS_COLUMNS
         if include_rule_errors
         else HIDDEN_ANALYSIS_COLUMNS_NO_RULE_ERRORS
-    ):
+    )
+    if not include_championships:
+        hidden = hidden + HIDDEN_CHAMPIONSHIPS_COLUMNS
+    for letter in hidden:
         ws.column_dimensions[letter].hidden = True
 
     ws.row_dimensions[1].height = 19
@@ -806,6 +831,7 @@ def _write_analysis_formulas(
     row: int,
     *,
     include_rule_errors: bool = True,
+    include_championships: bool = True,
     thresholds: ReportActivityThresholds = SINGLES_PAIRS_THRESHOLDS,
     sectionals_activity_min_year: int = 0,
 ) -> None:
@@ -824,12 +850,13 @@ def _write_analysis_formulas(
     ws[f"{c(C_SECT_PCS_DEV)}{r}"] = (
         f"=VLOOKUP({c(C_SECT_PCS_MARK)}{r},'{LOOKUP_SHEET}'!D$2:E$5,2,TRUE)"
     )
-    ws[f"{c(C_CHAMPS_ELEM_DEV)}{r}"] = (
-        f"=VLOOKUP({c(C_CHAMPS_ELEM_MARK)}{r},'{LOOKUP_SHEET}'!A$2:B$5,2,TRUE)"
-    )
-    ws[f"{c(C_CHAMPS_PCS_DEV)}{r}"] = (
-        f"=VLOOKUP({c(C_CHAMPS_PCS_MARK)}{r},'{LOOKUP_SHEET}'!D$2:E$5,2,TRUE)"
-    )
+    if include_championships:
+        ws[f"{c(C_CHAMPS_ELEM_DEV)}{r}"] = (
+            f"=VLOOKUP({c(C_CHAMPS_ELEM_MARK)}{r},'{LOOKUP_SHEET}'!A$2:B$5,2,TRUE)"
+        )
+        ws[f"{c(C_CHAMPS_PCS_DEV)}{r}"] = (
+            f"=VLOOKUP({c(C_CHAMPS_PCS_MARK)}{r},'{LOOKUP_SHEET}'!D$2:E$5,2,TRUE)"
+        )
 
     act_lo = c(C_ACT_TOTAL)
     act_hi = c(C_ACT_OVERALL)
@@ -905,22 +932,23 @@ def _write_analysis_formulas(
             f'COUNTIF({sect_rule}{r}:{sect_pcs}{r},"Very Good")>0),'
             f'"Fair/Good","Fair")))))'
         )
-        ws[f"{ch_rule}{r}"] = (
-            f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",'
-            f'IF({c(C_CHAMPS_RULE)}{r}=3,"Poor",IF({c(C_CHAMPS_RULE)}{r}=2,"Fair",'
-            f'IF({c(C_CHAMPS_RULE)}{r}=1,"Good","Very Good"))))'
-        )
-        ws[f"{ch_overall}{r}"] = (
-            f'=IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"N/A")=4,"N/A",'
-            f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Poor")>=2,"Poor",'
-            f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Good")+'
-            f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Very Good")=4,"Good",'
-            f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Poor")=1,"Fair",'
-            f'IF(AND(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Fair")>0,'
-            f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Good")+'
-            f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Very Good")>0),'
-            f'"Fair/Good","Fair")))))'
-        )
+        if include_championships:
+            ws[f"{ch_rule}{r}"] = (
+                f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",'
+                f'IF({c(C_CHAMPS_RULE)}{r}=3,"Poor",IF({c(C_CHAMPS_RULE)}{r}=2,"Fair",'
+                f'IF({c(C_CHAMPS_RULE)}{r}=1,"Good","Very Good"))))'
+            )
+            ws[f"{ch_overall}{r}"] = (
+                f'=IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"N/A")=4,"N/A",'
+                f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Poor")>=2,"Poor",'
+                f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Good")+'
+                f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Very Good")=4,"Good",'
+                f'IF(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Poor")=1,"Fair",'
+                f'IF(AND(COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Fair")>0,'
+                f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Good")+'
+                f'COUNTIF({ch_rule}{r}:{ch_pcs}{r},"Very Good")>0),'
+                f'"Fair/Good","Fair")))))'
+            )
     else:
         ws[f"{qual_overall}{r}"] = (
             f'=IF({act_hi}{r}="Low","N/A",'
@@ -944,17 +972,18 @@ def _write_analysis_formulas(
             f'COUNTIF({sect_anom}{r}:{sect_pcs}{r},"Very Good")>0),'
             f'"Fair/Good","Fair")))))'
         )
-        ws[f"{ch_overall}{r}"] = (
-            f'=IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"N/A")=3,"N/A",'
-            f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Poor")>=2,"Poor",'
-            f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Good")+'
-            f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Very Good")=3,"Good",'
-            f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Poor")=1,"Fair",'
-            f'IF(AND(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Fair")>0,'
-            f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Good")+'
-            f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Very Good")>0),'
-            f'"Fair/Good","Fair")))))'
-        )
+        if include_championships:
+            ws[f"{ch_overall}{r}"] = (
+                f'=IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"N/A")=3,"N/A",'
+                f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Poor")>=2,"Poor",'
+                f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Good")+'
+                f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Very Good")=3,"Good",'
+                f'IF(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Poor")=1,"Fair",'
+                f'IF(AND(COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Fair")>0,'
+                f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Good")+'
+                f'COUNTIF({ch_anom}{r}:{ch_pcs}{r},"Very Good")>0),'
+                f'"Fair/Good","Fair")))))'
+            )
 
     ws[f"{qual_anom}{r}"] = (
         f'=IF({act_hi}{r}="Low","N/A",'
@@ -970,13 +999,18 @@ def _write_analysis_formulas(
     )
     ws[f"{sect_elem}{r}"] = f'=IF({c(C_SECT_COMP)}{r}=0,"N/A",{c(C_SECT_ELEM_DEV)}{r})'
     ws[f"{sect_pcs}{r}"] = f'=IF({c(C_SECT_COMP)}{r}=0,"N/A",{c(C_SECT_PCS_DEV)}{r})'
-    ws[f"{ch_anom}{r}"] = (
-        f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",'
-        f'IF({c(C_CHAMPS_ANOM)}{r}>={t.champs_anomaly_pct_poor},"Poor",'
-        f'IF({c(C_CHAMPS_ANOM)}{r}>={t.champs_anomaly_pct_fair},"Fair","Good")))'
-    )
-    ws[f"{ch_elem}{r}"] = f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",{c(C_CHAMPS_ELEM_DEV)}{r})'
-    ws[f"{ch_pcs}{r}"] = f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",{c(C_CHAMPS_PCS_DEV)}{r})'
+    if include_championships:
+        ws[f"{ch_anom}{r}"] = (
+            f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",'
+            f'IF({c(C_CHAMPS_ANOM)}{r}>={t.champs_anomaly_pct_poor},"Poor",'
+            f'IF({c(C_CHAMPS_ANOM)}{r}>={t.champs_anomaly_pct_fair},"Fair","Good")))'
+        )
+        ws[f"{ch_elem}{r}"] = (
+            f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",{c(C_CHAMPS_ELEM_DEV)}{r})'
+        )
+        ws[f"{ch_pcs}{r}"] = (
+            f'=IF({c(C_CHAMPS_COMP)}{r}=0,"N/A",{c(C_CHAMPS_PCS_DEV)}{r})'
+        )
 
 
 def _write_analysis_row(
@@ -985,16 +1019,24 @@ def _write_analysis_row(
     record: pd.Series,
     *,
     include_rule_errors: bool = True,
+    include_championships: bool = True,
+    identity_layout: str = "national",
     thresholds: ReportActivityThresholds = SINGLES_PAIRS_THRESHOLDS,
     sectionals_activity_min_year: int = 0,
 ) -> None:
     _write_analysis_value(ws, row, 1, record.get("directory_name"))
-    if record.get("international_judge"):
-        _write_analysis_value(ws, row, 2, "X")
-    _write_analysis_value(ws, row, 3, record.get("mbr_number"))
-    _write_analysis_value(ws, row, 4, record.get("us_champs_senior_availability"))
+    if identity_layout == "sectional_roster":
+        _write_analysis_value(ws, row, 2, record.get("section"))
+        _write_analysis_value(ws, row, 3, record.get("group"))
+        _write_analysis_value(ws, row, 4, record.get("status"))
+    else:
+        if record.get("international_judge"):
+            _write_analysis_value(ws, row, 2, "X")
+        _write_analysis_value(ws, row, 3, record.get("mbr_number"))
+        _write_analysis_value(ws, row, 4, record.get("us_champs_senior_availability"))
     _write_analysis_value(ws, row, 5, record.get("appointment_year"))
-    _write_analysis_value(ws, row, C_LAST_CHAMPS, record.get("last_champs_in_role"))
+    if include_championships:
+        _write_analysis_value(ws, row, C_LAST_CHAMPS, record.get("last_champs_in_role"))
     _write_analysis_value(ws, row, C_LAST_SECTIONALS, record.get("last_sectionals_in_role"))
     _write_analysis_value(ws, row, C_RECENT_BLOCK_START, record.get("total_comps_in_role_2yr"))
 
@@ -1023,19 +1065,24 @@ def _write_analysis_row(
     )
     _write_analysis_value(ws, row, C_SECT_PCS_MARK, record.get("sectionals_pcs_marking_score"))
 
-    champs_comps = _to_int(record.get("champs_competition_count")) or 0
-    _write_analysis_value(ws, row, C_CHAMPS_COMP, champs_comps)
-    _write_analysis_value(ws, row, C_CHAMPS_SEG, record.get("champs_segment_count"))
-    _write_analysis_value(
-        ws, row, C_CHAMPS_JS, record.get("champs_junior_senior_segment_count")
-    )
-    if include_rule_errors:
-        _write_analysis_value(ws, row, C_CHAMPS_RULE, record.get("champs_total_rule_errors"))
-    _write_analysis_value(ws, row, C_CHAMPS_ANOM, record.get("champs_anomaly_rate_pct"))
-    _write_analysis_value(
-        ws, row, C_CHAMPS_ELEM_MARK, record.get("champs_element_marking_score")
-    )
-    _write_analysis_value(ws, row, C_CHAMPS_PCS_MARK, record.get("champs_pcs_marking_score"))
+    if include_championships:
+        champs_comps = _to_int(record.get("champs_competition_count")) or 0
+        _write_analysis_value(ws, row, C_CHAMPS_COMP, champs_comps)
+        _write_analysis_value(ws, row, C_CHAMPS_SEG, record.get("champs_segment_count"))
+        _write_analysis_value(
+            ws, row, C_CHAMPS_JS, record.get("champs_junior_senior_segment_count")
+        )
+        if include_rule_errors:
+            _write_analysis_value(
+                ws, row, C_CHAMPS_RULE, record.get("champs_total_rule_errors")
+            )
+        _write_analysis_value(ws, row, C_CHAMPS_ANOM, record.get("champs_anomaly_rate_pct"))
+        _write_analysis_value(
+            ws, row, C_CHAMPS_ELEM_MARK, record.get("champs_element_marking_score")
+        )
+        _write_analysis_value(
+            ws, row, C_CHAMPS_PCS_MARK, record.get("champs_pcs_marking_score")
+        )
 
     _write_analysis_value(ws, row, C_ACTIVITY_COMP, record.get("activity_competition_count"))
     _write_analysis_value(ws, row, C_ACTIVITY_SEG, record.get("activity_segment_count"))
@@ -1047,6 +1094,7 @@ def _write_analysis_row(
         ws,
         row,
         include_rule_errors=include_rule_errors,
+        include_championships=include_championships,
         thresholds=thresholds,
         sectionals_activity_min_year=sectionals_activity_min_year,
     )
@@ -1122,6 +1170,8 @@ def _apply_analysis_conditional_formatting(
     *,
     last_row: int,
     include_rule_errors: bool = True,
+    include_championships: bool = True,
+    identity_layout: str = "national",
     thresholds: ReportActivityThresholds = SINGLES_PAIRS_THRESHOLDS,
     sectionals_activity_min_year: int = 0,
 ) -> None:
@@ -1133,30 +1183,31 @@ def _apply_analysis_conditional_formatting(
     def addr(col: str) -> str:
         return f"{col}{first}:{col}{last_row}"
 
-    cf.add(
-        addr("D"),
-        FormulaRule(
-            formula=[f'LEFT(D{first},LEN("Available"))="Available"'],
-            stopIfTrue=True,
-            fill=_FILL_GREEN,
-        ),
-    )
-    cf.add(
-        addr("D"),
-        FormulaRule(
-            formula=[f'NOT(ISERROR(SEARCH("Unavailable",D{first})))'],
-            stopIfTrue=True,
-            fill=_FILL_RED,
-        ),
-    )
-    cf.add(
-        addr("D"),
-        FormulaRule(
-            formula=[f'NOT(ISERROR(SEARCH("Didn\'t reply",D{first})))'],
-            stopIfTrue=True,
-            fill=_FILL_YELLOW,
-        ),
-    )
+    if identity_layout != "sectional_roster":
+        cf.add(
+            addr("D"),
+            FormulaRule(
+                formula=[f'LEFT(D{first},LEN("Available"))="Available"'],
+                stopIfTrue=True,
+                fill=_FILL_GREEN,
+            ),
+        )
+        cf.add(
+            addr("D"),
+            FormulaRule(
+                formula=[f'NOT(ISERROR(SEARCH("Unavailable",D{first})))'],
+                stopIfTrue=True,
+                fill=_FILL_RED,
+            ),
+        )
+        cf.add(
+            addr("D"),
+            FormulaRule(
+                formula=[f'NOT(ISERROR(SEARCH("Didn\'t reply",D{first})))'],
+                stopIfTrue=True,
+                fill=_FILL_YELLOW,
+            ),
+        )
 
     t = thresholds
     min_year = sectionals_activity_min_year
@@ -1215,20 +1266,25 @@ def _apply_analysis_conditional_formatting(
                 fill=_FILL_RED,
             ),
         )
-        cf.add(
-            addr(_col(C_CHAMPS_RULE)),
-            CellIsRule(
-                operator="greaterThanOrEqual",
-                formula=[str(t.champs_rule_errors_poor)],
-                fill=_FILL_RED,
-            ),
-        )
+        if include_championships:
+            cf.add(
+                addr(_col(C_CHAMPS_RULE)),
+                CellIsRule(
+                    operator="greaterThanOrEqual",
+                    formula=[str(t.champs_rule_errors_poor)],
+                    fill=_FILL_RED,
+                ),
+            )
 
-    for col, fair_at, poor_at in (
+    anomaly_cols = [
         (C_RECENT_ANOM, t.anomaly_pct_fair, t.anomaly_pct_poor),
         (C_SECT_ANOM, t.champs_anomaly_pct_fair, t.champs_anomaly_pct_poor),
-        (C_CHAMPS_ANOM, t.champs_anomaly_pct_fair, t.champs_anomaly_pct_poor),
-    ):
+    ]
+    if include_championships:
+        anomaly_cols.append(
+            (C_CHAMPS_ANOM, t.champs_anomaly_pct_fair, t.champs_anomaly_pct_poor)
+        )
+    for col, fair_at, poor_at in anomaly_cols:
         for rule in _anomaly_rules(
             f"{_col(col)}{first}",
             thresholds=thresholds,
@@ -1237,26 +1293,47 @@ def _apply_analysis_conditional_formatting(
         ):
             cf.add(addr(_col(col)), rule)
 
-    for col in (
+    rating_cols = [
         C_RECENT_ELEM_DEV,
         C_RECENT_PCS_DEV,
         C_SECT_ELEM_DEV,
         C_SECT_PCS_DEV,
-        C_CHAMPS_ELEM_DEV,
-        C_CHAMPS_PCS_DEV,
-    ):
+    ]
+    if include_championships:
+        rating_cols.extend((C_CHAMPS_ELEM_DEV, C_CHAMPS_PCS_DEV))
+    for col in rating_cols:
         for rule in _rating_text_rules(f"{_col(col)}{first}"):
             cf.add(addr(_col(col)), rule)
 
-    summary_cols = (
+    summary_cols = [
         C_ACT_OVERALL,
         C_QUAL_OVERALL,
         C_SECT_PERF_OVERALL,
-        C_CHAMPS_PERF_OVERALL,
-    )
+    ]
+    if include_championships:
+        summary_cols.append(C_CHAMPS_PERF_OVERALL)
     for col in summary_cols:
         for rule in _rating_text_rules(f"{_col(col)}{first}"):
             cf.add(addr(_col(col)), rule)
+
+
+def _apply_group_row_fills(
+    ws,
+    ordered: pd.DataFrame,
+    *,
+    fills: dict[str, str],
+    last_identity_col: int = 4,
+) -> None:
+    """Tint identity cells so source groups stay visible next to rating CF."""
+    for offset, (_, record) in enumerate(ordered.iterrows()):
+        group = str(record.get("group") or "")
+        hex_color = fills.get(group)
+        if not hex_color:
+            continue
+        fill = PatternFill("solid", fgColor=hex_color)
+        row = ANALYSIS_FIRST_DATA_ROW + offset
+        for col in range(1, last_identity_col + 1):
+            ws.cell(row, col).fill = fill
 
 
 def write_national_sp_judge_analysis_xlsx(
@@ -1264,6 +1341,11 @@ def write_national_sp_judge_analysis_xlsx(
     output_path: Path,
     *,
     include_rule_errors: bool = True,
+    include_championships: bool = True,
+    identity_layout: str = "national",
+    preserve_row_order: bool = False,
+    group_fills: dict[str, str] | None = None,
+    total_comps_header: str = "Total Comps (2 years) in Role",
     thresholds: ReportActivityThresholds = SINGLES_PAIRS_THRESHOLDS,
     performance_block_header: str = "Qualifying Competition Performance",
     activity_column_label: str = "Qualifying Activity",
@@ -1287,6 +1369,9 @@ def write_national_sp_judge_analysis_xlsx(
     _set_analysis_headers(
         ws,
         include_rule_errors=include_rule_errors,
+        include_championships=include_championships,
+        identity_layout=identity_layout,
+        total_comps_header=total_comps_header,
         performance_block_header=performance_block_header,
         activity_column_label=activity_column_label,
         performance_analysis_header=performance_analysis_header,
@@ -1301,12 +1386,15 @@ def write_national_sp_judge_analysis_xlsx(
     _write_raw_sheet(wb, raw_df)
     _write_lookup_sheet(wb, thresholds=thresholds)
 
-    ordered = analysis_row_order(
-        raw_df,
-        include_rule_errors=include_rule_errors,
-        thresholds=thresholds,
-        sectionals_activity_min_year=sectionals_activity_min_year,
-    )
+    if preserve_row_order:
+        ordered = raw_df.copy().reset_index(drop=True)
+    else:
+        ordered = analysis_row_order(
+            raw_df,
+            include_rule_errors=include_rule_errors,
+            thresholds=thresholds,
+            sectionals_activity_min_year=sectionals_activity_min_year,
+        )
     for offset, (_, record) in enumerate(ordered.iterrows()):
         row = ANALYSIS_FIRST_DATA_ROW + offset
         _write_analysis_row(
@@ -1314,16 +1402,22 @@ def write_national_sp_judge_analysis_xlsx(
             row,
             record,
             include_rule_errors=include_rule_errors,
+            include_championships=include_championships,
+            identity_layout=identity_layout,
             thresholds=thresholds,
             sectionals_activity_min_year=sectionals_activity_min_year,
         )
 
     last_row = ANALYSIS_FIRST_DATA_ROW + len(ordered) - 1 if len(ordered) else ANALYSIS_FIRST_DATA_ROW
     _apply_analysis_sheet_layout(ws, last_row=last_row)
+    if group_fills:
+        _apply_group_row_fills(ws, ordered, fills=group_fills)
     _apply_analysis_conditional_formatting(
         ws,
         last_row=last_row,
         include_rule_errors=include_rule_errors,
+        include_championships=include_championships,
+        identity_layout=identity_layout,
         thresholds=thresholds,
         sectionals_activity_min_year=sectionals_activity_min_year,
     )
