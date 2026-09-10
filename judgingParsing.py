@@ -1274,6 +1274,9 @@ def extract_judge_scores(
             judge_filter=judge_filter,
             event_name=event_name,
         )
+        element_deviations = exclude_anomalies_already_flagged_as_rule_errors(
+            element_errors, element_deviations
+        )
         pcs_errors = findPCSDeviations(
             pcs_per_skater,
             judges,
@@ -1604,6 +1607,26 @@ def makeRuleError(
     if max_goe_allowed is not None:
         row["Max GOE Allowed"] = max_goe_allowed
     return row
+
+
+def _orc_element_row_key(row: dict) -> tuple:
+    return (row.get("Skater"), row.get("Element"), row.get("Judge Number"))
+
+
+def exclude_anomalies_already_flagged_as_rule_errors(
+    element_errors: list, element_deviations: list
+) -> list:
+    """Keep one ORC row per judge/element: rule error wins over a GOE anomaly."""
+    rule_keys = {
+        _orc_element_row_key(row)
+        for row in element_errors
+        if row.get("Element")
+    }
+    return [
+        row
+        for row in element_deviations
+        if _orc_element_row_key(row) not in rule_keys
+    ]
 
 
 def findElementDeviations(
