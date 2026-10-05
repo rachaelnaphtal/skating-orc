@@ -25,12 +25,15 @@ _JUMP_TOKEN_RE = re.compile(
 
 
 def _is_jump_token(part: str) -> bool:
-    p = (part or "").strip().rstrip("*!")
-    # Strip protocol call tails: edge (e), quarter (q), optional ``b`` / ``b1``.
+    p = (part or "").strip()
+    # Strip protocol call tails from the end: edge attention (``!``), invalid
+    # (``*``), edge (``e``), quarter (``q``), underrotation (``<``), and
+    # optional ``b`` / ``b1``. ``!`` often sits before ``q`` or ``b1``
+    # (``2F!q``, ``3F!b1``), so it cannot be removed with a single rstrip.
     changed = True
     while p and changed:
         changed = False
-        if p[-1] in "eEqQ":
+        if p[-1] in "eEqQ!*<":
             p = p[:-1]
             changed = True
         elif len(p) >= 2 and p[-1].isdigit() and p[-2].lower() == "b":
@@ -116,6 +119,12 @@ def categorizeElement(element):
         element = element[:-1]
     if not element:
         return ""
+    # ``3Tw4`` loses its level in ``strip_element_level_suffix``. ``3Tw3b1``
+    # loses only the ``1``, then the trailing ``b``, and still has the level
+    # digit (``3Tw3``).
+    twist_with_level = re.match(r"^(\d+Tw)\d+$", element, re.IGNORECASE)
+    if twist_with_level:
+        element = twist_with_level.group(1)
 
     element_dict = {
         "Pa": "Pair Element",

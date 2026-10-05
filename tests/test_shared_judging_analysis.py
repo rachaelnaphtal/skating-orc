@@ -76,6 +76,21 @@ def test_categorize_element_jumps_without_revolution_prefix():
     assert categorizeElement("1HF") == "Jump"
     assert categorizeElement("1HLze") == "Jump"
     assert categorizeElement("1HLz!") == "Jump"
+    assert categorizeElement("2F!q") == "Jump"
+    assert categorizeElement("3F!q+COMBO") == "Jump"
+    assert categorizeElement("2Lz!q") == "Jump"
+    assert categorizeElement("2Lz!q+2T<+1A+SEQ") == "Jump"
+    assert categorizeElement("2Lz!q+1A+1A+SEQ") == "Jump"
+    assert categorizeElement("3F!<b1+2T") == "Jump"
+    assert categorizeElement("3F!b1+2T") == "Jump"
+    assert categorizeElement("2Lz!q+2T<") == "Jump"
+    assert categorizeElement("2F!q+Eu+2S<+1A+SEQ") == "Jump"
+    assert categorizeElement("2F!q+1A+2Lo<+SEQ") == "Jump"
+    assert categorizeElement("2Lz!q+1A+Eu+2F<+SEQ") == "Jump"
+    assert categorizeElement("2F!q+REP") == "Jump"
+    assert categorizeElement("3Lz!q+2A+2Aq+SEQ") == "Jump"
+    assert categorizeElement("3F!q+2T") == "Jump"
+    assert categorizeElement("3Tw3b1") == "Twist"
 
 
 @pytest.mark.parametrize(
