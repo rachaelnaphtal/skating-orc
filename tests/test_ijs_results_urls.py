@@ -1,10 +1,12 @@
 from ijs_results_urls import (
     competition_index_fetch_url,
+    is_fsm_results_url,
     is_legacy_base_results_url,
     results_url_dedupe_key,
     results_url_for_storage,
     results_url_lookup_keys,
     scrape_join_base,
+    usfs_results_event_url,
 )
 
 
@@ -63,6 +65,20 @@ def test_competition_index_fetch_url_uses_canonical():
 def test_scrape_join_base_strips_index_htm():
     stored = "https://www.isuresults.com/results/wc2007/index.htm"
     assert scrape_join_base(stored) == "https://www.isuresults.com/results/wc2007"
+
+
+def test_usfs_results_event_url_collapses_to_event_root():
+    event = (
+        "https://results.usfigureskating.org/events/2026/"
+        "36414-eastern-sectional-singles-us-pairs-final"
+    )
+    schedule = event + "/schedule"
+    officials = event + "/championship-juvenile-girls/officials"
+    assert usfs_results_event_url(schedule) == event
+    assert usfs_results_event_url(officials + "?x=1") == event
+    assert results_url_for_storage(schedule) == event
+    assert results_url_for_storage(event) == event
+    assert is_fsm_results_url(event) is False
 
 
 def test_is_legacy_base_results_url():

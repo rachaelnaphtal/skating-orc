@@ -25,11 +25,24 @@ def test_should_not_store_clean_jump():
     assert not element_should_store_max_goe("3Lz", None, "Men_Free_Skating")
 
 
+def test_protocol_metadata_keeps_repeated_element_names():
+    parsed = {
+        "Stephanie Coe": [
+            {"Element": "2Lze", "Notes": "e", "Number": 3},
+            {"Element": "2Lze", "Notes": "e", "Number": 8},
+        ],
+    }
+    meta = element_protocol_metadata_from_parsed(parsed, "Senior_Women_Free_Skate")
+    assert set(meta) == {("Stephanie Coe", "2Lze", 3), ("Stephanie Coe", "2Lze", 8)}
+    assert meta[("Stephanie Coe", "2Lze", 3)]["max_goe_allowed"] == 0
+    assert meta[("Stephanie Coe", "2Lze", 8)]["max_goe_allowed"] == 0
+
+
 def test_protocol_metadata_includes_max_when_marked():
     parsed = {
         "Skater A": [{"Element": "3Lz", "Notes": "F"}],
         "Skater B": [{"Element": "2A", "Notes": None}],
     }
     meta = element_protocol_metadata_from_parsed(parsed, "Men_Short_Program")
-    assert meta[("Skater A", "3Lz")]["max_goe_allowed"] == -3
-    assert "max_goe_allowed" not in meta[("Skater B", "2A")]
+    assert meta[("Skater A", "3Lz", None)]["max_goe_allowed"] == -3
+    assert "max_goe_allowed" not in meta[("Skater B", "2A", None)]

@@ -9,13 +9,27 @@ LEVEL_CHOICES = ("Novice", "Junior", "Senior")
 DISCIPLINE_CHOICES = ("Singles", "Pairs", "Dance")
 
 
+# A more specific level after ``Championship`` means the word is the event
+# tier (Championship Juvenile), not a senior synonym (Championship Men).
+_LEVEL_AFTER_CHAMPIONSHIP = (
+    r"(?:(?:Advanced|Basic|Open)[_\s-]*)?"
+    r"(?:(?:Pre[-_ ]?)?(?:Preliminary|Juvenile)"
+    r"|Intermediate|Novice|Junior|Adult|Collegiate|Masters)"
+)
+
+
 def _level_branches(levels: tuple[str, ...]) -> str:
-    """OR'd branches for the level lookahead; Senior also matches *Championship* (common senior-level naming)."""
+    """OR'd branches for the level lookahead.
+
+    Senior also matches a bare ``Championship`` label (Championship Men).
+    It does not match when a lower level follows that word
+    (Championship Juvenile, Championship Intermediate).
+    """
     parts: list[str] = []
     for x in levels:
         if x == "Senior":
             parts.append(
-                f"(?:{re.escape('Senior')}|{re.escape('Championship')})"
+                rf"(?:Senior|Championship(?![_\s-]*{_LEVEL_AFTER_CHAMPIONSHIP}))"
             )
         else:
             parts.append(re.escape(x))
@@ -30,7 +44,8 @@ def build_event_regex_from_presets(
 
     - Preset patterns are **case-insensitive** (``(?i)``), so labels like
       ``CHAMPIONSHIP_ICE_DANCE_FREE_DANCE`` match the same tokens as mixed-case names.
-    - Chosen levels are OR'd. **Senior** also matches **Championship** (synonym on many protocols).
+    - Chosen levels are OR'd. **Senior** also matches a bare **Championship** label.
+      **Championship Juvenile** and the other lower levels stay with that level.
     - Chosen disciplines are OR'd, using the same loose tokens as typical scrape examples
       (``Women`` / ``Men`` / … for singles-style labels; ``Pairs``; ``Dance`` for ice/rhythm/etc.).
     - If both level and discipline presets are set, the name must match both (AND), in any order.

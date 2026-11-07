@@ -100,6 +100,7 @@ section = st.radio(
         "Import officials directory",
         "Manage judge emails",
         "Email competition reports",
+        "Generate reports",
         "Public ↔ officials competition types",
         "Assignments ↔ protocol panels",
         "International requirement rules",
@@ -118,6 +119,8 @@ elif section == "Manage judge emails":
     adm.render_manage_judge_emails()
 elif section == "Email competition reports":
     adm.render_email_competition_reports()
+elif section == "Generate reports":
+    adm.render_generate_reports()
 elif section == "Public ↔ officials competition types":
     adm.render_public_competition_officials_types_breakdown()
 elif section == "Assignments ↔ protocol panels":

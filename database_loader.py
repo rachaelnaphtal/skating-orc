@@ -4,6 +4,7 @@ import datetime
 import decimal
 import re
 import unicodedata
+from collections import defaultdict
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.sql import bindparam, text
@@ -178,7 +179,7 @@ def _element_name_candidates_from_rule_error(element_label: str) -> list[str]:
 
 
 def _resolve_element_dict_key(
-    elem_id_by_pair: dict[tuple[int, str], int],
+    elem_id_by_pair: dict[tuple, int],
     skater_segment_id: int,
     element_label: str,
 ) -> str | None:
@@ -186,6 +187,115 @@ def _resolve_element_dict_key(
         if (skater_segment_id, candidate) in elem_id_by_pair:
             return candidate
     return None
+
+
+def _coerce_element_number(value) -> int | None:
+    """Protocol element order, or None when the row has no program number."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        value = text
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _resolve_element_id(
+    elem_id_by_pair: dict[tuple, int],
+    skater_segment_id: int,
+    element_label: str,
+    element_number: int | None = None,
+) -> int | None:
+    """
+    Resolve a parsed element to ``element.id``.
+
+    Program number wins when two elements share a name. Name-only lookup is
+    used when that name occurs once for the skater.
+    """
+    number = _coerce_element_number(element_number)
+    candidates = _element_name_candidates_from_rule_error(element_label)
+    if number is not None:
+        for candidate in candidates:
+            eid = elem_id_by_pair.get((skater_segment_id, candidate, number))
+            if eid is not None:
+                return int(eid)
+    name = _resolve_element_dict_key(elem_id_by_pair, skater_segment_id, element_label)
+    if name is None:
+        return None
+    eid = elem_id_by_pair.get((skater_segment_id, name))
+    return int(eid) if eid is not None else None
+
+
+def assign_repeated_elements(
+    incoming: list[tuple[int, str, int | None]],
+    existing: list[tuple[int, int, str, int | None]],
+) -> tuple[
+    dict[tuple[int, str, int | None], int],
+    list[tuple[int, str, int | None]],
+]:
+    """
+    Match parsed elements to stored rows without collapsing repeated names.
+
+    ``incoming`` is ``(skater_segment_id, name, element_number)`` in program
+    order. ``existing`` is ``(element_id, skater_segment_id, name, element_number)``.
+
+    A stored row with no program number is adopted by the earliest unmatched
+    element of that name. Further repeats are inserted as new rows.
+    """
+    existing_by_name: dict[tuple[int, str], list[tuple[int, int | None]]] = defaultdict(
+        list
+    )
+    for element_id, ssid, name, number in existing:
+        existing_by_name[(ssid, name)].append((element_id, number))
+
+    incoming_by_name: dict[tuple[int, str], list[int | None]] = defaultdict(list)
+    for ssid, name, number in incoming:
+        incoming_by_name[(ssid, name)].append(number)
+
+    reuse: dict[tuple[int, str, int | None], int] = {}
+    to_insert: list[tuple[int, str, int | None]] = []
+    for (ssid, name), numbers in incoming_by_name.items():
+        rows = existing_by_name.get((ssid, name), [])
+        numbered = {num: eid for eid, num in rows if num is not None}
+        unnumbered = sorted(eid for eid, num in rows if num is None)
+        for number in numbers:
+            identity = (ssid, name, number)
+            if number is not None and number in numbered:
+                reuse[identity] = numbered[number]
+                continue
+            if unnumbered:
+                reuse[identity] = unnumbered.pop(0)
+                continue
+            to_insert.append(identity)
+    return reuse, to_insert
+
+
+def _element_id_map_from_identities(
+    identity_to_id: dict[tuple[int, str, int | None], int],
+) -> dict[tuple, int]:
+    """Name key when unique; ``(segment, name, number)`` whenever numbered."""
+    counts: dict[tuple[int, str], int] = defaultdict(int)
+    for ssid, name, _number in identity_to_id:
+        counts[(ssid, name)] += 1
+    out: dict[tuple, int] = {}
+    for (ssid, name, number), element_id in identity_to_id.items():
+        if number is not None:
+            out[(ssid, name, number)] = element_id
+        if counts[(ssid, name)] == 1:
+            out[(ssid, name)] = element_id
+    return out
 
 
 def _competition_flags_from_discipline_type_name(
@@ -1137,9 +1247,14 @@ class DatabaseLoader:
         type_names = df["Element Type"].astype(str).unique().tolist()
         element_types_map = self._ensure_element_types_by_name(type_names)
 
-        element_specs: dict[tuple[int, str], tuple[str, str | None, decimal.Decimal | None]] = {}
+        element_specs: dict[
+            tuple[int, str, int | None],
+            tuple[str, str | None, decimal.Decimal | None],
+        ] = {}
+        element_order: list[tuple[int, str, int | None]] = []
         has_notes_col = "Notes" in df.columns
         has_max_goe_col = "Max GOE Allowed" in df.columns
+        has_number_col = "Element Number" in df.columns
         for _, r in df.iterrows():
             sid = skater_dict[str(r["Skater"])]
             ssid = ss_map[sid]
@@ -1154,72 +1269,106 @@ class DatabaseLoader:
                 raw_max = r.get("Max GOE Allowed")
                 if raw_max is not None and pd.notna(raw_max):
                     max_goe_val = self._to_decimal(raw_max)
-            key = (ssid, str(r["Element"]))
-            if key not in element_specs:
-                element_specs[key] = (str(r["Element Type"]), notes_val, max_goe_val)
+            element_number = (
+                _coerce_element_number(r.get("Element Number"))
+                if has_number_col
+                else None
+            )
+            identity = (ssid, str(r["Element"]), element_number)
+            if identity not in element_specs:
+                element_order.append(identity)
+                element_specs[identity] = (
+                    str(r["Element Type"]),
+                    notes_val,
+                    max_goe_val,
+                )
             else:
-                etype, prev_notes, prev_max = element_specs[key]
+                etype, prev_notes, prev_max = element_specs[identity]
                 if notes_val and not prev_notes:
                     prev_notes = notes_val
                 if max_goe_val is not None and prev_max is None:
                     prev_max = max_goe_val
-                element_specs[key] = (etype, prev_notes, prev_max)
+                element_specs[identity] = (etype, prev_notes, prev_max)
 
-        pairs = list(element_specs.keys())
-        elem_id_by_pair: dict[tuple[int, str], int] = {}
-        step = 500
-        for i in range(0, len(pairs), step):
-            chunk = pairs[i : i + step]
-            elems = self.session.execute(
-                select(Element).where(
-                    tuple_(Element.skater_segment_id, Element.name).in_(chunk)
-                )
-            ).scalars().all()
-            for el in elems:
-                k = (int(el.skater_segment_id), str(el.name))
-                elem_id_by_pair[k] = int(el.id)
-                etype_name, notes_val, max_goe_val = element_specs[k]
-                etid = element_types_map[etype_name]
-                cur_etid = el.element_type_id
-                if el.element_type != etype_name or (
-                    cur_etid is None or int(cur_etid) != etid
-                ):
-                    el.element_type = etype_name
-                    el.element_type_id = etid
-                if notes_val is not None and el.notes != notes_val:
-                    el.notes = notes_val
-                if max_goe_val is not None and not self._numeric_eq(
-                    el.max_goe_allowed, max_goe_val
-                ):
-                    el.max_goe_allowed = max_goe_val
+        ssids = sorted({ssid for ssid, _name, _number in element_order})
+        stored: list[Element] = []
+        if ssids:
+            stored = list(
+                self.session.execute(
+                    select(Element).where(Element.skater_segment_id.in_(ssids))
+                ).scalars().all()
+            )
+        existing_rows = [
+            (
+                int(el.id),
+                int(el.skater_segment_id),
+                str(el.name),
+                _coerce_element_number(el.element_number),
+            )
+            for el in stored
+        ]
+        reuse, to_insert = assign_repeated_elements(element_order, existing_rows)
+        stored_by_id = {int(el.id): el for el in stored}
+        for identity, element_id in reuse.items():
+            el = stored_by_id[element_id]
+            _ssid, _name, element_number = identity
+            etype_name, notes_val, max_goe_val = element_specs[identity]
+            etid = element_types_map[etype_name]
+            cur_etid = el.element_type_id
+            if el.element_type != etype_name or (
+                cur_etid is None or int(cur_etid) != etid
+            ):
+                el.element_type = etype_name
+                el.element_type_id = etid
+            if notes_val is not None and el.notes != notes_val:
+                el.notes = notes_val
+            if max_goe_val is not None and not self._numeric_eq(
+                el.max_goe_allowed, max_goe_val
+            ):
+                el.max_goe_allowed = max_goe_val
+            if element_number is not None and el.element_number != element_number:
+                el.element_number = element_number
 
-        to_add: list[Element] = []
-        for (ssid, ename), (etype_name, notes_val, max_goe_val) in element_specs.items():
-            if (ssid, ename) in elem_id_by_pair:
-                continue
+        identity_to_id: dict[tuple[int, str, int | None], int] = dict(reuse)
+        to_add: list[tuple[tuple[int, str, int | None], Element]] = []
+        for identity in to_insert:
+            ssid, ename, element_number = identity
+            etype_name, notes_val, max_goe_val = element_specs[identity]
             etid = element_types_map[etype_name]
             to_add.append(
-                Element(
-                    name=ename,
-                    element_type_id=etid,
-                    element_type=etype_name,
-                    skater_segment_id=ssid,
-                    notes=notes_val,
-                    max_goe_allowed=max_goe_val,
+                (
+                    identity,
+                    Element(
+                        name=ename,
+                        element_type_id=etid,
+                        element_type=etype_name,
+                        skater_segment_id=ssid,
+                        notes=notes_val,
+                        max_goe_allowed=max_goe_val,
+                        element_number=element_number,
+                    ),
                 )
             )
         if to_add:
-            self.session.add_all(to_add)
+            self.session.add_all(el for _identity, el in to_add)
             self.session.flush()
-            for el in to_add:
-                k = (int(el.skater_segment_id), str(el.name))
-                elem_id_by_pair[k] = int(el.id)
+            for identity, el in to_add:
+                identity_to_id[identity] = int(el.id)
+        elif reuse:
+            self.session.flush()
+
+        elem_id_by_pair = _element_id_map_from_identities(identity_to_id)
 
         score_by_key: dict[tuple[int, int], dict] = {}
         for _, r in df.iterrows():
             sid = skater_dict[str(r["Skater"])]
             ssid = ss_map[sid]
-            eid = elem_id_by_pair[(ssid, str(r["Element"]))]
+            element_number = (
+                _coerce_element_number(r.get("Element Number"))
+                if has_number_col
+                else None
+            )
+            eid = identity_to_id[(ssid, str(r["Element"]), element_number)]
             jid = judge_dict[normalize_scraped_judge_name(str(r["Judge Name"]))]
             key = (eid, jid)
             score_by_key[key] = {
@@ -1241,6 +1390,7 @@ class DatabaseLoader:
                 "panel_average",
                 "deviation",
                 "thrown_out",
+                "is_rule_error",
             ),
         )
 
@@ -1298,20 +1448,22 @@ class DatabaseLoader:
 
     def _build_segment_element_score_maps_from_rows(
         self, rows
-    ) -> tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]]:
+    ) -> tuple[dict[str, int], dict[int, int], dict[tuple, int]]:
         skater_dict: dict[str, int] = {}
         ss_map: dict[int, int] = {}
-        elem_id_by_pair: dict[tuple[int, str], int] = {}
-        for skater_name, skater_id, ss_id, el_name, el_id in rows:
+        identities: dict[tuple[int, str, int | None], int] = {}
+        for row in rows:
+            skater_name, skater_id, ss_id, el_name, el_id = row[:5]
+            element_number = _coerce_element_number(row[5]) if len(row) > 5 else None
             skater_dict[str(skater_name)] = int(skater_id)
             ss_map[int(skater_id)] = int(ss_id)
-            elem_id_by_pair[(int(ss_id), str(el_name))] = int(el_id)
-        return skater_dict, ss_map, elem_id_by_pair
+            identities[(int(ss_id), str(el_name), element_number)] = int(el_id)
+        return skater_dict, ss_map, _element_id_map_from_identities(identities)
 
     def _segment_element_score_maps(
         self, segment_id: int
-    ) -> tuple[dict[str, int], dict[int, int], dict[tuple[int, str], int]]:
-        """Skater name → id, skater id → skater_segment id, (ss_id, element name) → element id."""
+    ) -> tuple[dict[str, int], dict[int, int], dict[tuple, int]]:
+        """Skater name → id, skater id → skater_segment id, element identity → element id."""
         rows = self.session.execute(
             select(
                 Skater.name,
@@ -1319,6 +1471,7 @@ class DatabaseLoader:
                 SkaterSegment.id,
                 Element.name,
                 Element.id,
+                Element.element_number,
             )
             .join(SkaterSegment, SkaterSegment.skater_id == Skater.id)
             .join(Element, Element.skater_segment_id == SkaterSegment.id)
@@ -1338,6 +1491,7 @@ class DatabaseLoader:
                 SkaterSegment.id,
                 Element.name,
                 Element.id,
+                Element.element_number,
             )
             .join(SkaterSegment, SkaterSegment.skater_id == Skater.id)
             .join(Element, Element.skater_segment_id == SkaterSegment.id)
@@ -1345,9 +1499,9 @@ class DatabaseLoader:
             .where(Segment.competition_id == competition_id)
         ).all()
         by_segment: dict[int, list] = {}
-        for segment_id, skater_name, skater_id, ss_id, el_name, el_id in rows:
+        for segment_id, skater_name, skater_id, ss_id, el_name, el_id, el_num in rows:
             by_segment.setdefault(int(segment_id), []).append(
-                (skater_name, skater_id, ss_id, el_name, el_id)
+                (skater_name, skater_id, ss_id, el_name, el_id, el_num)
             )
         return {
             sid: self._build_segment_element_score_maps_from_rows(seg_rows)
@@ -1405,7 +1559,10 @@ class DatabaseLoader:
         else:
             skater_dict, ss_map, elem_id_by_pair = score_maps
         resolved: list[tuple[int, dict]] = []
-        for (skater_name, element_name), meta in element_metadata.items():
+        for key, meta in element_metadata.items():
+            skater_name = key[0]
+            element_name = key[1]
+            element_number = key[2] if len(key) > 2 else None
             db_skater = _resolve_skater_dict_key(skater_dict, str(skater_name))
             if db_skater is None:
                 continue
@@ -1413,7 +1570,9 @@ class DatabaseLoader:
             ss_id = ss_map.get(skater_id)
             if ss_id is None:
                 continue
-            eid = elem_id_by_pair.get((ss_id, str(element_name)))
+            eid = _resolve_element_id(
+                elem_id_by_pair, ss_id, str(element_name), element_number
+            )
             if eid is None:
                 continue
             resolved.append((int(eid), meta))
@@ -1497,13 +1656,12 @@ class DatabaseLoader:
             if ssid is None:
                 unresolved.append({**base, "reason": "skater not in segment"})
                 continue
-            db_element_name = _resolve_element_dict_key(
-                elem_id_by_pair, ssid, element_label
+            eid = _resolve_element_id(
+                elem_id_by_pair,
+                ssid,
+                element_label,
+                rule_error.get("Element Number"),
             )
-            if db_element_name is None:
-                eid = None
-            else:
-                eid = elem_id_by_pair.get((ssid, db_element_name))
             if eid is None:
                 unresolved.append({**base, "reason": "element not in segment"})
                 continue
@@ -2014,12 +2172,14 @@ class DatabaseLoader:
                 .first()
                 .id
             )
-            db_element_name = _resolve_element_dict_key(
-                elem_id_by_pair, skater_segment_id, rule_error["Element"]
+            element_id = _resolve_element_id(
+                elem_id_by_pair,
+                skater_segment_id,
+                rule_error["Element"],
+                rule_error.get("Element Number"),
             )
-            if db_element_name is None:
+            if element_id is None:
                 continue
-            element_id = elem_id_by_pair[(skater_segment_id, db_element_name)]
             judge_id = (
                 self.session.query(Judge)
                 .filter_by(name=normalize_scraped_judge_name(rule_error["Judge Name"]))

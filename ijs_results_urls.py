@@ -18,6 +18,26 @@ _INDEX_ASP = "/index.asp"
 _INDEX_HTM = "/index.htm"
 _INDEX_HTML = "/index.html"
 _LEGACY_BASE_RE = re.compile(r"/leaderboard/results/\d{4}/\d+$", re.IGNORECASE)
+_USFS_RESULTS_EVENT_RE = re.compile(
+    r"^https?://results\.usfigureskating\.org/events/(?P<year>\d{4})/(?P<slug>\d+-[a-z0-9-]+)",
+    re.IGNORECASE,
+)
+
+
+def usfs_results_event_url(url: str) -> str | None:
+    """
+    Canonical event URL on results.usfigureskating.org.
+
+    Schedule, category, and officials links collapse to
+    ``https://results.usfigureskating.org/events/{year}/{id}-{slug}``.
+    """
+    raw = (url or "").strip().split("#", 1)[0].split("?", 1)[0]
+    match = _USFS_RESULTS_EVENT_RE.match(raw)
+    if not match:
+        return None
+    year = match.group("year")
+    slug = match.group("slug").lower()
+    return f"https://results.usfigureskating.org/events/{year}/{slug}"
 
 
 def _strip_trailing_slash(url: str) -> str:
@@ -29,6 +49,9 @@ def results_url_for_storage(url: str) -> str:
     u = _strip_trailing_slash(url)
     if not u:
         return ""
+    event_url = usfs_results_event_url(u)
+    if event_url:
+        return event_url
     lower = u.lower()
     if lower.endswith(_INDEX_ASP):
         return u
@@ -42,6 +65,8 @@ def results_url_for_storage(url: str) -> str:
 def is_fsm_results_url(url: str) -> bool:
     """True when the URL is not a classic ``…/index.asp`` entry (FSM / Swiss Timing)."""
     u = (url or "").strip()
+    if usfs_results_event_url(u):
+        return False
     return not u.lower().endswith(_INDEX_ASP)
 
 

@@ -395,7 +395,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
                 skater_match = match_skater_fsm(possible)
 
             if skater_match:
-                skater_name = skater_match.group(2).strip()
+                skater_name = fsm_skater_name_without_club(skater_match.group(2))
                 technical_score = float(skater_match.group(5))
                 current_skater = skater_name
                 element_number = 1
@@ -451,7 +451,7 @@ def process_fsm_scores(pdf, event_regex="", use_gcp=False):
             # -----------------------------
             if current_skater and element_match:
                 element_name = element_match.group(1)
-                notes = element_match.group(2)
+                notes = fsm_element_notes(element_match)
                 judge_scores_raw = element_match.group(6)
                 total_score = float(element_match.group(8))
 
@@ -558,7 +558,7 @@ def match_element_fsm(line):
         ^\s*
         ([A-Za-z0-9+*<>!]+)                    # Element name
         \s+
-        (?:([F*<!>qnscuSCUex,b|]+)\s+)*         # Optional extra info
+        ((?:[F*<!>qnscuSCUex,b|]+\s+)*)        # Info codes (every token, not only the last)
         (-?\d+(?:\.\d+)?)                      # Base value
         \s*
         (x?)                                   # Optional x
@@ -577,6 +577,12 @@ def match_element_fsm(line):
         line,
         re.VERBOSE,
     )
+
+
+def fsm_element_notes(match) -> str | None:
+    """Info-column text from ``match_element_fsm``, or None when the column is empty."""
+    text = " ".join((match.group(2) or "").split())
+    return text or None
 
 
 def process_scores(pdf, event_regex="", use_gcp=False):
@@ -1059,8 +1065,11 @@ def create_all_element_dict(
         skater_missing = consensus_missing_judge_index(
             skater_elements, skater_pcs, n_judges
         )
-        for element in skater_elements:
+        for ordinal, element in enumerate(skater_elements, start=1):
             element_label = element.get("Element") or "?"
+            element_number = element.get("Number")
+            if element_number is None:
+                element_number = ordinal
             missing_idx = element.get("Possible Missing Position")
             if missing_idx is None:
                 missing_idx = skater_missing
@@ -1099,6 +1108,7 @@ def create_all_element_dict(
                     "Skater": skater,
                     "Event": event_name,
                     "Element": element["Element"],
+                    "Element Number": int(element_number),
                     "Notes": element.get("Notes"),
                     "Element Type": categorizeElement(element["Element"]),
                     "Panel Average": avg,
@@ -1400,6 +1410,45 @@ _MATCH_SKATER_FSM_LEGACY_NOC_DEDUCTIONS_RE = re.compile(
 )
 
 
+def _is_fsm_surname_token(token: str) -> bool:
+    """True for an all-caps protocol surname (``CHEN``, ``AOZONO-ARALDI``, ``O'TOOLE``)."""
+    letters = re.sub(r"[^A-Za-z]", "", token or "")
+    return len(letters) >= 2 and letters.isalpha() and letters.isupper()
+
+
+def _fsm_name_without_trailing_club(name: str) -> str:
+    """
+    Drop a USFS club after the surname.
+
+    A club has lowercase letters (``Washington FSC``, ``Independent Member``).
+    A trailing NOC or second all-caps surname (``ZHANG HUN``, ``VAN DAMME``) stays.
+    """
+    tokens = name.split()
+    for i, token in enumerate(tokens):
+        if i == 0 or not _is_fsm_surname_token(token):
+            continue
+        if _is_fsm_surname_token(tokens[i - 1]):
+            continue
+        rest = " ".join(tokens[i + 1 :])
+        if rest and any(ch.islower() for ch in rest):
+            return " ".join(tokens[: i + 1])
+        return name
+    return name
+
+
+def fsm_skater_name_without_club(name: str) -> str:
+    """Skater name from a protocol header, without a USFS club suffix."""
+    text = " ".join((name or "").replace("ﬁ", "fi").split())
+    if not text or "/" not in text:
+        return _fsm_name_without_trailing_club(text)
+    left, right = text.split("/", 1)
+    return (
+        _fsm_name_without_trailing_club(left.strip())
+        + " / "
+        + _fsm_name_without_trailing_club(right.strip())
+    )
+
+
 def match_skater_fsm(line):
     """
     FSM skater header: order, name, start # or NOC, total, TES, PCS, optional deductions.
@@ -1507,18 +1556,20 @@ def element_should_store_max_goe(
 def element_protocol_metadata_from_parsed(
     elements_per_skater: dict,
     event_name: str = "",
-) -> dict[tuple[str, str], dict]:
+) -> dict[tuple[str, str, int | None], dict]:
     """
-    Per (skater, element name): ``notes`` and optional ``max_goe_allowed``.
+    Per (skater, element name, program number): ``notes`` and optional ``max_goe_allowed``.
 
     ``max_goe_allowed`` is set when markings/info constrain GOE; omitted otherwise.
+    Program number keeps two elements that share a name (two ``2Lze``) distinct.
     """
-    out: dict[tuple[str, str], dict] = {}
+    out: dict[tuple[str, str, int | None], dict] = {}
     for skater, elements in elements_per_skater.items():
         for element in elements:
             element_name = str(element["Element"])
             notes = element.get("Notes")
-            key = (str(skater), element_name)
+            number = element.get("Number")
+            key = (str(skater), element_name, int(number) if number is not None else None)
             meta: dict = {"notes": notes}
             if element_should_store_max_goe(element_name, notes, event_name):
                 meta["max_goe_allowed"] = compute_element_max_goe(
@@ -1597,6 +1648,7 @@ def makeRuleError(
     row = {
         "Skater": skater,
         "Element": element["Element"],
+        "Element Number": element.get("Number"),
         "Judge Number": judgeNumber,
         "Judge Name": judges[judgeNumber - 1],
         "Judge Score": allScores[judgeNumber - 1],
@@ -1610,7 +1662,12 @@ def makeRuleError(
 
 
 def _orc_element_row_key(row: dict) -> tuple:
-    return (row.get("Skater"), row.get("Element"), row.get("Judge Number"))
+    return (
+        row.get("Skater"),
+        row.get("Element"),
+        row.get("Element Number"),
+        row.get("Judge Number"),
+    )
 
 
 def exclude_anomalies_already_flagged_as_rule_errors(
@@ -1667,6 +1724,7 @@ def findElementDeviations(
                         {
                             "Skater": skater,
                             "Element": element["Element"],
+                            "Element Number": element.get("Number"),
                             "Judge Number": judgeNumber,
                             "Judge Name": judges[judgeNumber - 1],
                             "Judge Score": allScores[judgeNumber - 1],

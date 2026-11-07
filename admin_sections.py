@@ -5,6 +5,7 @@ Admin-only Streamlit sections used by ``pages/admin.py`` (/admin).
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import traceback as _tb
@@ -1277,3 +1278,323 @@ def render_international_requirement_rules() -> None:
                 st.rerun()
             else:
                 st.info("No changes to save.")
+
+
+def render_generate_reports() -> None:
+    """ORC and trial-judge workbooks. Competition reports use stored scores, not a results URL."""
+    st.subheader("Generate reports")
+    st.write(
+        "Build the same workbooks as the standalone report app and download them here. "
+        "A competition report uses scores already in the database, including results-site "
+        "events whose PDFs are not public."
+    )
+    report_type = st.radio(
+        "Which type of report do you want?",
+        ("Competition ORC Report", "Full Season Report", "Trial Judge Report"),
+        horizontal=True,
+        key="admin_generate_report_type",
+    )
+    if report_type == "Competition ORC Report":
+        _render_competition_orc_report()
+    elif report_type == "Full Season Report":
+        st.text_input(
+            "Report Name (aka the name of the output file)",
+            value="",
+            key="admin_full_season_report_name",
+        )
+        st.info("This report is not fully supported yet.")
+    else:
+        _render_trial_judge_report()
+
+
+def _render_competition_orc_report() -> None:
+    from event_regex_presets import (
+        DISCIPLINE_CHOICES,
+        LEVEL_CHOICES,
+        effective_event_regex,
+    )
+
+    from competition_orc_report import (
+        competition_judge_names,
+        competition_segment_names,
+        compile_event_regex,
+        generate_competition_orc_report,
+        safe_report_filename,
+        segment_matches_event_regex,
+    )
+
+    with st.expander("See more details"):
+        st.markdown(
+            """
+            This creates a report of the deviations in a competition for review captains.
+            Segments, judges, and scores come from the database.
+
+            - **Include only some events**: use the level and discipline picks, or a custom event regex.
+              Example: ``(?i).*(Novice|Junior|Senior).*(Women|Men|Pairs).*``
+            - **Only show rule errors**: the workbook lists only GOEs that are mathematically impossible.
+            - **Judge filter**: exact stored judge names, separated by commas, semicolons, or new lines.
+            """
+        )
+
+    competitions = get_analytics_safe().get_competitions()
+    if not competitions:
+        st.info("No competitions found in the database.")
+        return
+
+    needle = st.text_input(
+        "Find a competition",
+        key="admin_orc_comp_filter",
+        placeholder="Name or season, such as Eastern Sectional or 2627",
+    ).strip().lower()
+    choices: list[tuple[str, int]] = []
+    for competition_id, name, year in competitions:
+        label = f"{name} ({year})"
+        if needle and needle not in label.lower() and needle not in str(competition_id):
+            continue
+        choices.append((label, int(competition_id)))
+    if not choices:
+        st.info("No competitions match that filter.")
+        return
+
+    labels = [label for label, _cid in choices]
+    selected_label = st.selectbox("Competition", labels, key="admin_orc_comp_select")
+    selected_id = dict(choices)[selected_label]
+
+    st.text_input(
+        "Report Name (aka the name of the output file)",
+        key="admin_orc_report_name",
+    )
+    levels = st.multiselect(
+        "Quick filter: event level (optional)",
+        list(LEVEL_CHOICES),
+        default=[],
+        key="admin_orc_levels",
+        help=(
+            "Novice / Junior / Senior in the segment label. "
+            "Senior also matches Championship Men, not Championship Juvenile or Intermediate."
+        ),
+    )
+    disciplines = st.multiselect(
+        "Quick filter: discipline (optional)",
+        list(DISCIPLINE_CHOICES),
+        default=[],
+        key="admin_orc_disciplines",
+        help="Singles, pairs, or dance tokens in the segment label.",
+    )
+    custom_regex = st.text_input(
+        "Custom event regex (optional; overrides quick filters)",
+        key="admin_orc_event_regex",
+        help="If set, used as-is. Add (?i) for case-insensitivity. Stored segment names use underscores.",
+    )
+    st.text_area(
+        "Judge filter (optional)",
+        height=80,
+        key="admin_orc_judge_filter",
+        placeholder="Exact stored judge names — comma, semicolon, or newline separated.",
+        help="Leave blank for every judge on the panel.",
+    )
+    st.checkbox(
+        "Include errors only?",
+        key="admin_orc_errors_only",
+        help="Whether to only include rule errors.",
+    )
+    st.checkbox(
+        "Add extra analysis sheet?",
+        key="admin_orc_extra_analysis",
+        help="Also generate a workbook of the percentage of scores in range.",
+    )
+
+    session = get_analytics_safe().session
+    event_regex = effective_event_regex(custom_regex, levels, disciplines)
+    regex_error = ""
+    try:
+        event_regex = compile_event_regex(event_regex)
+    except re.error as exc:
+        regex_error = f"Event regex is not valid: {exc}"
+    segment_names = competition_segment_names(session, selected_id)
+    if regex_error:
+        st.error(regex_error)
+        matching = []
+    else:
+        matching = [
+            name for name in segment_names if segment_matches_event_regex(name, event_regex)
+        ]
+        st.caption(
+            f"{len(matching)} of {len(segment_names)} stored segments match this filter."
+        )
+    if matching:
+        with st.expander("Segments that will be included"):
+            st.write("\n".join(matching))
+    judge_names = competition_judge_names(session, selected_id)
+    if judge_names:
+        with st.expander(f"Stored judge names ({len(judge_names)})"):
+            st.text("\n".join(judge_names))
+
+    if st.button("Generate Report", type="primary", key="admin_orc_generate"):
+        report_name = st.session_state.get("admin_orc_report_name", "")
+        try:
+            safe_report_filename(report_name)
+            if regex_error:
+                raise ValueError(regex_error)
+            with st.spinner("Building the report from stored scores…"):
+                report = generate_competition_orc_report(
+                    session,
+                    selected_id,
+                    report_name,
+                    event_regex=event_regex,
+                    judge_filter=st.session_state.get("admin_orc_judge_filter") or "",
+                    only_rule_errors=bool(st.session_state.get("admin_orc_errors_only")),
+                    add_additional_analysis=bool(
+                        st.session_state.get("admin_orc_extra_analysis")
+                    ),
+                )
+        except Exception as exc:
+            session.rollback()
+            st.error(str(exc))
+        else:
+            st.session_state["admin_orc_download"] = {
+                "competition": selected_label,
+                "report": report,
+            }
+
+    download = st.session_state.get("admin_orc_download")
+    if not download:
+        return
+    report = download["report"]
+    st.success(
+        f"Report for {download['competition']}: {len(report.segment_names)} segment(s)."
+    )
+    if report.warnings:
+        st.warning("\n".join(report.warnings))
+    st.download_button(
+        f"Download {report.filename}",
+        data=report.workbook,
+        file_name=report.filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="admin_orc_download_main",
+    )
+    if report.additional_workbook and report.additional_filename:
+        st.download_button(
+            f"Download {report.additional_filename}",
+            data=report.additional_workbook,
+            file_name=report.additional_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="admin_orc_download_extra",
+        )
+
+
+def _render_trial_judge_report() -> None:
+    with st.expander("See more details"):
+        st.markdown(
+            """
+            For each event, upload both files:
+
+            - The results PDF, named with the event abbreviation (for example ``JMFS.pdf``).
+            - The Excel trial-judge sheet, named with the same abbreviation plus ``_analysis``
+              (for example ``JMFS_analysis.xlsx``). Skater and team names must match the protocol.
+            """
+        )
+    st.text_input(
+        "Report Name (aka the name of the output file)",
+        key="admin_tj_report_name",
+    )
+    uploads = st.file_uploader(
+        "Upload trial judge files",
+        type=["xlsx", "pdf"],
+        accept_multiple_files=True,
+        key="admin_tj_uploads",
+    )
+    st.checkbox(
+        "Report per TJ?",
+        key="admin_tj_per_judge",
+        help="Whether to additionally create a report per trial judge.",
+    )
+    if st.button("Generate Report", type="primary", key="admin_tj_generate"):
+        from trialJudgingAnalysis import get_judges_name_from_sheet, process_papers
+
+        from competition_orc_report import safe_report_filename
+
+        events, error = _trial_judge_event_names(uploads or [])
+        report_name = st.session_state.get("admin_tj_report_name", "")
+        try:
+            if error:
+                raise ValueError(error)
+            stem = safe_report_filename(report_name).replace(" ", "_")
+        except Exception as exc:
+            st.error(str(exc))
+        else:
+            try:
+                with st.spinner("Building the trial judge report…"):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        folder = Path(tmp)
+                        for upload in uploads:
+                            (folder / upload.name).write_bytes(upload.getvalue())
+                        judge_names = get_judges_name_from_sheet(
+                            str(folder / f"{events[0]}_analysis.xlsx"),
+                            use_gcp=False,
+                        )
+                        if not judge_names:
+                            raise ValueError(
+                                f"No trial judge names found in {events[0]}_analysis.xlsx."
+                            )
+                        excel_path = str(folder / f"{stem}.xlsx")
+                        process_papers(
+                            events,
+                            excel_path,
+                            f"{folder}/",
+                            judges_names=judge_names,
+                            use_gcp=False,
+                            include_additional_analysis=True,
+                            sheet_per_trial_judge=bool(
+                                st.session_state.get("admin_tj_per_judge")
+                            ),
+                        )
+                        uploaded_names = {upload.name for upload in uploads}
+                        files = [
+                            (path.name, path.read_bytes())
+                            for path in sorted(folder.glob("*.xlsx"))
+                            if path.name not in uploaded_names
+                        ]
+                st.session_state["admin_tj_download"] = {
+                    "judges": judge_names,
+                    "files": files,
+                }
+            except Exception as exc:
+                st.error(str(exc))
+                with st.expander("Details"):
+                    st.code(_tb.format_exc())
+
+    download = st.session_state.get("admin_tj_download")
+    if not download:
+        return
+    st.success(f"Found trial judge names: {', '.join(download['judges'])}")
+    for name, data in download["files"]:
+        st.download_button(
+            f"Download {name}",
+            data=data,
+            file_name=name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"admin_tj_download_{name}",
+        )
+
+
+def _trial_judge_event_names(uploads) -> tuple[list[str], str | None]:
+    if not uploads:
+        return [], "Upload the PDF and Excel trial judge files."
+    file_names = {upload.name for upload in uploads}
+    events: list[str] = []
+    for upload in uploads:
+        if upload.name.endswith(".pdf"):
+            event_name = upload.name[: -len(".pdf")]
+            if f"{event_name}_analysis.xlsx" not in file_names:
+                return [], f"Found pdf file for {event_name} without xlsx file."
+            events.append(event_name)
+        elif upload.name.endswith("_analysis.xlsx"):
+            event_name = upload.name[: -len("_analysis.xlsx")]
+            if f"{event_name}.pdf" not in file_names:
+                return [], f"Found xlsx file for {event_name} without pdf file."
+        else:
+            return [], f"Unexpected file {upload.name}"
+    if not events:
+        return [], "Upload at least one PDF and matching analysis workbook."
+    return events, None

@@ -5,6 +5,8 @@ from judgingParsing import (
     _fsm_normalize_pdf_text,
     _fsm_strip_element_number,
     create_all_element_dict,
+    fsm_element_notes,
+    fsm_skater_name_without_club,
     match_element_fsm,
     match_pcs_fsm,
     match_skater_fsm,
@@ -20,6 +22,75 @@ def test_fsm_is_protocol_junk_line_skips_reversed_info_header():
     assert _fsm_is_protocol_junk_line("# Executed Elements") is True
     assert _fsm_is_protocol_junk_line("77.64 88.69") is True
     assert _fsm_is_protocol_junk_line("1 4Lz 11.50 1.64 2 2 2 2 0 0 0 2 2 13.14") is False
+
+
+def test_match_element_fsm_keeps_every_info_token():
+    """A fall next to another info code must stay in notes (``F b,<``, ``F q,b``)."""
+    fall_and_bonus = match_element_fsm(
+        "3F<b1 F b,< 4.24 -2.12 -5 -5 -5 -5 -5 -5 1.00 3.12"
+    )
+    assert fall_and_bonus is not None
+    assert fsm_element_notes(fall_and_bonus) == "F b,<"
+
+    fall_and_quarter = match_element_fsm(
+        "3Sqb1+COMBO F q,b 4.30 -2.15 -5 -5 -5 -5 -5 -5 1.00 3.15"
+    )
+    assert fall_and_quarter is not None
+    assert fsm_element_notes(fall_and_quarter) == "F q,b"
+
+    fall_only = match_element_fsm(
+        "2A F 3.30 -1.65 -5 -5 -5 -5 -5 -5 1.65"
+    )
+    assert fall_only is not None
+    assert fsm_element_notes(fall_only) == "F"
+
+    no_info = match_element_fsm("CSp4 2.60 -0.09 0 0 -1 -1 0 2.51")
+    assert no_info is not None
+    assert fsm_element_notes(no_info) is None
+
+
+def test_fsm_skater_name_without_club_strips_usfs_club():
+    assert (
+        fsm_skater_name_without_club("Salvatore CHEN Independent Member")
+        == "Salvatore CHEN"
+    )
+    assert (
+        fsm_skater_name_without_club("Christopher PEMBLETON Washington FSC")
+        == "Christopher PEMBLETON"
+    )
+    assert (
+        fsm_skater_name_without_club("Jack ZIMMERMAN Panthers FSC, Inc.")
+        == "Jack ZIMMERMAN"
+    )
+    assert (
+        fsm_skater_name_without_club("Enzo AOZONO-ARALDI Atlanta FSC")
+        == "Enzo AOZONO-ARALDI"
+    )
+    assert (
+        fsm_skater_name_without_club("Tobby YE Ice House Of New Jersey FSC")
+        == "Tobby YE"
+    )
+    assert (
+        fsm_skater_name_without_club("Rich DIMANCHE SC of Southern Connecticut")
+        == "Rich DIMANCHE"
+    )
+    assert (
+        fsm_skater_name_without_club(
+            "Alexa KNIERIM / Brandon FRAZIER Seattle SC"
+        )
+        == "Alexa KNIERIM / Brandon FRAZIER"
+    )
+
+
+def test_fsm_skater_name_without_club_keeps_noc_and_second_surname():
+    assert fsm_skater_name_without_club("Boglárka ZHANG HUN") == "Boglárka ZHANG HUN"
+    assert (
+        fsm_skater_name_without_club(
+            "Gabriella PAPADAKIS / Guillaume CIZERON FRA"
+        )
+        == "Gabriella PAPADAKIS / Guillaume CIZERON FRA"
+    )
+    assert fsm_skater_name_without_club("Jean-Claude VAN DAMME") == "Jean-Claude VAN DAMME"
 
 
 def test_match_element_fsm_parses_all_dash_judge_columns():
