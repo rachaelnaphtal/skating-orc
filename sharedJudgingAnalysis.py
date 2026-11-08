@@ -119,6 +119,8 @@ def categorizeElement(element):
         element = element[:-1]
     if not element:
         return ""
+    if element.lower() == "tm":
+        return "Team Movement"
     # ``3Tw4`` loses its level in ``strip_element_level_suffix``. ``3Tw3b1``
     # loses only the ``1``, then the trailing ``b``, and still has the level
     # digit (``3Tw3``).

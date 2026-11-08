@@ -1466,12 +1466,16 @@ def _render_competition_orc_report() -> None:
     )
     if report.warnings:
         st.warning("\n".join(report.warnings))
+    # A click must not rerun the app. Heroku's router drops the file request
+    # when that rerun holds the process, and the browser reports the file
+    # was not available.
     st.download_button(
         f"Download {report.filename}",
         data=report.workbook,
         file_name=report.filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="admin_orc_download_main",
+        on_click="ignore",
     )
     if report.additional_workbook and report.additional_filename:
         st.download_button(
@@ -1480,6 +1484,7 @@ def _render_competition_orc_report() -> None:
             file_name=report.additional_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="admin_orc_download_extra",
+            on_click="ignore",
         )
 
 
@@ -1575,6 +1580,7 @@ def _render_trial_judge_report() -> None:
             file_name=name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"admin_tj_download_{name}",
+            on_click="ignore",
         )
 
 
