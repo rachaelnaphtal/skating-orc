@@ -33,6 +33,17 @@ def test_parse_service_account_json_with_real_newlines_in_private_key():
     assert out["project_id"] == "p"
 
 
+def test_signed_gcs_download_url_requires_credentials():
+    from gcp_interactions_helper import (
+        _download_object_filename,
+        signed_gcs_download_url,
+    )
+
+    assert _download_object_filename(r'../Report "name".xlsx') == "Report name.xlsx"
+    with pytest.raises(RuntimeError, match="GCS_SERVICE_ACCOUNT_JSON"):
+        signed_gcs_download_url(b"abc", "report.xlsx", content_type="application/octet-stream")
+
+
 def test_service_account_info_from_env_invalid_json_returns_none(monkeypatch):
     monkeypatch.setenv("GCS_SERVICE_ACCOUNT_JSON", '{"type": broken}')
     assert service_account_info_from_env() is None

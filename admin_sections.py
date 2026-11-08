@@ -1280,6 +1280,55 @@ def render_international_requirement_rules() -> None:
                 st.info("No changes to save.")
 
 
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _publish_report_files(files: list[tuple[str, bytes]]) -> list[str]:
+    """
+    Signed Cloud Storage URLs for these workbooks.
+
+    On Heroku the browser download is a separate request and can hit a dyno
+    that never built the file. A storage URL works from either dyno. Locally,
+    with no service account, the list is empty strings and the page falls
+    back to an in-memory download button.
+    """
+    from gcs_credentials import service_account_info_from_env
+
+    if not service_account_info_from_env():
+        if os.environ.get("DYNO"):
+            raise RuntimeError(
+                "GCS_SERVICE_ACCOUNT_JSON is not set, so this report cannot be "
+                "downloaded while more than one web dyno is running."
+            )
+        return [""] * len(files)
+    from gcp_interactions_helper import signed_gcs_download_url
+
+    return [
+        signed_gcs_download_url(data, name, content_type=_XLSX_MIME)
+        for name, data in files
+    ]
+
+
+def _report_download_control(
+    label: str,
+    filename: str,
+    data: bytes,
+    key: str,
+    url: str,
+) -> None:
+    if url:
+        st.link_button(label, url)
+        return
+    st.download_button(
+        label,
+        data=data,
+        file_name=filename,
+        mime=_XLSX_MIME,
+        key=key,
+        on_click="ignore",
+    )
+
+
 def render_generate_reports() -> None:
     """ORC and trial-judge workbooks. Competition reports use stored scores, not a results URL."""
     st.subheader("Generate reports")
@@ -1448,14 +1497,21 @@ def _render_competition_orc_report() -> None:
                         st.session_state.get("admin_orc_extra_analysis")
                     ),
                 )
-        except Exception as exc:
-            session.rollback()
-            st.error(str(exc))
-        else:
+                files = [(report.filename, report.workbook)]
+                if report.additional_workbook and report.additional_filename:
+                    files.append(
+                        (report.additional_filename, report.additional_workbook)
+                    )
+                urls = _publish_report_files(files)
             st.session_state["admin_orc_download"] = {
                 "competition": selected_label,
                 "report": report,
+                "main_url": urls[0] if urls else "",
+                "extra_url": urls[1] if len(urls) > 1 else "",
             }
+        except Exception as exc:
+            session.rollback()
+            st.error(str(exc))
 
     download = st.session_state.get("admin_orc_download")
     if not download:
@@ -1466,25 +1522,22 @@ def _render_competition_orc_report() -> None:
     )
     if report.warnings:
         st.warning("\n".join(report.warnings))
-    # A click must not rerun the app. Heroku's router drops the file request
-    # when that rerun holds the process, and the browser reports the file
-    # was not available.
-    st.download_button(
+    if download.get("main_url"):
+        st.caption("Download links stay valid for 2 hours.")
+    _report_download_control(
         f"Download {report.filename}",
-        data=report.workbook,
-        file_name=report.filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="admin_orc_download_main",
-        on_click="ignore",
+        report.filename,
+        report.workbook,
+        "admin_orc_download_main",
+        download.get("main_url") or "",
     )
     if report.additional_workbook and report.additional_filename:
-        st.download_button(
+        _report_download_control(
             f"Download {report.additional_filename}",
-            data=report.additional_workbook,
-            file_name=report.additional_filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="admin_orc_download_extra",
-            on_click="ignore",
+            report.additional_filename,
+            report.additional_workbook,
+            "admin_orc_download_extra",
+            download.get("extra_url") or "",
         )
 
 
@@ -1560,9 +1613,13 @@ def _render_trial_judge_report() -> None:
                             for path in sorted(folder.glob("*.xlsx"))
                             if path.name not in uploaded_names
                         ]
+                        urls = _publish_report_files(files)
                 st.session_state["admin_tj_download"] = {
                     "judges": judge_names,
-                    "files": files,
+                    "files": [
+                        {"name": name, "data": data, "url": url}
+                        for (name, data), url in zip(files, urls)
+                    ],
                 }
             except Exception as exc:
                 st.error(str(exc))
@@ -1573,14 +1630,17 @@ def _render_trial_judge_report() -> None:
     if not download:
         return
     st.success(f"Found trial judge names: {', '.join(download['judges'])}")
-    for name, data in download["files"]:
-        st.download_button(
+    for item in download["files"]:
+        if isinstance(item, tuple):
+            name, data, url = item[0], item[1], ""
+        else:
+            name, data, url = item["name"], item.get("data") or b"", item.get("url") or ""
+        _report_download_control(
             f"Download {name}",
-            data=data,
-            file_name=name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"admin_tj_download_{name}",
-            on_click="ignore",
+            name,
+            data,
+            f"admin_tj_download_{name}",
+            url,
         )
 
 
