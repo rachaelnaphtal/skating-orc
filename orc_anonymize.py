@@ -82,9 +82,10 @@ def anonymize_orc_workbook(workbook: Workbook, mapping: dict[str, str]) -> None:
     """
     Show ``Judge N`` wherever an official's name is printed.
 
-    Segment rows drop the panel-seat prefix so the same person has one label
-    on every sheet. Skater names are left as written, even when they match
-    an official.
+    On a segment sheet the panel seat stays in front, as in ``J1-Judge 7``:
+    seat 1 on that event, and Judge 7 for the competition. The summary sheet
+    uses ``Judge 7`` alone, because the seat changes from event to event.
+    Skater names are left as written, even when they match an official.
     """
     for sheet in workbook.worksheets:
         bare_names = sheet.title == _SUMMARY_SHEET
@@ -96,10 +97,11 @@ def anonymize_orc_workbook(workbook: Workbook, mapping: dict[str, str]) -> None:
                 match = _PANEL_LABEL.match(value)
                 if match:
                     official = match.group(2)
+                    seat = match.group(1)
                     if official in mapping:
-                        cell.value = mapping[official]
+                        cell.value = f"J{seat}-{mapping[official]}"
                     elif _ANONYMOUS_LABEL.match(official):
-                        cell.value = official
+                        cell.value = f"J{seat}-{official}"
                     continue
                 if (
                     bare_names

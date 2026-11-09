@@ -30,7 +30,7 @@ def test_a_skater_who_shares_an_official_name_stays_named():
         main, None, ["Ann Smith", "Bob Smith"]
     )
     sheet = _segment_sheet(openpyxl.load_workbook(BytesIO(main)), "SHORT")
-    assert sheet["A6"].value == "Judge 1"
+    assert sheet["A6"].value == "J1-Judge 1"
     assert sheet["D6"].value == "Ann Smith"
 
 
@@ -82,15 +82,14 @@ def test_anonymized_workbook_uses_one_label_per_official_and_writes_a_key():
     book = openpyxl.load_workbook(BytesIO(main))
     short = _segment_sheet(book, "SHORT")
     free = _segment_sheet(book, "FREE")
-    assert short["A6"].value == "Judge 1"
-    assert short["A7"].value == "Judge 2"
+    assert short["A6"].value == "J1-Judge 1"
+    assert short["A7"].value == "J2-Judge 2"
     assert short["D6"].value == "Skater One"
-    assert free["A6"].value == "Judge 2"
-    assert free["A7"].value == "Judge 1"
+    assert free["A6"].value == "J1-Judge 2"
+    assert free["A7"].value == "J2-Judge 1"
     assert book["Summary"]["D6"].value == "Judge 1"
     assert book["Summary"]["H6"].value == "Judge 2"
     assert _cell_text(book).isdisjoint({"Ann Smith", "Bob Smith"})
-    assert not any(value.startswith("J1-") or value.startswith("J2-") for value in _cell_text(book))
 
     extra_book = openpyxl.load_workbook(BytesIO(extra))
     assert set(_column_values(extra_book["All Elements"], "Judge Name")) == {
