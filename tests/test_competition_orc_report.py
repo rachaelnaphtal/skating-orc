@@ -76,6 +76,7 @@ def test_workbook_flags_rule_error_for_the_panel_judge():
     assert sheet["C6"].value == "Max with errors is -3"
     assert sheet["E6"].value == "3F"
     assert workbook["Summary"]["A1"].value == "Eastern Sectional"
+    assert workbook["Summary"].freeze_panes == "D8"
 
 
 def test_judge_filter_drops_other_panel_judges():

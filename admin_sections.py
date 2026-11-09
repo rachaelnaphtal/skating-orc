@@ -1382,6 +1382,7 @@ def _render_competition_orc_report() -> None:
               Example: ``(?i).*(Novice|Junior|Senior).*(Women|Men|Pairs).*``
             - **Only show rule errors**: the workbook lists only GOEs that are mathematically impossible.
             - **Judge filter**: exact stored judge names, separated by commas, semicolons, or new lines.
+            - **Hide official names**: every sheet shows Judge 1, Judge 2, and so on. A separate key file maps those labels back to names.
             """
         )
 
@@ -1452,6 +1453,14 @@ def _render_competition_orc_report() -> None:
         key="admin_orc_extra_analysis",
         help="Also generate a workbook of the percentage of scores in range.",
     )
+    st.checkbox(
+        "Hide official names?",
+        key="admin_orc_anonymize_judges",
+        help=(
+            "Show Judge 1, Judge 2, and so on, in alphabetical order, on every sheet. "
+            "A separate key file maps each label back to the official's name."
+        ),
+    )
 
     session = get_analytics_safe().session
     event_regex = effective_event_regex(custom_regex, levels, disciplines)
@@ -1496,18 +1505,27 @@ def _render_competition_orc_report() -> None:
                     add_additional_analysis=bool(
                         st.session_state.get("admin_orc_extra_analysis")
                     ),
+                    anonymize_judges=bool(
+                        st.session_state.get("admin_orc_anonymize_judges")
+                    ),
                 )
                 files = [(report.filename, report.workbook)]
                 if report.additional_workbook and report.additional_filename:
                     files.append(
                         (report.additional_filename, report.additional_workbook)
                     )
+                if report.key_workbook and report.key_filename:
+                    files.append((report.key_filename, report.key_workbook))
                 urls = _publish_report_files(files)
+                url_by_name = {
+                    name: url for (name, _data), url in zip(files, urls)
+                }
             st.session_state["admin_orc_download"] = {
                 "competition": selected_label,
                 "report": report,
-                "main_url": urls[0] if urls else "",
-                "extra_url": urls[1] if len(urls) > 1 else "",
+                "main_url": url_by_name.get(report.filename, ""),
+                "extra_url": url_by_name.get(report.additional_filename or "", ""),
+                "key_url": url_by_name.get(report.key_filename or "", ""),
             }
         except Exception as exc:
             session.rollback()
@@ -1538,6 +1556,18 @@ def _render_competition_orc_report() -> None:
             report.additional_workbook,
             "admin_orc_download_extra",
             download.get("extra_url") or "",
+        )
+    if report.key_workbook and report.key_filename:
+        st.caption(
+            "The key file lists each Judge number and the official's name. "
+            "Keep it separate from the report."
+        )
+        _report_download_control(
+            f"Download {report.key_filename}",
+            report.key_filename,
+            report.key_workbook,
+            "admin_orc_download_key",
+            download.get("key_url") or "",
         )
 
 

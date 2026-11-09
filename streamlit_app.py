@@ -75,7 +75,8 @@ def createCompetitionReportLayout():
     There are a couple of options:
 
                     -  **Include only some events**: Either use the quick level/discipline picks (no typing) or enter a custom event regex. Example custom: ``.*(Novice|Junior|Senior).*(Women|Men|Pairs).*`` for singles/pairs at novice and above.
-    -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
+                    -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
+                    -  **Hide official names**: every sheet shows Judge 1, Judge 2, and so on. A separate key file maps those labels back to names.
                     """)
     with st.form("options_form", border=False):
         st.text_input(
@@ -128,6 +129,14 @@ def createCompetitionReportLayout():
             "Add extra analysis sheet?",
             help="Whether to also generate an analysis sheet for percentage of scores in range.",
             key="generate_analysis_sheet",
+        )
+        st.checkbox(
+            "Hide official names?",
+            help=(
+                "Show Judge 1, Judge 2, and so on, in alphabetical order, on every sheet. "
+                "A separate key file maps each label back to the official's name."
+            ),
+            key="anonymize_judges",
         )
         st.form_submit_button(
             "Generate Report", on_click=generate_full_competition_report
@@ -277,6 +286,7 @@ def generate_full_competition_report():
     only_include_errors = st.session_state["only_include_errors"]
     folder_name = LOCAL_RESULTS_FILES_PATH
     generate_analysis_sheet = st.session_state["generate_analysis_sheet"]
+    anonymize_judges = bool(st.session_state.get("anonymize_judges"))
     if USE_GCP:
         folder_name = GCP_RESULTS_FILES_PATH
     downloadResults.scrape(
@@ -290,6 +300,7 @@ def generate_full_competition_report():
         only_rule_errors=only_include_errors,
         add_additional_analysis=generate_analysis_sheet,
         isFSM=isFSM,
+        anonymize_judges=anonymize_judges,
     )
 
     if USE_GCP:
@@ -301,6 +312,16 @@ def generate_full_competition_report():
             add_download_link_gcp(
                 f"{report_name_value}_Additional_Analysis",
                 "Competition ORC Report",
+                extension="xlsx",
+            )
+        if anonymize_judges:
+            st.caption(
+                "The key file lists each Judge number and the official's name. "
+                "Keep it separate from the report."
+            )
+            add_download_link_gcp(
+                f"{report_name_value}_Judge_Key",
+                "Judge name key",
                 extension="xlsx",
             )
 
@@ -320,6 +341,19 @@ def generate_full_competition_report():
                     label=f"Download Competition Summary Report- {report_name_value} Additional Analysis",
                     data=file,
                     file_name=f"{report_name_value}_Additional_Analysis.xlsx",
+                    mime="application/vnd.ms-excel",
+                )
+        if anonymize_judges:
+            key_path = f"{LOCAL_RESULTS_FILES_PATH}{report_name_value}_Judge_Key.xlsx"
+            st.caption(
+                "The key file lists each Judge number and the official's name. "
+                "Keep it separate from the report."
+            )
+            with open(key_path, "rb") as file:
+                st.download_button(
+                    label=f"Download judge name key- {report_name_value}",
+                    data=file,
+                    file_name=f"{report_name_value}_Judge_Key.xlsx",
                     mime="application/vnd.ms-excel",
                 )
 

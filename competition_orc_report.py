@@ -39,6 +39,8 @@ class CompetitionOrcReport:
     workbook: bytes
     additional_filename: str | None = None
     additional_workbook: bytes | None = None
+    key_filename: str | None = None
+    key_workbook: bytes | None = None
     segment_names: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -399,6 +401,7 @@ def generate_competition_orc_report(
     judge_filter: str = "",
     only_rule_errors: bool = False,
     add_additional_analysis: bool = False,
+    anonymize_judges: bool = False,
 ) -> CompetitionOrcReport:
     """Build an ORC workbook for one competition from stored element and PCS scores."""
     pattern = compile_event_regex(event_regex)
@@ -463,6 +466,19 @@ def generate_competition_orc_report(
         competition_end_date=competition.end_date,
         competition_year=competition.year,
     )
+    key_filename = None
+    key_workbook = None
+    if anonymize_judges:
+        from orc_anonymize import anonymize_report_workbooks, relabel_official_names
+
+        panel_names = [name for _event, judges, _elements, _pcs in prepared for name in judges]
+        workbook, additional, key_workbook, mapping = anonymize_report_workbooks(
+            workbook,
+            additional,
+            panel_names,
+        )
+        key_filename = f"{filename}_Judge_Key.xlsx"
+        warnings = [relabel_official_names(note, mapping) for note in warnings]
     return CompetitionOrcReport(
         filename=f"{filename}.xlsx",
         workbook=workbook,
@@ -470,6 +486,8 @@ def generate_competition_orc_report(
             f"{filename}_Additional_Analysis.xlsx" if additional else None
         ),
         additional_workbook=additional,
+        key_filename=key_filename,
+        key_workbook=key_workbook,
         segment_names=included,
         warnings=warnings,
     )

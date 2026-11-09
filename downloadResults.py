@@ -521,7 +521,7 @@ def make_competition_summary_page(
     wrap_text = Alignment(wrap_text=True)
     vertical_text = Alignment(textRotation=90)
 
-    # sheet.freeze_panes("D1")
+    sheet.freeze_panes = "D8"
     sheet.cell(1, 1, value=report_name)
     sheet.cell(1, 1).font = bold
     sheet.cell(2, 1, value="Official's Review Summary")
@@ -806,6 +806,22 @@ def loadInfoForExistingCompetitions():
 
 
 
+def _anonymize_finished_orc_workbook(workbook, element_frame, pcs_frame):
+    """Replace official names on a finished ORC workbook. Returns the label map."""
+    from orc_anonymize import (
+        anonymize_orc_workbook,
+        assign_anonymous_judge_labels,
+        judge_names_from_frames,
+        judge_names_from_orc_workbook,
+    )
+
+    names = judge_names_from_orc_workbook(workbook)
+    names.extend(judge_names_from_frames(element_frame, pcs_frame))
+    mapping = assign_anonymous_judge_labels(names)
+    anonymize_orc_workbook(workbook, mapping)
+    return mapping
+
+
 def scrape(
     base_url,
     report_name,
@@ -837,6 +853,7 @@ def scrape(
     verbose: bool = False,
     log_file: str | None = None,
     configure_logging: bool = True,
+    anonymize_judges: bool = False,
 ):
     """
     When ``write_to_database`` is true, each ``public.segment`` row is named from the score
@@ -872,6 +889,10 @@ def scrape(
 
     When ``commit_per_segment`` is false, the DB commits once at the end of this scrape
   (``DatabaseLoader(defer_commits=True)``); apps leave the default true.
+
+    When ``anonymize_judges`` is true and ``write_excel`` is true, official names in the
+    workbooks are replaced with ``Judge 1``, ``Judge 2``, and so on. A ``{report}_Judge_Key.xlsx``
+    file maps those labels back to names. Stored scores keep the real names.
 
     Logging: default console INFO; ``quiet=True`` (WARNING+ only); ``verbose=True`` (DEBUG).
     Set ``configure_logging=False`` when the caller already configured logging (batch CSV).
@@ -937,6 +958,7 @@ def scrape(
         workbook = openpyxl.Workbook()
         agg_all_element_df = None
         agg_all_pcs_df = None
+        judge_label_map = None
 
         competition_id = 0
         proccessed_segments = []
@@ -1206,6 +1228,10 @@ def scrape(
                 make_competition_summary_page(
                     workbook, report_name, event_details, judge_errors
                 )
+                if anonymize_judges:
+                    judge_label_map = _anonymize_finished_orc_workbook(
+                        workbook, agg_all_element_df, agg_all_pcs_df
+                    )
         else:
             note_warning(f"Failed to get page contents for {url!r}")
 
@@ -1215,8 +1241,26 @@ def scrape(
                 save_gcp_workbook(workbook, excel_path)
             else:
                 workbook.save(excel_path)
+            if judge_label_map is not None:
+                from orc_anonymize import build_judge_key_workbook
+
+                key_path = f"{excel_folder}{report_name}_Judge_Key.xlsx"
+                key_book = build_judge_key_workbook(judge_label_map)
+                if use_gcp:
+                    save_gcp_workbook(key_book, key_path)
+                else:
+                    key_book.save(key_path)
 
         if add_additional_analysis:
+            if judge_label_map:
+                from orc_anonymize import remap_judge_name_column
+
+                agg_all_element_df = remap_judge_name_column(
+                    agg_all_element_df, judge_label_map
+                )
+                agg_all_pcs_df = remap_judge_name_column(
+                    agg_all_pcs_df, judge_label_map
+                )
             create_additional_analysis_sheet(
                 agg_all_element_df,
                 agg_all_pcs_df,
