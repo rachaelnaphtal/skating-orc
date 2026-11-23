@@ -4,8 +4,8 @@ from io import BytesIO
 import downloadResults
 from event_regex_presets import (
     DISCIPLINE_CHOICES,
-    LEVEL_CHOICES,
-    effective_event_regex,
+    ORC_LEVEL_CHOICES,
+    orc_event_filters,
 )
 from openpyxl import load_workbook
 from st_files_connection import FilesConnection
@@ -74,7 +74,7 @@ def createCompetitionReportLayout():
     This creates a report to analyze the deviations found in a competition. It is meant to then be used by review captains to decide on which deviations are errors for a given competition.
     There are a couple of options:
 
-                    -  **Include only some events**: Either use the quick level/discipline picks (no typing) or enter a custom event regex. Example custom: ``.*(Novice|Junior|Senior).*(Women|Men|Pairs).*`` for singles/pairs at novice and above.
+                    -  **Include only some events**: Either use the quick level/discipline picks (no typing) or enter a custom event regex. Levels are Juvenile, Intermediate, Novice, Junior, and Senior, read from the event name. Example custom: ``.*(Novice|Junior|Senior).*(Women|Men|Pairs).*`` for singles/pairs at novice and above.
                     -  **Only show rule errors**: In this mode, only GOEs that are mathematically impossible will be shown on the final report.
                     -  **Hide official names**: every sheet shows Judge 1, Judge 2, and so on. A separate key file maps those labels back to names.
                     """)
@@ -86,14 +86,20 @@ def createCompetitionReportLayout():
             "Results URL for competition (for example:https://ijs.usfigureskating.org/leaderboard/results/2025/34240/index.asp).",
             key="url",
         )
+        saved_levels = st.session_state.get("event_regex_levels") or []
+        valid_levels = [
+            level for level in saved_levels if level in ORC_LEVEL_CHOICES
+        ]
+        if list(saved_levels) != valid_levels:
+            st.session_state["event_regex_levels"] = valid_levels
         st.multiselect(
             "Quick filter: event level (optional)",
-            list(LEVEL_CHOICES),
+            list(ORC_LEVEL_CHOICES),
             default=[],
             key="event_regex_levels",
             help=(
-                "Novice / Junior / Senior in the segment label (case-insensitive). "
-                "Senior also matches *Championship*."
+                "Matched from the event name. Senior also includes Championship Men. "
+                "Leave blank for every event."
             ),
         )
         st.multiselect(
@@ -277,7 +283,7 @@ def generate_full_competition_report():
     url = results_url_for_storage(url)
     isFSM = is_fsm_results_url(url)
     report_name_value = st.session_state["report_name"]
-    event_regex = effective_event_regex(
+    event_regex, level_filter = orc_event_filters(
         st.session_state.get("event_regex_custom", ""),
         st.session_state.get("event_regex_levels") or (),
         st.session_state.get("event_regex_disciplines") or (),
@@ -301,6 +307,7 @@ def generate_full_competition_report():
         add_additional_analysis=generate_analysis_sheet,
         isFSM=isFSM,
         anonymize_judges=anonymize_judges,
+        level_filter=level_filter,
     )
 
     if USE_GCP:

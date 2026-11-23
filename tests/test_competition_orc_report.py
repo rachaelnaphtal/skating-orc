@@ -75,8 +75,21 @@ def test_workbook_flags_rule_error_for_the_panel_judge():
     assert sheet["A6"].value == "J1- Ann Smith"
     assert sheet["C6"].value == "Max with errors is -3"
     assert sheet["E6"].value == "3F"
+    judge_header = max(cell.row for cell in sheet["A"] if cell.value == "Judge")
+    assert sheet.cell(judge_header - 1, 1).value == "SUMMARY"
+    assert sheet.cell(judge_header - 1, 1).font.bold
+    first_judge = judge_header + 1
+    error_end = judge_header - 2
+    assert sheet.cell(first_judge, 1).value == "J1- Ann Smith"
+    assert sheet.cell(first_judge, 2).value == (
+        f"=COUNTIF(A$6:A${error_end},A{first_judge})"
+    )
+    assert sheet.cell(first_judge, 3).value == (
+        f'=COUNTIFS(A$6:A${error_end},A{first_judge},G$6:G${error_end},"YES")'
+    )
     assert workbook["Summary"]["A1"].value == "Eastern Sectional"
     assert workbook["Summary"].freeze_panes == "D8"
+    assert workbook["Summary"]["E9"].value == f"='{sheet.title}'!C{first_judge}"
 
 
 def test_judge_filter_drops_other_panel_judges():

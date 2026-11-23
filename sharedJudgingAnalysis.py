@@ -101,6 +101,7 @@ def categorizeElement(element):
         element = element.replace("+SqTwM", "")
         element = element.replace("+MiStM", "")
         element = element.replace("+pSTwM", "")
+        element = element.replace("+pStwM", "")
         element = element.replace("+SqTwM", "")
         element = element.replace("+fm", "")
         element = element.replace("+d", "")
@@ -146,6 +147,7 @@ def categorizeElement(element):
         "B": "Linear/Rotating",
         "W": "Linear/Rotating",
         "Cr": "Creative",
+        "CrD": "Creative",
         "CrL": "Creative",
         "CrI": "Creative",
         "GL": "Group Lift",
@@ -167,6 +169,7 @@ def categorizeElement(element):
         "DiStW": "Step Sequence",
         "MiStW": "Step Sequence",
         "pSTwW": "Twizzle",
+        "pStwW": "Twizzle",
         "CiStW": "Step Sequence",
         "SoPSt": "Step Sequence",
         "NtSeSt":"Step Sequence",

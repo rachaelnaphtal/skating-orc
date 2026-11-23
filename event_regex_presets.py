@@ -6,6 +6,14 @@ import re
 from typing import Iterable
 
 LEVEL_CHOICES = ("Novice", "Junior", "Senior")
+# Shared by both ORC report screens. Matched from the event name or stored level.
+ORC_LEVEL_CHOICES = (
+    "Juvenile",
+    "Intermediate",
+    "Novice",
+    "Junior",
+    "Senior",
+)
 DISCIPLINE_CHOICES = ("Singles", "Pairs", "Dance")
 
 
@@ -72,6 +80,25 @@ def build_event_regex_from_presets(
     if not lookaheads:
         return ""
     return "(?i)" + "".join(lookaheads) + ".*"
+
+
+def orc_event_filters(
+    custom: str,
+    levels: Iterable[str],
+    disciplines: Iterable[str],
+) -> tuple[str, tuple[str, ...]]:
+    """Name regex and level labels for an ORC report.
+
+    A custom regex replaces the level and discipline picks. Otherwise the regex
+    carries only the discipline preset, and levels are matched as segment levels.
+    """
+    custom_text = (custom or "").strip()
+    if custom_text:
+        return custom_text, ()
+    selected = tuple(
+        str(level).strip() for level in (levels or ()) if str(level).strip()
+    )
+    return effective_event_regex("", (), disciplines), selected
 
 
 def effective_event_regex(

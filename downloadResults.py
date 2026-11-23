@@ -121,6 +121,7 @@ def processEvent(
     competition_start_date=None,
     competition_end_date=None,
     competition_year=None,
+    level_filter=None,
 ):
     pdf_path = f"{pdf_folder}{eventName}.pdf"
     if isFSM:
@@ -144,6 +145,7 @@ def processEvent(
             competition_start_date=competition_start_date,
             competition_end_date=competition_end_date,
             competition_year=competition_year,
+            level_filter=level_filter,
         )
     if use_html:
         return judgingParsing.extract_judge_scores(
@@ -164,6 +166,7 @@ def processEvent(
             competition_start_date=competition_start_date,
             competition_end_date=competition_end_date,
             competition_year=competition_year,
+            level_filter=level_filter,
         )
     if pdf_browser is not None and pdf_loop is not None:
         pdf_loop.run_until_complete(
@@ -188,6 +191,7 @@ def processEvent(
         competition_start_date=competition_start_date,
         competition_end_date=competition_end_date,
         competition_year=competition_year,
+        level_filter=level_filter,
     )
 
 
@@ -854,6 +858,7 @@ def scrape(
     log_file: str | None = None,
     configure_logging: bool = True,
     anonymize_judges: bool = False,
+    level_filter=None,
 ):
     """
     When ``write_to_database`` is true, each ``public.segment`` row is named from the score
@@ -893,6 +898,9 @@ def scrape(
     When ``anonymize_judges`` is true and ``write_excel`` is true, official names in the
     workbooks are replaced with ``Judge 1``, ``Judge 2``, and so on. A ``{report}_Judge_Key.xlsx``
     file maps those labels back to names. Stored scores keep the real names.
+
+    ``level_filter`` keeps events whose classified level is in that list. An empty filter
+    keeps every event that matches ``event_regex``.
 
     Logging: default console INFO; ``quiet=True`` (WARNING+ only); ``verbose=True`` (DEBUG).
     Set ``configure_logging=False`` when the caller already configured logging (batch CSV).
@@ -1040,6 +1048,7 @@ def scrape(
                             competition_start_date=competition_start_date,
                             competition_end_date=competition_end_date,
                             competition_year=competition_year,
+                            level_filter=level_filter,
                         )
                     except Exception as exc:
                         note_warning(
@@ -1173,6 +1182,7 @@ def scrape(
                         competition_start_date=competition_start_date,
                         competition_end_date=competition_end_date,
                         competition_year=competition_year,
+                        level_filter=level_filter,
                     )
                     segment_official_rows = None
                     segment_db_key = None

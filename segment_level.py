@@ -450,6 +450,103 @@ def classify_segment_level(
     return SegmentLevelResult(LEVEL_UNSPECIFIED, SOURCE_UNSPECIFIED)
 
 
+# Picker order for reports: beginning levels, then standard, Excel, adult, and dance.
+_LEVEL_DISPLAY_ORDER: tuple[str, ...] = (
+    LEVEL_NO_TEST,
+    LEVEL_LTS,
+    LEVEL_ASPIRE,
+    LEVEL_UNIFIED,
+    LEVEL_PRE_PRELIMINARY,
+    LEVEL_PRELIMINARY,
+    LEVEL_PRE_JUVENILE,
+    LEVEL_JUVENILE,
+    LEVEL_INTERMEDIATE,
+    LEVEL_NOVICE,
+    LEVEL_JUNIOR,
+    LEVEL_SENIOR,
+    LEVEL_BASIC_NOVICE,
+    LEVEL_INTERMEDIATE_NOVICE,
+    LEVEL_ADVANCED_NOVICE,
+    LEVEL_EXCEL_BEGINNER,
+    LEVEL_EXCEL_HIGH_BEGINNER,
+    LEVEL_EXCEL_PRELIMINARY,
+    LEVEL_EXCEL_PRELIMINARY_PLUS,
+    LEVEL_EXCEL_PRE_JUVENILE,
+    LEVEL_EXCEL_PRE_JUVENILE_PLUS,
+    LEVEL_EXCEL_JUVENILE,
+    LEVEL_EXCEL_INTERMEDIATE,
+    LEVEL_EXCEL_NOVICE,
+    LEVEL_EXCEL_JUNIOR,
+    LEVEL_EXCEL_SENIOR,
+    LEVEL_ADULT,
+    LEVEL_MASTERS,
+    LEVEL_COLLEGIATE,
+    LEVEL_OPEN_ADULT,
+    LEVEL_OPEN_MASTERS,
+    LEVEL_OPEN_COLLEGIATE,
+    LEVEL_OPEN_JUVENILE,
+    LEVEL_OPEN_LEVEL,
+    LEVEL_MIXED_AGE,
+    LEVEL_PRE_BRONZE,
+    LEVEL_BRONZE,
+    LEVEL_PRE_SILVER,
+    LEVEL_SILVER,
+    LEVEL_PRE_GOLD,
+    LEVEL_GOLD,
+    LEVEL_INTERNATIONAL,
+)
+
+
+def known_segment_levels() -> tuple[str, ...]:
+    """Every standard ``segment.level`` label, in report-picker order."""
+    return _LEVEL_DISPLAY_ORDER
+
+
+def sort_segment_levels(levels) -> list[str]:
+    """Drop blanks and ``Unspecified``. Known labels stay in picker order."""
+    order = {name: index for index, name in enumerate(_LEVEL_DISPLAY_ORDER)}
+    unique: list[str] = []
+    seen: set[str] = set()
+    for level in levels or ():
+        text = str(level or "").strip()
+        if not text or text == LEVEL_UNSPECIFIED or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    unique.sort(key=lambda name: (order.get(name, len(order)), name.casefold()))
+    return unique
+
+
+def resolved_segment_level(
+    segment_name: str,
+    stored_level: str | None = None,
+    *,
+    competition_name: str = "",
+    international: bool = False,
+    discipline_type_id: int | None = None,
+) -> str:
+    """Stored ``segment.level`` when it is set; otherwise classify the name."""
+    stored = str(stored_level or "").strip()
+    if stored and stored != LEVEL_UNSPECIFIED:
+        return stored
+    return classify_segment_level(
+        segment_name,
+        competition_name=competition_name or "",
+        international=bool(international),
+        discipline_type_id=discipline_type_id,
+    ).level
+
+
+def event_name_matches_levels(event_name: str, levels) -> bool:
+    """True when ``levels`` is empty or the event name classifies as one of them."""
+    selected = {str(level).strip() for level in levels or () if str(level).strip()}
+    if not selected:
+        return True
+    return (
+        classify_segment_level(event_name or "").level in selected
+    )
+
+
 def classify_segment_level_for_row(
     segment_name: str,
     competition_name: str,

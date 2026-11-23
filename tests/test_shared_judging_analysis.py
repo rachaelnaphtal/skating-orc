@@ -100,6 +100,8 @@ def test_categorize_element_jumps_without_revolution_prefix():
         ("SlLi4", "Lift"),
         ("RoLi4", "Lift"),
         ("1RW4+kpYYY", "Pattern dance"),
+        ("CrD1", "Creative"),
+        ("pStwW4+pStwM4", "Twizzle"),
         ("SyTwW4", "Twizzle"),
         ("SqTwW4", "Twizzle"),
         ("CiStW3", "Step Sequence"),

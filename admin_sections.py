@@ -1359,18 +1359,19 @@ def render_generate_reports() -> None:
 def _render_competition_orc_report() -> None:
     from event_regex_presets import (
         DISCIPLINE_CHOICES,
-        LEVEL_CHOICES,
-        effective_event_regex,
+        ORC_LEVEL_CHOICES,
+        orc_event_filters,
     )
 
     from competition_orc_report import (
         competition_judge_names,
-        competition_segment_names,
+        competition_segment_filter_rows,
         compile_event_regex,
         generate_competition_orc_report,
         safe_report_filename,
-        segment_matches_event_regex,
+        segment_passes_orc_filters,
     )
+    from models import Competition
 
     with st.expander("See more details"):
         st.markdown(
@@ -1379,7 +1380,7 @@ def _render_competition_orc_report() -> None:
             Segments, judges, and scores come from the database.
 
             - **Include only some events**: use the level and discipline picks, or a custom event regex.
-              Example: ``(?i).*(Novice|Junior|Senior).*(Women|Men|Pairs).*``
+              Levels are Juvenile, Intermediate, Novice, Junior, and Senior. Example: ``(?i).*(Novice|Junior|Senior).*(Women|Men|Pairs).*``
             - **Only show rule errors**: the workbook lists only GOEs that are mathematically impossible.
             - **Judge filter**: exact stored judge names, separated by commas, semicolons, or new lines.
             - **Hide official names**: every sheet shows Judge 1, Judge 2, and so on. A separate key file maps those labels back to names.
@@ -1414,14 +1415,18 @@ def _render_competition_orc_report() -> None:
         "Report Name (aka the name of the output file)",
         key="admin_orc_report_name",
     )
+    saved_levels = st.session_state.get("admin_orc_levels") or []
+    valid_levels = [level for level in saved_levels if level in ORC_LEVEL_CHOICES]
+    if list(saved_levels) != valid_levels:
+        st.session_state["admin_orc_levels"] = valid_levels
     levels = st.multiselect(
         "Quick filter: event level (optional)",
-        list(LEVEL_CHOICES),
+        list(ORC_LEVEL_CHOICES),
         default=[],
         key="admin_orc_levels",
         help=(
-            "Novice / Junior / Senior in the segment label. "
-            "Senior also matches Championship Men, not Championship Juvenile or Intermediate."
+            "Juvenile, Intermediate, Novice, Junior, or Senior. "
+            "Senior also includes Championship Men. Leave blank for every level."
         ),
     )
     disciplines = st.multiselect(
@@ -1463,22 +1468,33 @@ def _render_competition_orc_report() -> None:
     )
 
     session = get_analytics_safe().session
-    event_regex = effective_event_regex(custom_regex, levels, disciplines)
+    event_regex, selected_levels = orc_event_filters(custom_regex, levels, disciplines)
     regex_error = ""
     try:
         event_regex = compile_event_regex(event_regex)
     except re.error as exc:
         regex_error = f"Event regex is not valid: {exc}"
-    segment_names = competition_segment_names(session, selected_id)
+    competition = session.get(Competition, selected_id)
+    segment_rows = competition_segment_filter_rows(session, selected_id)
     if regex_error:
         st.error(regex_error)
         matching = []
     else:
         matching = [
-            name for name in segment_names if segment_matches_event_regex(name, event_regex)
+            name
+            for name, stored_level, discipline_type_id in segment_rows
+            if segment_passes_orc_filters(
+                name,
+                event_regex=event_regex,
+                levels=selected_levels,
+                stored_level=stored_level,
+                competition_name=(competition.name if competition else "") or "",
+                international=bool(competition.international) if competition else False,
+                discipline_type_id=discipline_type_id,
+            )
         ]
         st.caption(
-            f"{len(matching)} of {len(segment_names)} stored segments match this filter."
+            f"{len(matching)} of {len(segment_rows)} stored segments match this filter."
         )
     if matching:
         with st.expander("Segments that will be included"):
@@ -1500,6 +1516,7 @@ def _render_competition_orc_report() -> None:
                     selected_id,
                     report_name,
                     event_regex=event_regex,
+                    levels=selected_levels,
                     judge_filter=st.session_state.get("admin_orc_judge_filter") or "",
                     only_rule_errors=bool(st.session_state.get("admin_orc_errors_only")),
                     add_additional_analysis=bool(

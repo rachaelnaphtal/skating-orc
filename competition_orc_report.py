@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database_loader import judge_person_match_key, normalize_scraped_judge_name
+from segment_level import resolved_segment_level
 from models import (
     Competition,
     Element,
@@ -61,6 +62,34 @@ def segment_matches_event_regex(name: str, event_regex: str) -> bool:
     if not pattern:
         return True
     return re.match(pattern, name) is not None
+
+
+def segment_passes_orc_filters(
+    name: str,
+    *,
+    event_regex: str,
+    levels=(),
+    stored_level: str | None = None,
+    competition_name: str = "",
+    international: bool = False,
+    discipline_type_id: int | None = None,
+) -> bool:
+    """Name regex first, then an exact segment-level match when levels are selected."""
+    if not segment_matches_event_regex(name, event_regex):
+        return False
+    selected = {str(level).strip() for level in levels or () if str(level).strip()}
+    if not selected:
+        return True
+    return (
+        resolved_segment_level(
+            name,
+            stored_level,
+            competition_name=competition_name,
+            international=international,
+            discipline_type_id=discipline_type_id,
+        )
+        in selected
+    )
 
 
 def compile_event_regex(event_regex: str) -> str:
@@ -398,6 +427,7 @@ def generate_competition_orc_report(
     report_name: str,
     *,
     event_regex: str = "",
+    levels=(),
     judge_filter: str = "",
     only_rule_errors: bool = False,
     add_additional_analysis: bool = False,
@@ -411,7 +441,12 @@ def generate_competition_orc_report(
         raise ValueError(f"No competition with id {competition_id}.")
 
     segment_rows = session.execute(
-        select(Segment.id, Segment.name)
+        select(
+            Segment.id,
+            Segment.name,
+            Segment.level,
+            Segment.discipline_type_id,
+        )
         .where(Segment.competition_id == competition.id)
         .order_by(Segment.id)
     ).all()
@@ -420,8 +455,16 @@ def generate_competition_orc_report(
 
     selected = [
         (int(segment_id), str(name))
-        for segment_id, name in segment_rows
-        if segment_matches_event_regex(str(name), pattern)
+        for segment_id, name, stored_level, discipline_type_id in segment_rows
+        if segment_passes_orc_filters(
+            str(name),
+            event_regex=pattern,
+            levels=levels,
+            stored_level=stored_level,
+            competition_name=competition.name or "",
+            international=bool(competition.international),
+            discipline_type_id=discipline_type_id,
+        )
     ]
     if not selected:
         raise ValueError("No stored segments match the event filter.")
@@ -494,12 +537,19 @@ def generate_competition_orc_report(
 
 
 def competition_segment_names(session: Session, competition_id: int) -> list[str]:
+    return [row[0] for row in competition_segment_filter_rows(session, competition_id)]
+
+
+def competition_segment_filter_rows(
+    session: Session, competition_id: int
+) -> list[tuple[str, str | None, int | None]]:
+    """Segment name, stored level, and discipline type for one competition."""
     rows = session.execute(
-        select(Segment.name)
+        select(Segment.name, Segment.level, Segment.discipline_type_id)
         .where(Segment.competition_id == int(competition_id))
         .order_by(Segment.id)
     ).all()
-    return [str(row[0]) for row in rows]
+    return [(str(name), level, discipline_type_id) for name, level, discipline_type_id in rows]
 
 
 def competition_judge_names(session: Session, competition_id: int) -> list[str]:

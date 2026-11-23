@@ -1219,6 +1219,7 @@ def extract_judge_scores(
     competition_start_date=None,
     competition_end_date=None,
     competition_year=None,
+    level_filter=None,
 ):
     if isFSM:
         (elements_per_skater, pcs_per_skater, skater_details, event_name) = parse_scores(
@@ -1239,6 +1240,11 @@ def extract_judge_scores(
         )
     if not re.match(event_regex, event_name):
         return (event_name, None, None, None, [], [], [])
+    if level_filter:
+        from segment_level import event_name_matches_levels
+
+        if not event_name_matches_levels(event_name or "", level_filter):
+            return (event_name, None, None, None, [], [], [])
 
     panel_judge_count = len(judges)
     judges = infer_panel_judge_names_from_parsed_scores(
@@ -1917,7 +1923,12 @@ def printToExcel(
         current_row = current_row + 1
     cell_end_errors_section = current_row
 
-    current_row += 2
+    # The blank row after the last anomaly stays inside the COUNTIF range.
+    # SUMMARY occupies the next row, immediately above the per-judge header,
+    # so judge rows and the summary-sheet formulas stay on the same cells.
+    current_row += 1
+    sheet.cell(current_row, 1, value="SUMMARY").font = bold
+    current_row += 1
     sheet.cell(current_row, 1, value="Judge").font = bold
     sheet.cell(current_row, 1).font = Font(bold=True)
     sheet.cell(current_row, 2, value="# of Anomalies").font = bold
